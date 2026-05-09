@@ -1,0 +1,27 @@
+{
+  "name": "dubbing-pipeline",
+  "version": "1.0.0",
+  "description": "Automated localization pipeline for wellness video courses. Takes original audio/script in English and produces dubbed audio tracks in 7 target languages: **DE, ES, FR, IT, PL, PT, TR**.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vsevolodzolotko-lang/dubbing-pipeline.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/vsevolodzolotko-lang/dubbing-pipeline/issues"
+  },
+  "homepage": "https://github.com/vsevolodzolotko-lang/dubbing-pipeline#readme",
+  "dependencies": {
+    "dotenv": "^17.4.2"
+  }
+}

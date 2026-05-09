@@ -4,8 +4,8 @@
 
 - [ ] **Day 1** — Environment setup + spike test
   - [ ] n8n instance running locally (Docker)
-  - [ ] ElevenLabs API key validated, voice IDs mapped for all 7 languages
-  - [ ] Claude API key validated, basic completion call working
+  - [x] ElevenLabs API key validated, basic voices call working (`scripts/test_apis.js`)
+  - [x] Claude API key validated, basic completion call working (`scripts/test_apis.js`)
   - [ ] Spike: end-to-end test with a single 30-second transcript segment (EN → DE)
 - [ ] **Days 2–3** — Workflow: Translate
   - [ ] n8n workflow reads source transcript from Google Sheets
