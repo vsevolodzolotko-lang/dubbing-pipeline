@@ -101,3 +101,23 @@ Context: Current content (sleep meditation) has no movement instructions, but fu
 Decision: Build "movement-aware" scaffolding from day 1, even if unused for current content. Tone Analysis always tags segment_type. Synthesize workflow has if-branch for movement segments routing to adaptation logic. Adaptation prompt exists but isn't triggered until movement-tagged segments appear.
 
 Rationale: Adding the branch later means refactoring schema, prompts, workflow nodes — multi-day work. Building scaffolding now is hours, saves weeks later.
+
+---
+
+### 2026-05-10 — TRANSLATE_WORKFLOW_ARCHITECTURE
+
+Context: Workflow_Translate — вибір між N×7 Claude calls vs N calls з JSON output.
+
+Decision: Один Claude call на сегмент повертає всі 7 перекладів як JSON об'єкт.
+
+Rationale: 56 паралельних calls → rate limit 429. 8 calls → стабільно. Claude добре тримає JSON output для 7 мов одночасно.
+
+---
+
+### 2026-05-10 — QUOTE_SANITIZATION
+
+Context: en_text з подвійними лапками ламав JSON response від Claude.
+
+Decision: Заміна " → ' в en_text перед відправкою в Claude (в Prepare and Expand).
+
+Rationale: Лапки в тексті виходять escaped в JSON і ламають parse. Одинарні лапки семантично еквівалентні для медитативного контенту.
