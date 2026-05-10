@@ -1,3 +1,9 @@
 lang,voice_id,voice_name,model,stability,similarity_boost,style,speed,notes
 en,,,,,,,,
-de,a0CA83xXpwCwAaIpZXae,,eleven_multilingual_v2,,,,,
+de,a0CA83xXpwCwAaIpZXae,,eleven_multilingual_v2,0.5,0.75,0,1.0,
+fr,ucMmKRQbfDEYyb2IIGax,,eleven_multilingual_v2,0.5,0.75,0,1.0,
+es,HRi5Prm2B3PevwpDmVLP,,eleven_multilingual_v2,0.5,0.75,0,1.0,
+it,CiwzbDpaN3pQXjTgx3ML,,eleven_multilingual_v2,0.5,0.75,0,1.0,
+pl,uvear2FyfRVNE3AJh2sG,,eleven_multilingual_v2,0.5,0.75,0,1.0,
+pt,nJ5NFqyKb8kn9JBPmo6i,,eleven_multilingual_v2,0.5,0.75,0,1.0,
+tr,ywzrmJ3AgYiLqAeZAGrq,,eleven_multilingual_v2,0.5,0.75,0,1.0,
