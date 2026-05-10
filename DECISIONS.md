@@ -121,3 +121,33 @@ Context: en_text з подвійними лапками ламав JSON response
 Decision: Заміна " → ' в en_text перед відправкою в Claude (в Prepare and Expand).
 
 Rationale: Лапки в тексті виходять escaped в JSON і ламають parse. Одинарні лапки семантично еквівалентні для медитативного контенту.
+
+---
+
+### 2026-05-10 — SYNTHESIZE_WORKFLOW_ARCHITECTURE
+
+Context: Workflow_Synthesize — як обробляти 56 TTS calls (8 сегментів × 7 мов).
+
+Decision: Loop Over Items з batch size 1 + 3s wait між calls. MP3 зберігаються в Google Drive з назвою {segment_id}_{lang}.mp3 в папці audio/sleep_001/.
+
+Rationale: Паралельні calls → "Multiple voice additions/deletions" error від ElevenLabs. Sequential з паузою — стабільно. Google Drive замість локальної папки бо n8n в хмарі.
+
+---
+
+### 2026-05-10 — AUDIO_FILE_NAMING
+
+Context: Конвенція назв для MP3 файлів.
+
+Decision: {segment_id}_{lang}.mp3 — наприклад seg_001_de.mp3. Папка: audio/{lesson_id}/ в Google Drive.
+
+Rationale: Легко парсити назву назад в segment_id і lang для RPP генерації в Week 2.
+
+---
+
+### 2026-05-10 — DRIVE_OVERWRITE_NOT_SUPPORTED
+
+Context: Google Drive Upload нода в n8n не має "overwrite if exists" опції.
+
+Decision: Перед повторним запуском Synthesize — вручну видаляти папку sleep_001 і створювати заново. В Week 4 додати автоматичний Search → Delete → Upload.
+
+Rationale: Прийнятно для поточного обсягу (8 сегментів). Для production потрібен upsert.
