@@ -79,6 +79,17 @@ try {
   bail(1, e);
 }
 
+let deRules;
+try {
+  const locRules = fs.readFileSync('docs/localization_rules.md', 'utf8');
+  const match = locRules.match(/### German \(de\)([\s\S]*?)(?=\n### |\n## |$)/);
+  if (!match) throw new Error('German (de) section not found in localization_rules.md');
+  deRules = match[1].trim();
+  ok(`DE localization rules loaded (${deRules.length} chars)`);
+} catch (e) {
+  bail(1, e);
+}
+
 let deVoiceId, deModel, deStability, deSimilarity, deStyle, deSpeed;
 try {
   const rows = parseCSV(fs.readFileSync('sheets/voices.csv', 'utf8'));
@@ -154,7 +165,9 @@ try {
     "- If the source has no explicit pause markers but a sentence break feels long/contemplative, you MAY add '...' to preserve breathing rhythm\n" +
     '- Use natural German length, do NOT artificially shorten or lengthen\n' +
     "- Write numbers as words (e.g., 'drei' not '3')\n" +
-    '- Output ONLY the German translation, no preamble, no commentary';
+    '- Output ONLY the German translation, no preamble, no commentary' +
+    '\n\n=== LOCALIZATION RULES (target: German) ===\n' + deRules +
+    '\n=== END LOCALIZATION RULES ===';
 
   const data = await fetchJSON('https://api.anthropic.com/v1/messages', {
     method: 'POST',

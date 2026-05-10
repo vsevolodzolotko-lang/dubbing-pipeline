@@ -6,7 +6,7 @@
   - [ ] n8n instance running locally (Docker)
   - [x] ElevenLabs API key validated, basic voices call working (`scripts/test_apis.js`)
   - [x] Claude API key validated, basic completion call working (`scripts/test_apis.js`)
-  - [ ] Spike: end-to-end test with a single 30-second transcript segment (EN → DE)
+  - [x] Spike: end-to-end test with a single 60-second transcript segment (EN → DE) — DE is 15.9% longer (79.4s vs 68.5s); speed tuning needed
 - [ ] **Days 2–3** — Workflow: Translate
   - [ ] n8n workflow reads source transcript from Google Sheets
   - [ ] Claude node: tone analysis prompt → structured JSON output
