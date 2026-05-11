@@ -1,0 +1,386 @@
+{
+  "name": "W1 - STT_and_Segment",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "8e83975b-a2bc-4131-b5ad-37bae01c0143",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "1gDRuwWEtfeHcQwEjEMbg4cQOHZQC_nYR",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "id": "5ea01ac4-7c03-4e99-9b7f-0de20e584330",
+      "name": "Download Audio",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        208,
+        0
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "MoWG4XRaoJGU18eu",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.elevenlabs.io/v1/speech-to-text",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "xi-api-key",
+              "value": "{{ $credentials.apiKey }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model_id",
+              "value": "scribe_v1"
+            },
+            {
+              "name": "timestamps_granularity",
+              "value": "word"
+            },
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "data"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0d6983b5-91ea-4c19-a859-40c7d4116101",
+      "name": "Scribe STT",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "OOMqSSnHPZPvS7PK",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst words = data.words || [];\nconst lesson_id = 'sleep_001';\n\nif (!words.length) throw new Error('No words returned from Scribe');\n\nconst MAX_DURATION = 25;\nconst MIN_PAUSE = 0.3;\n\nconst segments = [];\nlet currentWords = [];\n\nfunction flushSegment() {\n  if (!currentWords.length) return;\n  const text = currentWords.map(w => w.text.trim()).join(' ').replace(/\\s+/g, ' ').trim();\n  const start = currentWords[0].start;\n  const end = currentWords[currentWords.length - 1].end;\n  segments.push({ text, start, end, duration: end - start });\n  currentWords = [];\n}\n\nfor (let i = 0; i < words.length; i++) {\n  const word = words[i];\n  const nextWord = words[i + 1];\n\n  currentWords.push(word);\n\n  const currentDuration = word.end - currentWords[0].start;\n  const endsWithPunct = /[.!?]['\"]?$/.test(word.text.trim());\n  const pause = nextWord ? (nextWord.start - word.end) : 1;\n  const isLastWord = !nextWord;\n\n  // Break ONLY on sentence boundary\n  const isSentenceBoundary = endsWithPunct || isLastWord;\n\n  // Force break if way too long (hard cap at MAX_DURATION)\n  const isTooLong = currentDuration >= MAX_DURATION;\n\n  if (isSentenceBoundary || isTooLong) {\n    flushSegment();\n  }\n}\n\n// Merge segments shorter than 3s with previous\nconst merged = [];\nfor (let i = 0; i < segments.length; i++) {\n  const seg = segments[i];\n  if (seg.duration < 3 && merged.length > 0) {\n    const prev = merged[merged.length - 1];\n    prev.text = prev.text + ' ' + seg.text;\n    prev.end = seg.end;\n    prev.duration = prev.end - prev.start;\n  } else {\n    merged.push({ ...seg });\n  }\n}\n\nreturn merged.map((seg, i) => ({\n  json: {\n    segment_id: lesson_id + '_seg_' + String(i + 1).padStart(3, '0'),\n    lesson_id,\n    en_text: seg.text,\n    en_start: parseFloat(seg.start.toFixed(3)),\n    en_end: parseFloat(seg.end.toFixed(3)),\n    en_duration: parseFloat(seg.duration.toFixed(3)),\n    de_text: '',\n    es_text: '',\n    fr_text: '',\n    pl_text: '',\n    pt_text: '',\n    it_text: '',\n    tr_text: '',\n    status: 'pending',\n    notes: '',\n  }\n}));"
+      },
+      "id": "6b5c97ce-a22f-4319-8039-863b8146373b",
+      "name": "Segment Transcript",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        608,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "segments",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "segment_id": "={{ $json.segment_id }}",
+            "en_text": "={{ $json.en_text }}",
+            "en_start": "={{ $json.en_start }}",
+            "en_end": "={{ $json.en_end }}",
+            "en_duration": "={{ $json.en_duration }}",
+            "status": "pending"
+          },
+          "matchingColumns": [
+            "segment_id"
+          ],
+          "schema": [
+            {
+              "id": "segment_id",
+              "displayName": "segment_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "en_text",
+              "displayName": "en_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "en_start",
+              "displayName": "en_start",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "en_end",
+              "displayName": "en_end",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "en_duration",
+              "displayName": "en_duration",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "de_text",
+              "displayName": "de_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "es_text",
+              "displayName": "es_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "fr_text",
+              "displayName": "fr_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "pl_text",
+              "displayName": "pl_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "pt_text",
+              "displayName": "pt_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "it_text",
+              "displayName": "it_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "tr_text",
+              "displayName": "tr_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "notes",
+              "displayName": "notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "target_lang",
+              "displayName": "target_lang",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "translated_text",
+              "displayName": "translated_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "segment_type",
+              "displayName": "segment_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "movement",
+              "displayName": "movement",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "undefined_text",
+              "displayName": "undefined_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "a3e280c7-9ef7-457b-a16c-c52849d2c1d1",
+      "name": "Write to Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        800,
+        0
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Download Audio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Audio": {
+      "main": [
+        [
+          {
+            "node": "Scribe STT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scribe STT": {
+      "main": [
+        [
+          {
+            "node": "Segment Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Segment Transcript": {
+      "main": [
+        [
+          {
+            "node": "Write to Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "6b99a3ea-a7f2-4551-95c0-6e97392437d5",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "c12dc3211079879af783deee1a944ea9622a2040afb6e429392b5bbe95dd7037"
+  },
+  "id": "wb3JGXcIgU4iI1Hb",
+  "tags": []
+}
