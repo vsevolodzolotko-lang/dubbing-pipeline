@@ -18,6 +18,9 @@
   - [ ] ElevenLabs node: TTS call per segment × 7 languages
   - [ ] Audio files saved to `/tmp` with structured naming (`{lesson}_{segment}_{lang}.mp3`)
   - [ ] Status column updated in Sheets on success/failure
+  - [x] Cascade Positioning Code Node (mock-validated)
+  - [ ] Інтегрувати Cascade у Workflow_Synthesize після Loop Over Items (Aggregate → Get Rows → Cascade → Update Rows)
+  - [ ] Estimate Duration Code Node всередині Loop (для real_duration_sec)
 - [ ] **Days 6–7** — Integration tests
   - [ ] Full batch run on 3 real course segments
   - [ ] Validate audio quality and translation accuracy spot-check
