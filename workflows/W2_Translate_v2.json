@@ -1,0 +1,560 @@
+{
+  "name": "W2 - Translate v2",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "2436b635-3790-4fc2-9bc0-c730a6dc8488",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        1824,
+        32
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 986062273,
+          "mode": "list",
+          "cachedResultName": "config",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU/edit#gid=986062273"
+        },
+        "options": {}
+      },
+      "id": "0abc1e8b-e776-4d2a-8e14-41998238e010",
+      "name": "Read Config",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        2032,
+        32
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "segments",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU/edit#gid=0"
+        },
+        "options": {}
+      },
+      "id": "7c70259e-15d3-42cd-bb10-5090b80bdc17",
+      "name": "Read Pending Segments",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        2224,
+        32
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const segments = $input.all()\n  .filter(i => i.json.segment_id && i.json.en_text)\n  .map(i => ({ segment_id: i.json.segment_id, en_text: i.json.en_text }));\nif (segments.length === 0) throw new Error('No segments to analyze');\nconst sysPrompt = 'Classify each wellness/meditation segment. Return ONLY a JSON object where each key is segment_id and value has: segment_type (narrative|instruction|movement), movement_keywords (comma-sep if movement, else empty string), key_concepts (2-4 comma-sep themes). No markdown, no preamble.';\nreturn [{ json: { model: 'claude-sonnet-4-5', max_tokens: 2000, system: sysPrompt, messages: [{ role: 'user', content: 'Segments:\\n\\n' + JSON.stringify(segments, null, 2) }] } }];"
+      },
+      "id": "tone-prep-node-001",
+      "name": "Prepare Tone Analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2224,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "anthropicApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "tone-claude-node-001",
+      "name": "Claude Tone Analysis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2432,
+        -240
+      ],
+      "credentials": {
+        "anthropicApi": {
+          "id": "OX04ALIGnl0azgXe",
+          "name": "Anthropic account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "let toneMap = {};\ntry {\n  let raw = $input.first().json.content?.[0]?.text?.trim() || '{}';\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  if (!match) throw new Error('No JSON in response');\n  toneMap = JSON.parse(match[0]);\n} catch (e) {\n  throw new Error('Tone parse failed: ' + e.message);\n}\nif (Object.keys(toneMap).length === 0) throw new Error('Tone analysis returned empty object');\nreturn Object.entries(toneMap).map(([segment_id, meta]) => ({\n  json: { segment_id, segment_type: meta.segment_type || 'narrative', movement_keywords: meta.movement_keywords || '', key_concepts: meta.key_concepts || '' }\n}));"
+      },
+      "id": "tone-parse-node-001",
+      "name": "Parse Tone Map",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "segments",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "segment_id": "={{ $json.segment_id }}",
+            "segment_type": "={{ $json.segment_type }}",
+            "movement_keywords": "={{ $json.movement_keywords }}"
+          },
+          "matchingColumns": [
+            "segment_id"
+          ],
+          "schema": [
+            {
+              "id": "segment_id",
+              "displayName": "segment_id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "segment_type",
+              "displayName": "segment_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "movement_keywords",
+              "displayName": "movement_keywords",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "tone-update-node-001",
+      "name": "Update Tone Columns",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        2848,
+        -240
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const configItems = $('Read Config').all();\nconst configMap = {};\nconfigItems.forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });\nconst tov = configMap['tone_of_voice'] || '';\n\nconst toneItems = $('Parse Tone Map').all();\nconst toneMap = {};\ntoneItems.forEach(i => { if (i.json.segment_id) toneMap[i.json.segment_id] = i.json; });\n\nreturn $('Read Pending Segments').all()\n  .filter(i => i.json.segment_id && i.json.en_text)\n  .map(i => {\n    const tone = toneMap[i.json.segment_id] || {};\n    const parts = [\n      'Translate the given English text into 7 languages.',\n      'Return ONLY a valid JSON object with keys: de, es, fr, pl, pt, it, tr.',\n      'Informal address in all languages (du/tu/ty/sen, never formal).',\n      \"Preserve '...' and '\\u2014' as pause timing cues. No preamble, no markdown.\",\n    ];\n    if (tov) parts.push('\\n=== TONE OF VOICE ===\\n' + tov + '\\n=== END TONE OF VOICE ===');\n    if (tone.segment_type) parts.push('Segment type: ' + tone.segment_type);\n    if (tone.key_concepts) parts.push('Key concepts: ' + tone.key_concepts);\n    const enText = (i.json.en_text || '').replace(/\"/g, \"'\");\n    return {\n      json: {\n        segment_id: i.json.segment_id,\n        en_text: enText,\n        en_duration_sec: i.json.en_duration_sec,\n        claude_body: {\n          model: 'claude-sonnet-4-5',\n          max_tokens: 2000,\n          system: parts.join('\\n'),\n          messages: [{ role: 'user', content: enText }],\n        },\n      },\n    };\n  });"
+      },
+      "id": "a89b4073-024e-47b8-bfd1-828cf8c1ed7f",
+      "name": "Prepare and Expand",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2432,
+        32
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2640,
+        32
+      ],
+      "id": "11a1444a-ba4a-4f77-a44a-da5dc633927f",
+      "name": "Wait",
+      "webhookId": "3fe3dde2-e6b6-45fd-bcce-422e713834fa"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "anthropicApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.claude_body) }}",
+        "options": {}
+      },
+      "id": "389f82ef-9793-4101-ba54-e8cbb57bb8f9",
+      "name": "Claude Translate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2848,
+        32
+      ],
+      "executeOnce": false,
+      "credentials": {
+        "anthropicApi": {
+          "id": "OX04ALIGnl0azgXe",
+          "name": "Anthropic account 2"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const results = [];\nconst preparedItems = $('Prepare and Expand').all();\n\nfor (let i = 0; i < $input.all().length; i++) {\n  const claudeResp = $input.all()[i].json;\n  const sourceItem = preparedItems[i]?.json || {};\n\n  let translations = {};\n  try {\n    let text = claudeResp.content?.[0]?.text?.trim() || '{}';\n    text = text.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n    const match = text.match(/\\{[\\s\\S]*\\}/);\n    if (match) translations = JSON.parse(match[0]);\n  } catch(e) {\n    console.log('Parse error for segment:', sourceItem.segment_id, e.message);\n  }\n\n  results.push({ json: {\n    segment_id: sourceItem.segment_id,\n    de_text: translations.de || '',\n    es_text: translations.es || '',\n    fr_text: translations.fr || '',\n    pl_text: translations.pl || '',\n    pt_text: translations.pt || '',\n    it_text: translations.it || '',\n    tr_text: translations.tr || '',\n  }});\n}\nreturn results;"
+      },
+      "id": "6aafe771-c8fa-4f6d-9f16-d81f4f6d15f0",
+      "name": "Extract Translations",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3056,
+        32
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "segments",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {
+            "de_text": "=={{ $json.de }}",
+            "es_text": "=={{ $json.es }}",
+            "fr_text": "=={{ $json.fr }}",
+            "pl_text": "=={{ $json.pl }}",
+            "pt_text": "=={{ $json.pt }}",
+            "it_text": "=={{ $json.it }}",
+            "tr_text": "=={{ $json.tr }}",
+            "segment_id": "=={{ $json.segment_id }}"
+          },
+          "matchingColumns": [
+            "segment_id"
+          ],
+          "schema": [
+            {
+              "id": "segment_id",
+              "displayName": "segment_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "de_text",
+              "displayName": "de_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "es_text",
+              "displayName": "es_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "fr_text",
+              "displayName": "fr_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "pl_text",
+              "displayName": "pl_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "pt_text",
+              "displayName": "pt_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "it_text",
+              "displayName": "it_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "tr_text",
+              "displayName": "tr_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "segment_type",
+              "displayName": "segment_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "2211bafa-e1a6-4c91-8637-76a1af1d0bde",
+      "name": "Update Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        3264,
+        32
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Config": {
+      "main": [
+        [
+          {
+            "node": "Read Pending Segments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Pending Segments": {
+      "main": [
+        [
+          {
+            "node": "Prepare Tone Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Tone Analysis": {
+      "main": [
+        [
+          {
+            "node": "Claude Tone Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude Tone Analysis": {
+      "main": [
+        [
+          {
+            "node": "Parse Tone Map",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Tone Map": {
+      "main": [
+        [
+          {
+            "node": "Update Tone Columns",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Tone Columns": {
+      "main": [
+        [
+          {
+            "node": "Prepare and Expand",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare and Expand": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Claude Translate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude Translate": {
+      "main": [
+        [
+          {
+            "node": "Extract Translations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Translations": {
+      "main": [
+        [
+          {
+            "node": "Update Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "instanceId": "c12dc3211079879af783deee1a944ea9622a2040afb6e429392b5bbe95dd7037"
+  },
+  "tags": []
+}
