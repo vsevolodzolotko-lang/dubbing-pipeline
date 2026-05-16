@@ -17,14 +17,15 @@
 - [ ] Translation prompt отримує tone_map як додатковий контекст
 
 ### Days 4-5 — Adaptation Loop у Translate
-- [ ] Створити prompts/adaptation.md — для скорочення тексту під timing budget
-- [ ] У Workflow_Translate після перекладу: estimate duration (за CPS з voices або фіксованими langs ratio)
-- [ ] Якщо estimated > en_duration_sec * 1.05 → loop adaptation:
+- [x] Створити prompts/adaptation.md — для скорочення тексту під timing budget
+- [x] У Workflow_Translate після перекладу: estimate duration (за CPS з voices або фіксованими langs ratio)
+- [x] Якщо estimated > en_duration_sec * 1.05 → loop adaptation:
   - Attempt 1: легке скорочення (cut filler words)
   - Attempt 2: середнє скорочення (rephrase shorter)
   - Attempt 3: максимальне скорочення (preserve only key meaning)
   - Між кожною спробою — re-estimate
-- [ ] Записати final translation + adaptation_attempts count у Sheet
+- [x] Записати final translation + adaptation_attempts count у Sheet
+- NOTE: реалізовано як окрема "Adapt Translations" нода (Code node з helpers.httpRequest). Вставлена між "Extract Translations" і "Update Sheet" у W2_Translate_v2.json. Код у code_nodes/adapt_translations.js.
 
 ### Days 6-7 — Synthesize з strict timing
 - [ ] Workflow_Synthesize (переробити v2):

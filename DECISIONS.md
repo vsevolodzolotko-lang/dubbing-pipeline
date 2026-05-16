@@ -245,3 +245,15 @@ Decision: Всі пункти закриті. Підсумок:
 - Sheet localizations: очищено від тестових даних.
 
 Rationale: Day 2 можна починати з чистого стану. Жодних open issues не виявлено.
+
+---
+
+### 2026-05-16 — ADAPTATION_LOOP_IMPLEMENTATION
+
+Context: Days 4-5 — реалізація adaptation loop для скорочення перекладів що не влазять у EN timing budget.
+
+Decision: Реалізовано як "Adapt Translations" Code node у W2_Translate_v2. Вставлений між "Extract Translations" і "Update Sheet". Estimates duration через `chars / LANG_CPS[lang]` (константи per-language). Якщо estimated > en_duration * 1.05 — до 3 спроб адаптації через `this.helpers.httpRequest` (не окрема HTTP нода). Виводить `{lang}_text` (final) і `{lang}_adaptation_attempts` (0 якщо адаптація не потрібна).
+
+CPS константи: de=13, es=17, fr=15, pl=14, pt=16, it=16, tr=14.
+
+Rationale: Один self-contained Code node замість трьох окремих нод (estimate → IF → Claude → loop back) спрощує граф. `helpers.httpRequest` дозволяє async loop в межах однієї ноди без n8n loop workarounds. Per-language tracking дає прозорість яка саме мова потребувала адаптації.
