@@ -41,6 +41,40 @@
   Duration вимірюється з PCM bytes (без ffprobe). Silence padding через Buffer.alloc в JS.
   Потрібно: додати drive_output_folder_id в config sheet.
 
+### Days 6-7b — Synthesize v3 (smart timing)
+
+Архітектурне розширення поверх v2 після аналізу реального прогону sleep_001. v2 strict-timing душить там де можна "вдихнути", а адаптація в Translate інколи занадто агресивна (real_duration / en_duration падає до 0.58–0.85, що дає неприродну тишу).
+
+**Effective slot per segment** (computed in Expand TTS Jobs):
+- `gap_after = next.en_start_sec - this.en_end_sec` (0 для останнього)
+- `max_borrowable = max(0, min(gap_after - min_inter_segment_gap_sec, max_borrow_per_segment_sec))`
+- `effective_slot = en_duration_sec + max_borrowable`
+
+**Synthesize flow (per segment × lang)**:
+- [ ] TTS at speed 1.0, виміряти `real_duration_sec` з PCM bytes
+- [ ] Branch на основі `real_duration` vs slot:
+  - **`real ≤ en_duration`** → padding 20/80 (lead/tail), DONE
+  - **`en_duration < real ≤ effective_slot`** → BREATH BORROW: accept TTS як є, без padding/trim, записати `borrowed_sec = real − en_duration`
+  - **`real > effective_slot`** → Adapt shorten loop (single-segment Claude call):
+    - Attempt 1 (light): прибрати filler/redundancies
+    - Attempt 2 (medium): rephrase коротше зі збереженням concepts
+    - Attempt 3 (max): compress до core meaning
+    - Між кожною спробою re-TTS at 1.0 і re-check vs effective_slot
+  - **IF after 3 adapt attempts still > effective_slot** → speed AS LAST RESORT:
+    - speed 1.10 → re-TTS
+    - speed 1.15 → re-TTS
+    - Still over → `needs_attention=true`, hard truncate to fit
+- [ ] **Expansion loop** (after fit-check): IF `real_duration < en_duration × expansion_threshold` → single-segment Claude expand call, max 2 attempts. Якщо нова версія overshoots `effective_slot` → revert до попередньої коротшої.
+- [ ] **Silence distribution 20/80**: коли `real ≤ en_duration`, розподілити `padding = en_duration − real`:
+  - Default: `silence_lead_ratio × padding` на lead, решта на tail
+  - Exception: якщо natural EN gap (lead_silence_sec з prev's en_end до this en_start) > 0 — використати його як lead (зберігає timeline alignment), всю padding в tail
+- [ ] **Output WAV**: `[lead_silence] + [TTS audio] + [tail_silence]`, total = `max(en_duration_sec, en_duration_sec + borrowed_sec)`
+- [ ] **Записати в localizations**: `real_duration_sec`, `lead_silence_sec`, `tail_silence_sec`, `borrowed_sec`, `final_speed`, `expansion_attempts`, `shorten_retries_in_synthesize`, `needs_attention`
+
+**Config keys involved**: `min_inter_segment_gap_sec` (existing, реюз для borrow buffer), `max_borrow_per_segment_sec` (new), `expansion_threshold` (new), `silence_lead_ratio` (new).
+
+**Sheet changes**: rename `trailing_silence_sec` → `tail_silence_sec`; add `borrowed_sec`, `expansion_attempts`, `shorten_retries_in_synthesize`.
+
 ---
 
 ## Week 2 — Drive trigger + Atomic regenerate + Polish
