@@ -385,3 +385,17 @@ Decision: Розподіл padding'у: **20% перед TTS** (lead), **80% пі
 Conflict with prior decisions: переписує неявне правило з SLOT_TIMELINE_EACH_SEGMENT_OWNS_LEAD_SILENCE (2026-05-16) — там лише EN gap йшов у lead. Тепер дозволено додавати ще padding до lead якщо EN gap = 0. Також впливає на сенс колонки `lead_silence_sec` — раніше це строго EN gap, тепер може включати додаткові 20% padding.
 
 Rationale: Початкова тиша (перед TTS) природня — наратор приготовлюється, робить вдих. Кінцева — дихальний простір після фрази. 80% на кінець бо людина більше переносить тишу в кінці фрази ніж на початку (gestalt closure: завершення думки). 20% lead додає природність уже коротких сегментів типу "in" / "out" — без цього вони звучать як "вистрелили" словом одразу після попереднього сегменту.
+
+---
+
+### 2026-05-17 — DRIFT_FIX_BRANCH_ON_EN_DURATION
+
+Context: Перший прогон Synthesize v3 на sleep_001 виявив систематичний дрифт. У localizations 10 рядків мали `borrowed_sec` НЕГАТИВНИМ (від −0.009 до −0.255), що означало "файл коротший за слот" — пряма ознака дрифту. Сумарна тривалість дубляжу на 0.125–0.353с коротша за EN total залежно від мови. Для 12-хвилинного уроку це проектувалось у ~4с дрифт для DE.
+
+Корінь: гілкування у `Check Timing + Pad` йшло по `realDur > tts_budget_sec`, а має йти по `realDur > en_duration_sec`. Steal-сценарій (де `tts_budget < en_duration`) хибно потрапляв у borrow-гілку, отримував від'ємний `borrowed_sec` і файл виходив коротшим за слот.
+
+Decision: Гілкування тепер по `real ≤ en_duration_sec`. У pad-гілці завжди file = `naturalLead + en_duration_sec` (стала довжина слоту незалежно від `real`). Trail_steal перестав бути окремою змінною в padding-обчисленні — він вже включений в `en_duration - real` природньо. Borrow-гілка спрацьовує лише коли `real > en_duration` (реальний overrun) і завжди `borrowed_sec ≥ 0`.
+
+Також виправлено side-bug: у W3 shorten-loop Claude інколи над-агресивно скорочував (pt_seg_001: 4.48с → 3.11с). Додано explicit floor `targetCharsLow = floor(targetChars × 0.85)` у промпт + code-side reject. Зняв guard `shortenRetries === 0` з expansion loop — тепер expansion може відновлювати над-скорочений текст незалежно від того чи shorten перед тим спрацював.
+
+Rationale: Drift у piped'і це не "feature, accept it" — це баг, що пропорційно росте з довжиною уроку. Branch на `en_duration` робить структуру файлу деtermined: для будь-якого `real ≤ enDur` файл = naturalLead + enDur. Borrow стає семантично коректним (тільки коли є overrun у фактичну тишу EN). Single-segment shorten + expansion разом утворюють Goldilocks-loop, що знаходить правильну довжину навіть коли Claude промахується в одну зі сторін.

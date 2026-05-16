@@ -118,8 +118,10 @@ const ATTEMPT_DESCRIPTIONS = {
 };
 
 async function claudeShorten(currentText, realSec, level) {
-  const minChars    = Math.floor(currentText.length * MIN_RETAIN);
-  const targetChars = Math.floor(slot * (LANG_CPS[lang] || 15));
+  const minChars       = Math.floor(currentText.length * MIN_RETAIN);
+  const targetChars    = Math.floor(slot * (LANG_CPS[lang] || 15));
+  const targetCharsLow = Math.floor(targetChars * 0.85);
+  const floorChars     = Math.max(minChars, targetCharsLow);
   const systemPrompt = `You are shortening a translated meditation/wellness script segment to fit a tight audio time slot.
 
 The current translation produced TTS audio that exceeds the available slot by a small margin. Your job: shorten the translation just enough to fit, while preserving meaning and tone.
@@ -127,13 +129,14 @@ The current translation produced TTS audio that exceeds the available slot by a 
 ORIGINAL EN: ${enRef}
 CURRENT TRANSLATION (${lang}): ${currentText}
 TARGET LENGTH: ~${targetChars} characters
+MINIMUM ALLOWED LENGTH: ${floorChars} characters — do NOT go below this
 ATTEMPT LEVEL: ${level} — ${ATTEMPT_DESCRIPTIONS[level]}
 
 TONE OF VOICE:
 ${TOV}
 
 RULES:
-1. Stay close to target length (within ±10%).
+1. Stay within ±10% of target length. Do NOT undershoot — removing too much breaks the meditation rhythm.
 2. Maintain ToV warmth and rhythm.
 3. Preserve any ellipsis (...) or em-dash (—) timing markers.
 4. Never add new filler ("really", "very", etc.) — those break tone.
@@ -144,7 +147,8 @@ RULES:
 OUTPUT: ONLY the shortened translation text. No commentary, no quotes.`;
 
   const result = await callClaude.call(this, systemPrompt, currentText);
-  if (!result || result.length < minChars) return currentText;
+  // Reject if Claude over-shortened (will be recovered by expansion loop)
+  if (!result || result.length < floorChars) return currentText;
   return result;
 }
 
@@ -231,8 +235,11 @@ if (pcmDuration(pcm) > slot * BUDGET_FACTOR) {
   pcm = pcm.subarray(0, truncBytes);
 }
 
-// === Expansion loop (only when shorten/speed never fired) ===
-if (shortenRetries === 0 && finalSpeed === 1.0 && !needsAttention) {
+// === Expansion loop ===
+// Fires when real audio is too short relative to en_duration. Triggered regardless
+// of whether shorten loop ran — over-shortened text can be recovered here.
+// Bounded by 2 attempts; revert if a candidate overshoots slot.
+if (finalSpeed === 1.0 && !needsAttention) {
   let lastText = text;
   let lastPcm  = pcm;
   while (expansionAttempts < 2 && pcmDuration(lastPcm) < enDur * expThreshold) {
@@ -249,23 +256,26 @@ if (shortenRetries === 0 && finalSpeed === 1.0 && !needsAttention) {
   pcm  = lastPcm;
 }
 
-// === Compute lead / tail silence ===
+// === Compute lead / tail silence (drift-free: file = naturalLead + enDur unless borrow) ===
 const realDur = pcmDuration(pcm);
 let leadSec, tailSec, borrowedSec;
 
-if (realDur <= budget) {
-  // Within audio budget — pad with silence
-  const padding = budget - realDur;
+if (realDur <= enDur) {
+  // Audio fits within EN slot — pad to en_duration with silence.
+  // File size is constant per slot: naturalLead + enDur, regardless of how much audio is needed.
+  const padding = enDur - realDur;
   borrowedSec = 0;
   if (naturalLead > 0) {
+    // Preserve natural EN gap as lead; ALL padding goes to tail (timeline alignment).
     leadSec = naturalLead;
-    tailSec = padding + trailSteal;
+    tailSec = padding;
   } else {
+    // No natural lead — distribute padding 20/80 lead/tail.
     leadSec = leadRatio * padding;
-    tailSec = (1 - leadRatio) * padding + trailSteal;
+    tailSec = (1 - leadRatio) * padding;
   }
 } else {
-  // Borrow case: budget < real <= slot (only reachable when borrow case; steal case can't reach here)
+  // real > en_duration — borrow into next gap (drift accepted as feature, not bug).
   borrowedSec = realDur - enDur;
   leadSec     = naturalLead;
   tailSec     = 0;
