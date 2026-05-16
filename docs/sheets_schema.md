@@ -46,11 +46,13 @@ Run-time table. Populated by Workflow_Synthesize. One row per segment × languag
 | lang | text | Language code, e.g. `de` |
 | text_translated | text | Final text used for TTS (copy from segments after adaptation) |
 | en_start_sec | number | Copy from segments for convenience |
-| en_duration_sec | number | Copy from segments — this is the timing budget |
-| real_duration_sec | number | Actual TTS output duration before padding |
+| en_duration_sec | number | Copy from segments — this is the timing budget for audio content |
+| lead_silence_sec | number | Silence prepended at start of file = `en_start_sec - prev_en_end_sec` (or `en_start_sec` for first segment). Captures inter-segment pauses so concat reproduces EN timeline. |
+| real_duration_sec | number | Actual TTS output duration (no padding/silence) |
+| final_duration_sec | number | Total file duration = `lead_silence_sec + en_duration_sec`. Files concatenated end-to-end reproduce original EN timeline. |
 | final_speed | number | Speed used for TTS: `1.0` / `1.1` / `1.15` |
-| needs_attention | boolean | `true` if audio still exceeds `en_duration_sec` after max speed |
-| audio_drive_file_id | text | Google Drive file ID of the output mp3 |
+| needs_attention | boolean | `true` if audio was hard-truncated (TTS still over budget after speed 1.15) |
+| audio_drive_file_id | text | Google Drive file ID of the output wav |
 
 ---
 

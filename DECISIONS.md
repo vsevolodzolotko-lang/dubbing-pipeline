@@ -266,4 +266,16 @@ Context: Days 6-7 — реалізація Synthesize з strict timing. Потр
 
 Decision: Запитувати TTS у форматі `pcm_22050` (raw PCM, 22050Hz mono 16-bit). Тривалість = `bytes.length / (22050 × 2)`. Silence padding = `Buffer.alloc(padBytes, 0)` в Code node. WAV будується вручну (44-byte header + PCM). Результат — `.wav` файл у Drive замість `.mp3`.
 
-Rationale: PCM формат дає точне вимірювання тривалості без зовнішніх інструментів. `Buffer` доступний у n8n Code nodes (Node.js runtime). WAV header — детерміністичний і тривіальний для побудови вручну. `.wav` прийнятний для DAW та аудіоплеєрів. Альтернатива (mp3 + оцінка за розміром файлу) неточна через VBR/CBR варіацію. (estimate → IF → Claude → loop back) спрощує граф. `helpers.httpRequest` дозволяє async loop в межах однієї ноди без n8n loop workarounds. Per-language tracking дає прозорість яка саме мова потребувала адаптації.
+Rationale: PCM формат дає точне вимірювання тривалості без зовнішніх інструментів. `Buffer` доступний у n8n Code nodes (Node.js runtime). WAV header — детерміністичний і тривіальний для побудови вручну. `.wav` прийнятний для DAW та аудіоплеєрів. Альтернатива (mp3 + оцінка за розміром файлу) неточна через VBR/CBR варіацію.
+
+---
+
+### 2026-05-16 — SLOT_TIMELINE_EACH_SEGMENT_OWNS_LEAD_SILENCE
+
+Context: Перший прогін Synthesize виявив що сума всіх localized сегментів не дорівнює тривалості оригінального EN-аудіо. Зокрема: pause перед першим словом (lead silence на початку lesson) і paused між сегментами не потрапляли в жоден файл — концатенація з'їжджала по часу.
+
+Decision: Кожен сегмент-файл "володіє" silence-проміжком ПЕРЕД своїми словами. Формат файлу: `[lead_silence_sec of zeros] + [exactly en_duration_sec of audio]`. Де `lead_silence_sec = en_start_sec - prev_en_end_sec` (або просто `en_start_sec` для першого сегменту). Це гарантує що concat файлів end-to-end відтворює оригінальний EN-таймлайн до `en_end_sec` останнього сегменту.
+
+Також додано **hard truncate**: якщо після Claude adapt + speed 1.10 + 1.15 переклад все ще не влазить — обрізаємо PCM до `en_duration_sec` (може обрізати посередині слова) і ставимо `needs_attention=true` для ручного перегляду.
+
+Rationale: Без lead silence файли тільки локально влазять у свої en_duration_sec, але концатенація не реконструює оригінальний таймлайн. Захоплення pauses ПЕРЕД сегментом (а не ПІСЛЯ) — натуральніше: pause "належить" наступному сегменту як "вдих перед фразою". Hard truncate — компроміс strict timing: краще різке зрізання з needs_attention flag для review ніж тихе зсунення. Альтернатива — додаткові speed steps 1.20/1.25 — звучить штучно для медитативного контенту. (estimate → IF → Claude → loop back) спрощує граф. `helpers.httpRequest` дозволяє async loop в межах однієї ноди без n8n loop workarounds. Per-language tracking дає прозорість яка саме мова потребувала адаптації.

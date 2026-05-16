@@ -1,29 +1,33 @@
 // Strict timing: measures PCM duration, re-adapts text via Claude if over budget,
-// then (only if still over) adjusts ElevenLabs speed. Pads with silence, builds WAV.
+// adjusts ElevenLabs speed only as last resort, hard-truncates if still over,
+// prepends lead silence (so concatenated files match original timeline), builds WAV.
 //
 // Input:  binary PCM from ElevenLabs TTS (output_format=pcm_22050, responseFormat=file)
-// Reads:  $('Expand TTS Jobs').item.json  — voice_id, text, en_duration_sec, stability,
-//                                           similarity_boost, speed, segment_id, lang, lesson_id
-//         $('Read Config').all()           — elevenlabs_api_key, anthropic_api_key
+// Reads:  $('Expand TTS Jobs').item.json
+//           — voice_id, text, en_duration_sec, lead_silence_sec, stability,
+//             similarity_boost, speed, segment_id, lang, lesson_id
+//         $('Read Config').all() — elevenlabs_api_key, anthropic_api_key
 //
-// Flow:
-//   1. Measure real duration from PCM bytes
-//   2. If > en_duration × 1.05 → ask Claude to shorten text (1 attempt, real overage info)
-//   3.   Re-TTS at speed 1.0 with shortened text → re-measure
-//   4.   If still > budget × 1.05 → TTS at speed 1.10 → re-measure
-//   5.   If still > budget × 1.05 → TTS at speed 1.15 → needs_attention if still over
-//   6. Pad end with silence to exactly en_duration_sec
-//   7. Return binary WAV + metadata
+// File layout for each segment (so concat matches original EN timeline):
+//   [ lead_silence_sec of zeros ] + [ exactly en_duration_sec of audio ]
+//
+// "audio" = TTS adjusted to fit budget:
+//   1. Claude re-adapt (1 attempt) if over budget
+//   2. Speed 1.10 → 1.15 if still over
+//   3. Hard truncate to en_duration_sec if still over (needs_attention = true)
+//   4. Pad end with silence if under en_duration_sec
 //
 // Requires n8n ≥ 1.x (uses this.helpers.httpRequest, Buffer)
 
 const SAMPLE_RATE   = 22050;
-const BPS           = 2;      // bytes per sample: 16-bit mono
+const BPS           = 2;
 const BUDGET_FACTOR = 1.05;
 
 const job = $('Expand TTS Jobs').item.json;
-const { voice_id, en_duration_sec, stability, similarity_boost, segment_id, lang, lesson_id } = job;
-const budget = parseFloat(en_duration_sec) || 0;
+const { voice_id, en_duration_sec, lead_silence_sec, stability, similarity_boost,
+        segment_id, lang, lesson_id } = job;
+const budget  = parseFloat(en_duration_sec)  || 0;
+const leadSec = parseFloat(lead_silence_sec) || 0;
 
 const configMap = {};
 $('Read Config').all().forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });
@@ -47,12 +51,12 @@ function buildWav(pcmBuf) {
   h.write('WAVE', 8);
   h.write('fmt ', 12);
   h.writeUInt32LE(16, 16);
-  h.writeUInt16LE(1, 20);                     // PCM
-  h.writeUInt16LE(1, 22);                     // mono
+  h.writeUInt16LE(1, 20);                  // PCM
+  h.writeUInt16LE(1, 22);                  // mono
   h.writeUInt32LE(SAMPLE_RATE, 24);
   h.writeUInt32LE(SAMPLE_RATE * BPS, 28);
   h.writeUInt16LE(BPS, 32);
-  h.writeUInt16LE(16, 34);                    // 16-bit
+  h.writeUInt16LE(16, 34);                 // 16-bit
   h.write('data', 36);
   h.writeUInt32LE(n, 40);
   return Buffer.concat([h, pcmBuf]);
@@ -85,10 +89,28 @@ async function claudeAdapt(currentText, realSec) {
   return resp.content?.[0]?.text?.trim() || currentText;
 }
 
-// ── Step 1: Claude re-adapt if over budget ────────────────────────────────────
-let finalSpeed = parseFloat(job.speed) || 1.0;
+// Guard: if no budget, generate natural audio + lead silence and flag
+if (!budget || budget <= 0) {
+  const leadBytes = Math.round(leadSec * SAMPLE_RATE) * BPS;
+  const leadSilence = leadBytes > 0 ? Buffer.alloc(leadBytes, 0) : Buffer.alloc(0);
+  const wav = buildWav(Buffer.concat([leadSilence, pcm]));
+  const realSec = pcmDuration(pcm);
+  const fileName = `${segment_id}_${lang}.wav`;
+  return [{
+    json: { segment_id, lang, lesson_id, en_duration_sec: 0,
+            lead_silence_sec:   leadSec,
+            real_duration_sec:  parseFloat(realSec.toFixed(3)),
+            final_duration_sec: parseFloat((leadSec + realSec).toFixed(3)),
+            final_speed: 1.0, needs_attention: true, file_name: fileName,
+            warning: 'en_duration_sec missing — file not strictly timed' },
+    binary: { data: { data: wav.toString('base64'), mimeType: 'audio/wav', fileName } }
+  }];
+}
+
+let finalSpeed     = parseFloat(job.speed) || 1.0;
 let needsAttention = false;
 
+// Step 1: Claude re-adapt if over budget
 if (pcmDuration(pcm) > budget * BUDGET_FACTOR) {
   const realSec = pcmDuration(pcm);
   const shorter = await claudeAdapt.call(this, text, realSec);
@@ -98,37 +120,46 @@ if (pcmDuration(pcm) > budget * BUDGET_FACTOR) {
   }
 }
 
-// ── Step 2: Speed retry only if text adaptation wasn't enough ─────────────────
+// Step 2: Speed retry only if text adaptation wasn't enough
 for (const speed of [1.10, 1.15]) {
   if (pcmDuration(pcm) <= budget * BUDGET_FACTOR) break;
   pcm = await tts.call(this, text, speed);
   finalSpeed = speed;
 }
-if (pcmDuration(pcm) > budget * BUDGET_FACTOR) needsAttention = true;
 
-// ── Step 3: Silence padding → WAV ────────────────────────────────────────────
 const realDuration = pcmDuration(pcm);
-const padBytes     = Math.max(0, Math.round((budget - realDuration) * SAMPLE_RATE) * BPS);
-const paddedPcm    = padBytes > 0 ? Buffer.concat([pcm, Buffer.alloc(padBytes, 0)]) : pcm;
-const wav          = buildWav(paddedPcm);
-const fileName     = `${segment_id}_${lang}.wav`;
+const targetBytes  = Math.round(budget * SAMPLE_RATE) * BPS;
+
+// Step 3: Hard fit to en_duration_sec — truncate if over (cuts mid-word), pad if under
+let coreAudio;
+if (pcm.length > targetBytes) {
+  coreAudio = pcm.subarray(0, targetBytes);
+  needsAttention = true;
+} else if (pcm.length < targetBytes) {
+  coreAudio = Buffer.concat([pcm, Buffer.alloc(targetBytes - pcm.length, 0)]);
+} else {
+  coreAudio = pcm;
+}
+
+// Step 4: Prepend lead silence so concatenated files match original timeline
+const leadBytes   = Math.round(leadSec * SAMPLE_RATE) * BPS;
+const leadSilence = leadBytes > 0 ? Buffer.alloc(leadBytes, 0) : Buffer.alloc(0);
+const finalPcm    = Buffer.concat([leadSilence, coreAudio]);
+
+const wav           = buildWav(finalPcm);
+const finalDuration = (leadBytes + targetBytes) / (SAMPLE_RATE * BPS);
+const fileName      = `${segment_id}_${lang}.wav`;
 
 return [{
   json: {
-    segment_id,
-    lang,
-    lesson_id,
-    en_duration_sec:   budget,
-    real_duration_sec: parseFloat(realDuration.toFixed(3)),
-    final_speed:       finalSpeed,
-    needs_attention:   needsAttention,
-    file_name:         fileName,
+    segment_id, lang, lesson_id,
+    en_duration_sec:    budget,
+    lead_silence_sec:   leadSec,
+    real_duration_sec:  parseFloat(realDuration.toFixed(3)),
+    final_duration_sec: parseFloat(finalDuration.toFixed(3)),
+    final_speed:        finalSpeed,
+    needs_attention:    needsAttention,
+    file_name:          fileName,
   },
-  binary: {
-    data: {
-      data:     wav.toString('base64'),
-      mimeType: 'audio/wav',
-      fileName,
-    },
-  },
+  binary: { data: { data: wav.toString('base64'), mimeType: 'audio/wav', fileName } }
 }];
