@@ -28,14 +28,18 @@
 - NOTE: реалізовано як окрема "Adapt Translations" нода (Code node з helpers.httpRequest). Вставлена між "Extract Translations" і "Update Sheet" у W2_Translate_v2.json. Код у code_nodes/adapt_translations.js.
 
 ### Days 6-7 — Synthesize з strict timing
-- [ ] Workflow_Synthesize (переробити v2):
-  - TTS з natural speed (1.0)
-  - Виміряти real_duration_sec
-  - Якщо <= en_duration_sec → silence padding ffmpeg до en_duration
-  - Якщо > en_duration_sec → speed adjust до 1.10 → TTS retry → re-measure
-  - Якщо все ще > → speed adjust до 1.15 → TTS retry
-  - Якщо все ще > → flag needs_attention=true, save as-is
-- [ ] Output mp3 у Drive: output/{lesson_id}/{lang}/seg_NNN_{lang}.mp3, тривалість = en_duration
+- [x] Workflow_Synthesize (переробити v2) → W3_Synthesize_v2.json:
+  - TTS в PCM 22050Hz (точне вимірювання без ffprobe)
+  - Виміряти real_duration_sec з розміру PCM буфера
+  - Якщо <= en_duration_sec × 1.05 → silence padding до en_duration
+  - Якщо > → retry TTS speed 1.10 → re-measure
+  - Якщо все ще > → retry speed 1.15
+  - Якщо все ще > → flag needs_attention=true
+  - Pad + WAV header → upload to Drive
+- [x] Output .wav у Drive: flat folder (drive_output_folder_id з config) → seg_NNN_{lang}.wav
+- NOTE: Реалізовано як "Check Timing + Pad" Code node (code_nodes/check_timing_and_pad.js).
+  Duration вимірюється з PCM bytes (без ffprobe). Silence padding через Buffer.alloc в JS.
+  Потрібно: додати drive_output_folder_id в config sheet.
 
 ---
 
