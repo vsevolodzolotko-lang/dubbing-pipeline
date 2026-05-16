@@ -9,8 +9,10 @@
 - [ ] Verify: Workflow_Ingest заповнює en_duration_sec правильно (не тільки en_start_sec)
 
 ### Days 2-3 — Tone Analysis як перший крок Translate
-- [ ] Створити prompts/tone_analysis.md — один Claude-виклик на весь скрипт уроку
-- [ ] У Workflow_Translate додати Tone Analysis як перший Claude call (до перекладу)
+- [x] Створити prompts/tone_analysis.md — один Claude-виклик на весь скрипт уроку
+- [x] Підготувати code_nodes: prepare_tone_analysis.js, parse_tone_analysis.js, prepare_and_expand.js (з tone context)
+- [ ] У Workflow_Translate додати в n8n UI: Prepare Tone Analysis → Claude Tone Analysis → Parse Tone Map → Update Tone Columns → (existing translate flow)
+- [ ] Оновити "Prepare and Expand" ноду кодом з code_nodes/prepare_and_expand.js
 - [ ] Output: JSON з per-segment metadata: segment_type (narrative/movement/instruction), movement_keywords, key_concepts. Записати в Sheet (нові колонки segment_type, movement_keywords)
 - [ ] Translation prompt отримує tone_map як додатковий контекст
 
