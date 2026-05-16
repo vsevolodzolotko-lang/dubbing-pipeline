@@ -120,9 +120,9 @@
             "segment_id": "={{ $json.segment_id }}",
             "en_text": "={{ $json.en_text }}",
             "status": "pending",
-            "en_start_sec": "={{ $json.en_start }}",
-            "en_end_sec": "={{ $json.en_end }}",
-            "en_duration_sec": "={{ $json.en_duration }}"
+            "en_start_sec": "={{ $json.en_start_sec }}",
+            "en_end_sec": "={{ $json.en_end_sec }}",
+            "en_duration_sec": "={{ $json.en_duration_sec }}"
           },
           "matchingColumns": [
             "segment_id"
