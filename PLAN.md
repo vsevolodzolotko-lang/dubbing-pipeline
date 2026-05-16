@@ -1,61 +1,58 @@
-# 4-Week Implementation Plan
+# 2-Week MVP Plan
 
-## Week 1 — Batch Pipeline
+## Week 1 — Strict-Timing Pipeline
 
-- [ ] **Day 1** — Environment setup + spike test
-  - [ ] n8n instance running locally (Docker)
-  - [x] ElevenLabs API key validated, basic voices call working (`scripts/test_apis.js`)
-  - [x] Claude API key validated, basic completion call working (`scripts/test_apis.js`)
-  - [x] Spike: end-to-end test with a single 60-second transcript segment (EN → DE) — DE is 15.9% longer (79.4s vs 68.5s); speed tuning needed
-- [ ] **Days 2–3** — Workflow: Translate
-  - [ ] n8n workflow reads source transcript from Google Sheets
-  - [ ] Claude node: tone analysis prompt → structured JSON output
-  - [ ] Claude node: translation prompt per language with tone context injected
-  - [ ] Claude node: cultural adaptation pass (idioms, phrasing)
-  - [ ] Results written back to Google Sheets per language column
-- [ ] **Days 4–5** — Workflow: Synthesize
-  - [ ] n8n workflow reads translated segments from Sheets
-  - [ ] ElevenLabs node: TTS call per segment × 7 languages
-  - [ ] Audio files saved to `/tmp` with structured naming (`{lesson}_{segment}_{lang}.mp3`)
-  - [ ] Status column updated in Sheets on success/failure
-  - [x] Cascade Positioning Code Node (mock-validated)
-  - [ ] Інтегрувати Cascade у Workflow_Synthesize після Loop Over Items (Aggregate → Get Rows → Cascade → Update Rows)
-  - [ ] Estimate Duration Code Node всередині Loop (для real_duration_sec)
-- [ ] **Days 6–7** — Integration tests
-  - [ ] Full batch run on 3 real course segments
-  - [ ] Validate audio quality and translation accuracy spot-check
-  - [ ] Error handling: retry logic for ElevenLabs 429s, Claude timeouts
-  - [ ] Document findings in DECISIONS.md
+### Day 1 — Cleanup та переоцінка стану
+- [ ] Cleanup: видалити з Workflow_Synthesize v2 cascade-ноди (Aggregate, Get Localizations Fresh, Cascade Positioning, Save Positions to Sheet) — вони більше не потрібні
+- [ ] Cleanup: видалити з Localizations sheet колонки position_start_sec, position_end_sec
+- [ ] Verify: чи Workflow_Translate реально використовує ToV з config sheet (якщо ні — додати)
+- [ ] Verify: Workflow_Ingest заповнює en_duration_sec правильно (не тільки en_start_sec)
 
----
+### Days 2-3 — Tone Analysis як перший крок Translate
+- [ ] Створити prompts/tone_analysis.md — один Claude-виклик на весь скрипт уроку
+- [ ] У Workflow_Translate додати Tone Analysis як перший Claude call (до перекладу)
+- [ ] Output: JSON з per-segment metadata: segment_type (narrative/movement/instruction), movement_keywords, key_concepts. Записати в Sheet (нові колонки segment_type, movement_keywords)
+- [ ] Translation prompt отримує tone_map як додатковий контекст
 
-## Week 2 — Reaper RPP Generation
+### Days 4-5 — Adaptation Loop у Translate
+- [ ] Створити prompts/adaptation.md — для скорочення тексту під timing budget
+- [ ] У Workflow_Translate після перекладу: estimate duration (за CPS з voices або фіксованими langs ratio)
+- [ ] Якщо estimated > en_duration_sec * 1.05 → loop adaptation:
+  - Attempt 1: легке скорочення (cut filler words)
+  - Attempt 2: середнє скорочення (rephrase shorter)
+  - Attempt 3: максимальне скорочення (preserve only key meaning)
+  - Між кожною спробою — re-estimate
+- [ ] Записати final translation + adaptation_attempts count у Sheet
 
-- [ ] Design RPP template structure (tracks, markers, FX chain)
-- [ ] Node.js script: parse synthesis output manifest → generate `.rpp` project file
-- [ ] Map audio file paths into RPP track items with correct offsets
-- [ ] Test RPP opens cleanly in Reaper with all 7 language tracks
-- [ ] n8n node: trigger RPP generation after synthesis batch completes
-- [ ] Validate timeline alignment against original video reference
+### Days 6-7 — Synthesize з strict timing
+- [ ] Workflow_Synthesize (переробити v2):
+  - TTS з natural speed (1.0)
+  - Виміряти real_duration_sec
+  - Якщо <= en_duration_sec → silence padding ffmpeg до en_duration
+  - Якщо > en_duration_sec → speed adjust до 1.10 → TTS retry → re-measure
+  - Якщо все ще > → speed adjust до 1.15 → TTS retry
+  - Якщо все ще > → flag needs_attention=true, save as-is
+- [ ] Output mp3 у Drive: output/{lesson_id}/{lang}/seg_NNN_{lang}.mp3, тривалість = en_duration
 
 ---
 
-## Week 3 — ReaScript Hotkey Workflow
+## Week 2 — Drive trigger + Atomic regenerate + Polish
 
-- [ ] Design hotkey action set (nudge, mute, solo by language)
-- [ ] Write ReaScript (Lua) for each hotkey action
-- [ ] Install and test scripts in Reaper
-- [ ] Document hotkey map in `docs/reaper-hotkeys.md`
-- [ ] Test full editing session: open RPP → adjust timing → export stems
+### Days 1-2 — Drive-folder тригер
+- [ ] Workflow_Master: Trigger = Google Drive folder watch на input/
+- [ ] При новому файлі → запускає Ingest → Tone Analysis → Translate → Synthesize послідовно
+- [ ] Notification у Telegram коли все готово (з посиланнями на output папку)
 
----
+### Days 3-4 — Atomic regenerate single segment
+- [ ] Workflow_Regenerate_Single: webhook trigger
+- [ ] Input: segment_id, lang, optional new_text
+- [ ] Якщо new_text дано — оновити в Sheet, скіпнути translate/adapt
+- [ ] TTS → padding → upload (overwrite з backup у /_backup/)
 
-## Week 4 — Polish & Handoff
+### Days 5-6 — Real-world test
+- [ ] Прогнан 2-3 повних реальних уроки через pipeline
+- [ ] Зібрати список реальних проблем (звук, переклад, timing)
+- [ ] Зафіксувати у DECISIONS.md як open issues
 
-- [ ] End-to-end test on a full course module (all segments, all languages)
-- [ ] Performance: benchmark Claude + ElevenLabs latency per segment
-- [ ] Cost tracking: log token counts and TTS character counts to Sheets
-- [ ] Write runbook in `docs/runbook.md` (how to trigger, monitor, rerun)
-- [ ] Error dashboard in n8n (failed segments visible without opening workflow)
-- [ ] Final review of all prompts and voice calibration
-- [ ] Handoff: record a short walkthrough video
+### Day 7 — Buffer
+- [ ] Дебаг, шліфування, документація для босса
