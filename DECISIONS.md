@@ -323,4 +323,65 @@ Context: Прогон sleep_001 показав 14 рядків з needs_attentio
 
 Decision: needs_attention тепер TRUE тільки якщо `real_duration > tts_budget × 1.05` ПІСЛЯ всіх спроб (Claude adapt + speed 1.10 + 1.15). Це означає що жодна стратегія не дозволила влізти в бюджет, і hard-truncate реально обрізав чутну частину аудіо.
 
-Rationale: BUDGET_FACTOR=1.05 вже використовується в speed-retry loop як толерантність. Логічно поширити її і на truncation flag. Дрібні обрізання <5% не потребують ручного перегляду — вони косметичні. Це робить needs_attention реальним сигналом проблемних сегментів замість шуму. (estimate → IF → Claude → loop back) спрощує граф. `helpers.httpRequest` дозволяє async loop в межах однієї ноди без n8n loop workarounds. Per-language tracking дає прозорість яка саме мова потребувала адаптації.
+Rationale: BUDGET_FACTOR=1.05 вже використовується в speed-retry loop як толерантність. Логічно поширити її і на truncation flag. Дрібні обрізання <5% не потребують ручного перегляду — вони косметичні. Це робить needs_attention реальним сигналом проблемних сегментів замість шуму.
+
+---
+
+### 2026-05-16 — SPEED_AS_LAST_RESORT
+
+Context: Раніше Synthesize використовував speed=1.10/1.15 як основний механізм коли переклад не вміщувався. Це часто спрацьовувало навіть коли можна було ще скоротити текст. Поточний W3 chain був: Claude re-adapt (1 attempt) → speed 1.10 → speed 1.15 → hard truncate. Speed запускалась після всього однієї adapt-спроби.
+
+Decision: Розширити Claude re-adapt у Synthesize до **3 attempts** (light → medium → max) перед будь-якою зміною швидкості. Фінальна послідовність: adapt light → adapt medium → adapt max → THEN speed 1.10 → speed 1.15 → needs_attention=true з hard truncate. Між кожною adapt спробою — re-TTS at speed 1.0 і re-check vs effective_slot.
+
+Conflict with prior decisions: уточнює SPEED_ADJUSTMENT_AS_FALLBACK (2026-05-10) і ADAPTATION_PROMPT_PRESERVE_CONCEPTS (2026-05-16). Speed залишається fallback, але тепер формально остання можливість після вичерпання усіх текстових варіантів.
+
+Rationale: Зміна швидкості голосу навіть в межах +15% погіршує natural feel меди-аудіо (фоновий ритм дихання, що настроюється під оригінальний темп). Краще ще раз скоротити текст ніж змінити темп. Three-tier adapt дозволяє Claude послідовно йти від light (filler-removal) до max (compress to core meaning) — у переважній більшості випадків переклад вміщується в effective_slot до того як знадобиться speed.
+
+---
+
+### 2026-05-16 — BREATH_BORROW_MECHANISM
+
+Context: Мікросегменти типу breath instructions ("in", "out") можуть бути довшими в інших мовах ("atme ein", "atme aus"). Strict-timing v2 форсує ці сегменти у тісний слот навіть коли сусідні сегменти мають 1–2с тиші. Реальний прогон показав: коли natural gap після сегменту > 0.4с, є природний "запас" що можна використати, але v2 його не використовує.
+
+Decision: Дозволити сегменту "позичити" частину наступного gap'у. Формула:
+- `gap_after = next.en_start_sec − this.en_end_sec`
+- `max_borrowable = max(0, min(gap_after − min_inter_segment_gap_sec, max_borrow_per_segment_sec))`
+- `effective_slot = en_duration_sec + max_borrowable`
+
+Якщо `real_duration > en_duration` але `real_duration ≤ effective_slot` — accept TTS as-is без padding/trim, записати `borrowed_sec = real − en_duration` у Sheet.
+
+**Reuse existing config key**: `min_inter_segment_gap_sec` (default 0.4) виконує роль "буфера", який ВЖЕ використовується у MIN_GAP_VIA_PREV_AUDIO_STEAL. Це уніфікує симетричну математику: signed_adjustment = gap_after − min_inter_segment_gap_sec, clamped зверху на `max_borrow_per_segment_sec`. Negative signed → steal-from-prev (existing); positive → borrow-from-next (new). Новий конфіг-ключ `borrow_gap_buffer_sec` НЕ вводимо — це дублювання.
+
+New config key: `max_borrow_per_segment_sec` (default 2.0) — верхня межа щоб мікросегмент не з'їв увесь gap.
+
+Conflict with prior decisions: доповнює MIN_GAP_VIA_PREV_AUDIO_STEAL (2026-05-16) — обидва механізми тепер симетричні. Steal працює коли gap_after < MIN_GAP; borrow коли gap_after > MIN_GAP. Файл-структура `[lead_silence] + [TTS] + [tail_silence]` залишається, але `tail_silence` може бути 0 при breath-borrow (TTS заповнив весь slot + позичений час).
+
+Rationale: Меди-контент часто має природні паузи між інструкціями (дихання, перехід між фазами). Жорстко тримати ці паузи коли локалізований переклад природньо довший — погіршує якість TTS (треба скорочувати або прискорювати). Borrow механізм використовує наявну структуру EN-аудіо: якщо там була тиша, нехай локалізована мова "видихне" в неї. Користувач не помітить різницю — паузи в меди-аудіо здебільшого взаємозамінні в межах одного gap'у.
+
+---
+
+### 2026-05-16 — TRANSLATION_EXPANSION_IN_SYNTHESIZE
+
+Context: Adaptation у Translate (W2) іноді надто агресивно скорочує. У Sheet localizations бачимо ratio `real_duration / en_duration` 0.58–0.85 для деяких сегментів (DE seg_001: 0.53). Це дає 1.5–3с неприродної padding-тиші. Length floor MIN_RETAIN=0.6 (ADAPTATION_PROMPT_PRESERVE_CONCEPTS) допомагає тільки коли Claude шортить нижче порогу — а тут проблема в тому що Claude під W2 CPS-estimate не врахував що реальне TTS буде ще коротше за оцінку.
+
+Decision: Додати **expansion loop** у Synthesize. Тригер: після початкового TTS at 1.0 і fit-check, якщо `real_duration < en_duration × expansion_threshold` (default 0.85) → single-segment Claude call який розширює переклад, відштовхуючись від EN reference. Макс 2 attempts. Якщо нова версія overshoots `effective_slot` → revert до попередньої коротшої. Записати `expansion_attempts` у Sheet.
+
+New config key: `expansion_threshold` (default 0.85).
+
+Conflict with prior decisions: симетрія до ADAPTATION_PROMPT_PRESERVE_CONCEPTS. Раніше тільки скорочували; тепер відновлюємо що було передcorocheno. Не порушує length-floor: expansion дає БІЛЬШИЙ текст, не менший.
+
+Rationale: Expansion рішення приймається на real_duration (точно, після TTS), а не на CPS-estimated (приблизно). Це усуває fundamental помилку W2: CPS — це усереднена швидкість, реальний TTS може бути на 20% швидший/повільніший в залежності від речення. Single-segment expand дешевий (1 Claude call), revert-on-overshoot захищає від snowball-ефекту. Тримається ToV через явну референцію у промпті. У 90% випадків дає природніший результат ніж довга padding-тиша.
+
+---
+
+### 2026-05-16 — SILENCE_DISTRIBUTION_20_80
+
+Context: У v2 вся padding-тиша йшла в `trailing_silence` (тобто після TTS). Це звучить як "обірване речення" коли padding значна (>1с) — слухач сприймає що сегмент закінчився посередині думки, бо одразу після останнього складу — тиша.
+
+Decision: Розподіл padding'у: **20% перед TTS** (lead), **80% після** (tail). Конфігурується через `silence_lead_ratio` (default 0.2).
+
+**Exception для збереження timeline alignment**: якщо у сегменту вже є natural EN gap (`lead_silence_sec` з prev's en_end до this en_start) > 0 — використати його ПОВНІСТЮ як lead, а всю padding-тишу класти в tail. Це гарантує що слова локалізації стартують у тому ж часі що й EN-слова. Якщо EN gap = 0 (back-to-back сегменти), тоді розподіл 20/80 застосовується до повної padding (трохи зсуває слова назад, але це OK бо альтернативи alignment немає).
+
+Conflict with prior decisions: переписує неявне правило з SLOT_TIMELINE_EACH_SEGMENT_OWNS_LEAD_SILENCE (2026-05-16) — там лише EN gap йшов у lead. Тепер дозволено додавати ще padding до lead якщо EN gap = 0. Також впливає на сенс колонки `lead_silence_sec` — раніше це строго EN gap, тепер може включати додаткові 20% padding.
+
+Rationale: Початкова тиша (перед TTS) природня — наратор приготовлюється, робить вдих. Кінцева — дихальний простір після фрази. 80% на кінець бо людина більше переносить тишу в кінці фрази ніж на початку (gestalt closure: завершення думки). 20% lead додає природність уже коротких сегментів типу "in" / "out" — без цього вони звучать як "вистрелили" словом одразу після попереднього сегменту.
