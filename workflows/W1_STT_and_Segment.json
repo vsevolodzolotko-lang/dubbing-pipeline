@@ -90,7 +90,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const data = $input.first().json;\nconst words = data.words || [];\nconst lesson_id = 'sleep_001';\n\nif (!words.length) throw new Error('No words returned from Scribe');\n\nconst MAX_DURATION = 25;\nconst MIN_PAUSE = 0.3;\n\nconst segments = [];\nlet currentWords = [];\n\nfunction flushSegment() {\n  if (!currentWords.length) return;\n  const text = currentWords.map(w => w.text.trim()).join(' ').replace(/\\s+/g, ' ').trim();\n  const start = currentWords[0].start;\n  const end = currentWords[currentWords.length - 1].end;\n  segments.push({ text, start, end, duration: end - start });\n  currentWords = [];\n}\n\nfor (let i = 0; i < words.length; i++) {\n  const word = words[i];\n  const nextWord = words[i + 1];\n\n  currentWords.push(word);\n\n  const currentDuration = word.end - currentWords[0].start;\n  const endsWithPunct = /[.!?]['\"]?$/.test(word.text.trim());\n  const pause = nextWord ? (nextWord.start - word.end) : 1;\n  const isLastWord = !nextWord;\n\n  // Break ONLY on sentence boundary\n  const isSentenceBoundary = endsWithPunct || isLastWord;\n\n  // Force break if way too long (hard cap at MAX_DURATION)\n  const isTooLong = currentDuration >= MAX_DURATION;\n\n  if (isSentenceBoundary || isTooLong) {\n    flushSegment();\n  }\n}\n\n// Merge segments shorter than 3s with previous\nconst merged = [];\nfor (let i = 0; i < segments.length; i++) {\n  const seg = segments[i];\n  if (seg.duration < 3 && merged.length > 0) {\n    const prev = merged[merged.length - 1];\n    prev.text = prev.text + ' ' + seg.text;\n    prev.end = seg.end;\n    prev.duration = prev.end - prev.start;\n  } else {\n    merged.push({ ...seg });\n  }\n}\n\nreturn merged.map((seg, i) => ({\n  json: {\n    segment_id: lesson_id + '_seg_' + String(i + 1).padStart(3, '0'),\n    lesson_id,\n    en_text: seg.text,\n    en_start: parseFloat(seg.start.toFixed(3)),\n    en_end: parseFloat(seg.end.toFixed(3)),\n    en_duration: parseFloat(seg.duration.toFixed(3)),\n    de_text: '',\n    es_text: '',\n    fr_text: '',\n    pl_text: '',\n    pt_text: '',\n    it_text: '',\n    tr_text: '',\n    status: 'pending',\n    notes: '',\n  }\n}));"
+        "jsCode": "const data = $input.first().json;\nconst words = data.words || [];\nconst lesson_id = 'sleep_001';\n\nif (!words.length) throw new Error('No words returned from Scribe');\n\nconst MAX_DURATION = 25;\nconst MIN_PAUSE = 0.3;\n\nconst segments = [];\nlet currentWords = [];\n\nfunction flushSegment() {\n  if (!currentWords.length) return;\n  const text = currentWords.map(w => w.text.trim()).join(' ').replace(/\\s+/g, ' ').trim();\n  const start = currentWords[0].start;\n  const end = currentWords[currentWords.length - 1].end;\n  segments.push({ text, start, end, duration: end - start });\n  currentWords = [];\n}\n\nfor (let i = 0; i < words.length; i++) {\n  const word = words[i];\n  const nextWord = words[i + 1];\n\n  currentWords.push(word);\n\n  const currentDuration = word.end - currentWords[0].start;\n  const endsWithPunct = /[.!?]['\"]?$/.test(word.text.trim());\n  const pause = nextWord ? (nextWord.start - word.end) : 1;\n  const isLastWord = !nextWord;\n\n  // Break ONLY on sentence boundary\n  const isSentenceBoundary = endsWithPunct || isLastWord;\n\n  // Force break if way too long (hard cap at MAX_DURATION)\n  const isTooLong = currentDuration >= MAX_DURATION;\n\n  if (isSentenceBoundary || isTooLong) {\n    flushSegment();\n  }\n}\n\n// Merge segments shorter than 3s with previous\nconst merged = [];\nfor (let i = 0; i < segments.length; i++) {\n  const seg = segments[i];\n  if (seg.duration < 3 && merged.length > 0) {\n    const prev = merged[merged.length - 1];\n    prev.text = prev.text + ' ' + seg.text;\n    prev.end = seg.end;\n    prev.duration = prev.end - prev.start;\n  } else {\n    merged.push({ ...seg });\n  }\n}\n\nreturn merged.map((seg, i) => ({\n  json: {\n    segment_id: lesson_id + '_seg_' + String(i + 1).padStart(3, '0'),\n    lesson_id,\n    en_text: seg.text,\n    en_start_sec: parseFloat(seg.start.toFixed(3)),\n    en_end_sec: parseFloat(seg.end.toFixed(3)),\n    en_duration_sec: parseFloat(seg.duration.toFixed(3)),\n    de_text: '',\n    es_text: '',\n    fr_text: '',\n    pl_text: '',\n    pt_text: '',\n    it_text: '',\n    tr_text: '',\n    status: 'pending',\n    notes: '',\n  }\n}));"
       },
       "id": "6b5c97ce-a22f-4319-8039-863b8146373b",
       "name": "Segment Transcript",
@@ -119,10 +119,10 @@
           "value": {
             "segment_id": "={{ $json.segment_id }}",
             "en_text": "={{ $json.en_text }}",
-            "en_start": "={{ $json.en_start }}",
-            "en_end": "={{ $json.en_end }}",
-            "en_duration": "={{ $json.en_duration }}",
-            "status": "pending"
+            "status": "pending",
+            "en_start_sec": "={{ $json.en_start }}",
+            "en_end_sec": "={{ $json.en_end }}",
+            "en_duration_sec": "={{ $json.en_duration }}"
           },
           "matchingColumns": [
             "segment_id"
@@ -148,8 +148,8 @@
               "canBeUsedToMatch": true
             },
             {
-              "id": "en_start",
-              "displayName": "en_start",
+              "id": "en_start_sec",
+              "displayName": "en_start_sec",
               "required": false,
               "defaultMatch": false,
               "display": true,
@@ -158,8 +158,8 @@
               "removed": false
             },
             {
-              "id": "en_end",
-              "displayName": "en_end",
+              "id": "en_end_sec",
+              "displayName": "en_end_sec",
               "required": false,
               "defaultMatch": false,
               "display": true,
@@ -168,8 +168,8 @@
               "removed": false
             },
             {
-              "id": "en_duration",
-              "displayName": "en_duration",
+              "id": "en_duration_sec",
+              "displayName": "en_duration_sec",
               "required": false,
               "defaultMatch": false,
               "display": true,
