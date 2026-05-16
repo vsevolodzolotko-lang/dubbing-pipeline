@@ -231,3 +231,17 @@ Context: Як саме доставляти готовий дубляж.
 Decision: Per-segment mp3 файли у Drive: output/{lesson_id}/{lang}/seg_NNN_{lang}.mp3. Кожен файл = silence_before + TTS + silence_after (за потреби) = en_duration_sec. Концепція: користувач може завантажити всі файли в DAW і вони ляжуть на правильні позиції просто за послідовністю.
 
 Rationale: Не залежить від конкретного DAW. Простий у консумації — апка може завантажити окремі сегменти і програти їх з паузами. Регенерація однієї проблемної ділянки — заміна одного файлу.
+
+---
+
+### 2026-05-16 — DAY1_VERIFICATION_COMPLETE
+
+Context: Day 1 cleanup і verify перед переходом до Tone Analysis (Day 2-3).
+
+Decision: Всі пункти закриті. Підсумок:
+- Workflow_Synthesize v2: каскадні ноди (Aggregate, Get Localizations Fresh, Cascade Positioning, Save Positions to Sheet) видалені. Workflow експортований у `workflows/synthesize_v2_post_cleanup.json`.
+- Workflow_Translate: ToV підключений коректно — читає з config sheet по ключу `tone_of_voice` через "Read Config" ноду. Виправлень не потрібно.
+- Sheet segments: en_duration_sec заповнений для всіх 9 сегментів sleep_001, значення коректні.
+- Sheet localizations: очищено від тестових даних.
+
+Rationale: Day 2 можна починати з чистого стану. Жодних open issues не виявлено.
