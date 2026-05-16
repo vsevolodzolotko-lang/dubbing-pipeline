@@ -51,10 +51,10 @@
 - `effective_slot = en_duration_sec + max_borrowable`
 
 **Synthesize flow (per segment × lang)**:
-- [ ] TTS at speed 1.0, виміряти `real_duration_sec` з PCM bytes
-- [ ] Branch на основі `real_duration` vs slot:
-  - **`real ≤ en_duration`** → padding 20/80 (lead/tail), DONE
-  - **`en_duration < real ≤ effective_slot`** → BREATH BORROW: accept TTS як є, без padding/trim, записати `borrowed_sec = real − en_duration`
+- [x] TTS at speed 1.0, виміряти `real_duration_sec` з PCM bytes
+- [x] Branch на основі `real_duration` vs slot:
+  - **`real ≤ tts_budget`** → padding 20/80 (lead/tail), DONE
+  - **`tts_budget < real ≤ effective_slot`** → BREATH BORROW: accept TTS як є, без padding/trim, записати `borrowed_sec = real − en_duration`
   - **`real > effective_slot`** → Adapt shorten loop (single-segment Claude call):
     - Attempt 1 (light): прибрати filler/redundancies
     - Attempt 2 (medium): rephrase коротше зі збереженням concepts
@@ -64,12 +64,13 @@
     - speed 1.10 → re-TTS
     - speed 1.15 → re-TTS
     - Still over → `needs_attention=true`, hard truncate to fit
-- [ ] **Expansion loop** (after fit-check): IF `real_duration < en_duration × expansion_threshold` → single-segment Claude expand call, max 2 attempts. Якщо нова версія overshoots `effective_slot` → revert до попередньої коротшої.
-- [ ] **Silence distribution 20/80**: коли `real ≤ en_duration`, розподілити `padding = en_duration − real`:
+- [x] **Expansion loop** (after fit-check, only when shorten/speed never fired): IF `real_duration < en_duration × expansion_threshold` → single-segment Claude expand call, max 2 attempts. Якщо нова версія overshoots `effective_slot` → revert до попередньої коротшої.
+- [x] **Silence distribution 20/80**: коли `real ≤ tts_budget`, розподілити `padding = tts_budget − real`:
   - Default: `silence_lead_ratio × padding` на lead, решта на tail
-  - Exception: якщо natural EN gap (lead_silence_sec з prev's en_end до this en_start) > 0 — використати його як lead (зберігає timeline alignment), всю padding в tail
-- [ ] **Output WAV**: `[lead_silence] + [TTS audio] + [tail_silence]`, total = `max(en_duration_sec, en_duration_sec + borrowed_sec)`
-- [ ] **Записати в localizations**: `real_duration_sec`, `lead_silence_sec`, `tail_silence_sec`, `borrowed_sec`, `final_speed`, `expansion_attempts`, `shorten_retries_in_synthesize`, `needs_attention`
+  - Exception: якщо natural EN gap (`lead_silence_natural_sec` з prev's en_end до this en_start) > 0 — використати його як lead (зберігає timeline alignment), всю padding в tail
+- [x] **Output WAV**: `[lead_silence] + [TTS audio] + [tail_silence]`, total = `lead + real + tail` (з борровом може бути більше за `en_duration + lead`)
+- [x] **Записати в localizations**: `real_duration_sec`, `lead_silence_sec`, `tail_silence_sec`, `borrowed_sec`, `final_speed`, `expansion_attempts`, `shorten_retries_in_synthesize`, `needs_attention`
+- NOTE: Реалізовано в `workflows/W3_Synthesize_v2.json` — оновлені ноди Expand TTS Jobs, Check Timing + Pad, Prepare Localization Row + schema Update Localizations. Код у `code_nodes/check_timing_and_pad.js`.
 
 **Config keys involved**: `min_inter_segment_gap_sec` (existing, реюз для borrow buffer), `max_borrow_per_segment_sec` (new), `expansion_threshold` (new), `silence_lead_ratio` (new).
 
