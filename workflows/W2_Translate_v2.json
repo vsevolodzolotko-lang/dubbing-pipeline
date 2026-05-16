@@ -3,38 +3,38 @@
   "nodes": [
     {
       "parameters": {},
-      "id": "2436b635-3790-4fc2-9bc0-c730a6dc8488",
+      "id": "9371aa37-1e63-4b3d-b661-17237659a31a",
       "name": "Manual Trigger",
       "type": "n8n-nodes-base.manualTrigger",
       "typeVersion": 1,
       "position": [
-        1824,
-        32
+        -400,
+        272
       ]
     },
     {
       "parameters": {
         "documentId": {
           "__rl": true,
-          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
-          "mode": "id"
+          "value": "https://docs.google.com/spreadsheets/d/1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU/edit?usp=sharing",
+          "mode": "url"
         },
         "sheetName": {
           "__rl": true,
-          "value": 986062273,
+          "value": 1187289606,
           "mode": "list",
           "cachedResultName": "config",
-          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU/edit#gid=986062273"
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU/edit#gid=1187289606"
         },
         "options": {}
       },
-      "id": "0abc1e8b-e776-4d2a-8e14-41998238e010",
+      "id": "8f0eb9e3-ef8b-4228-b01f-62718b233d93",
       "name": "Read Config",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        2032,
-        32
+        -192,
+        272
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -52,20 +52,20 @@
         },
         "sheetName": {
           "__rl": true,
-          "value": "gid=0",
+          "value": 1010758544,
           "mode": "list",
           "cachedResultName": "segments",
-          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU/edit#gid=0"
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU/edit#gid=1010758544"
         },
         "options": {}
       },
-      "id": "7c70259e-15d3-42cd-bb10-5090b80bdc17",
+      "id": "dfbdefcc-34f0-489b-91e8-df3ae3b00f19",
       "name": "Read Pending Segments",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        2224,
-        32
+        0,
+        272
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -76,16 +76,15 @@
     },
     {
       "parameters": {
-        "language": "javaScript",
         "jsCode": "const segments = $input.all()\n  .filter(i => i.json.segment_id && i.json.en_text)\n  .map(i => ({ segment_id: i.json.segment_id, en_text: i.json.en_text }));\nif (segments.length === 0) throw new Error('No segments to analyze');\nconst sysPrompt = 'Classify each wellness/meditation segment. Return ONLY a JSON object where each key is segment_id and value has: segment_type (narrative|instruction|movement), movement_keywords (comma-sep if movement, else empty string), key_concepts (2-4 comma-sep themes). No markdown, no preamble.';\nreturn [{ json: { model: 'claude-sonnet-4-5', max_tokens: 2000, system: sysPrompt, messages: [{ role: 'user', content: 'Segments:\\n\\n' + JSON.stringify(segments, null, 2) }] } }];"
       },
-      "id": "tone-prep-node-001",
+      "id": "4abf55fb-81fb-4f5e-a151-59fbc21375cb",
       "name": "Prepare Tone Analysis",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2224,
-        -240
+        0,
+        0
       ]
     },
     {
@@ -108,13 +107,13 @@
         "jsonBody": "={{ JSON.stringify($json) }}",
         "options": {}
       },
-      "id": "tone-claude-node-001",
+      "id": "d2e34db2-a15e-4917-a17d-ec8427773087",
       "name": "Claude Tone Analysis",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2432,
-        -240
+        208,
+        0
       ],
       "credentials": {
         "anthropicApi": {
@@ -125,16 +124,15 @@
     },
     {
       "parameters": {
-        "language": "javaScript",
         "jsCode": "let toneMap = {};\ntry {\n  let raw = $input.first().json.content?.[0]?.text?.trim() || '{}';\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  if (!match) throw new Error('No JSON in response');\n  toneMap = JSON.parse(match[0]);\n} catch (e) {\n  throw new Error('Tone parse failed: ' + e.message);\n}\nif (Object.keys(toneMap).length === 0) throw new Error('Tone analysis returned empty object');\nreturn Object.entries(toneMap).map(([segment_id, meta]) => ({\n  json: { segment_id, segment_type: meta.segment_type || 'narrative', movement_keywords: meta.movement_keywords || '', key_concepts: meta.key_concepts || '' }\n}));"
       },
-      "id": "tone-parse-node-001",
+      "id": "9e93fb29-4f5c-4f82-976b-da4da2bae72e",
       "name": "Parse Tone Map",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2640,
-        -240
+        416,
+        0
       ]
     },
     {
@@ -142,15 +140,15 @@
         "operation": "appendOrUpdate",
         "documentId": {
           "__rl": true,
-          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
-          "mode": "id"
+          "value": "https://docs.google.com/spreadsheets/d/1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU/edit?usp=sharing",
+          "mode": "url"
         },
         "sheetName": {
           "__rl": true,
-          "value": "gid=0",
+          "value": 1010758544,
           "mode": "list",
           "cachedResultName": "segments",
-          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU/edit#gid=0"
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU/edit#gid=1010758544"
         },
         "columns": {
           "mappingMode": "defineBelow",
@@ -167,10 +165,51 @@
               "id": "segment_id",
               "displayName": "segment_id",
               "required": false,
-              "defaultMatch": true,
+              "defaultMatch": false,
               "display": true,
               "type": "string",
-              "canBeUsedToMatch": true
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "en_text",
+              "displayName": "en_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "en_start_sec",
+              "displayName": "en_start_sec",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "en_end_sec",
+              "displayName": "en_end_sec",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "en_duration_sec",
+              "displayName": "en_duration_sec",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
             },
             {
               "id": "segment_type",
@@ -179,7 +218,7 @@
               "defaultMatch": false,
               "display": true,
               "type": "string",
-              "canBeUsedToMatch": false
+              "canBeUsedToMatch": true
             },
             {
               "id": "movement_keywords",
@@ -188,7 +227,157 @@
               "defaultMatch": false,
               "display": true,
               "type": "string",
-              "canBeUsedToMatch": false
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "de_text",
+              "displayName": "de_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "es_text",
+              "displayName": "es_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "fr_text",
+              "displayName": "fr_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "pl_text",
+              "displayName": "pl_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "pt_text",
+              "displayName": "pt_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "it_text",
+              "displayName": "it_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "tr_text",
+              "displayName": "tr_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "de_adaptation_attempts",
+              "displayName": "de_adaptation_attempts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "es_adaptation_attempts",
+              "displayName": "es_adaptation_attempts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "fr_adaptation_attempts",
+              "displayName": "fr_adaptation_attempts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "pl_adaptation_attempts",
+              "displayName": "pl_adaptation_attempts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "pt_adaptation_attempts",
+              "displayName": "pt_adaptation_attempts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "it_adaptation_attempts",
+              "displayName": "it_adaptation_attempts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "tr_adaptation_attempts",
+              "displayName": "tr_adaptation_attempts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
             }
           ],
           "attemptToConvertTypes": false,
@@ -196,13 +385,13 @@
         },
         "options": {}
       },
-      "id": "tone-update-node-001",
+      "id": "0be30612-b47c-416d-8da2-dc9446ba9925",
       "name": "Update Tone Columns",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        2848,
-        -240
+        624,
+        0
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -213,16 +402,15 @@
     },
     {
       "parameters": {
-        "language": "javaScript",
         "jsCode": "const configItems = $('Read Config').all();\nconst configMap = {};\nconfigItems.forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });\nconst tov = configMap['tone_of_voice'] || '';\n\nconst toneItems = $('Parse Tone Map').all();\nconst toneMap = {};\ntoneItems.forEach(i => { if (i.json.segment_id) toneMap[i.json.segment_id] = i.json; });\n\nreturn $('Read Pending Segments').all()\n  .filter(i => i.json.segment_id && i.json.en_text)\n  .map(i => {\n    const tone = toneMap[i.json.segment_id] || {};\n    const parts = [\n      'Translate the given English text into 7 languages.',\n      'Return ONLY a valid JSON object with keys: de, es, fr, pl, pt, it, tr.',\n      'Informal address in all languages (du/tu/ty/sen, never formal).',\n      \"Preserve '...' and '\\u2014' as pause timing cues. No preamble, no markdown.\",\n    ];\n    if (tov) parts.push('\\n=== TONE OF VOICE ===\\n' + tov + '\\n=== END TONE OF VOICE ===');\n    if (tone.segment_type) parts.push('Segment type: ' + tone.segment_type);\n    if (tone.key_concepts) parts.push('Key concepts: ' + tone.key_concepts);\n    const enText = (i.json.en_text || '').replace(/\"/g, \"'\");\n    return {\n      json: {\n        segment_id: i.json.segment_id,\n        en_text: enText,\n        en_duration_sec: i.json.en_duration_sec,\n        claude_body: {\n          model: 'claude-sonnet-4-5',\n          max_tokens: 2000,\n          system: parts.join('\\n'),\n          messages: [{ role: 'user', content: enText }],\n        },\n      },\n    };\n  });"
       },
-      "id": "a89b4073-024e-47b8-bfd1-828cf8c1ed7f",
+      "id": "3d6dce75-08a9-47c5-8b33-3cea4c4886cd",
       "name": "Prepare and Expand",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2432,
-        32
+        208,
+        272
       ]
     },
     {
@@ -232,10 +420,10 @@
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        2640,
-        32
+        416,
+        272
       ],
-      "id": "11a1444a-ba4a-4f77-a44a-da5dc633927f",
+      "id": "9551337b-727f-41ac-85ce-28e33fbc66ce",
       "name": "Wait",
       "webhookId": "3fe3dde2-e6b6-45fd-bcce-422e713834fa"
     },
@@ -259,13 +447,13 @@
         "jsonBody": "={{ JSON.stringify($json.claude_body) }}",
         "options": {}
       },
-      "id": "389f82ef-9793-4101-ba54-e8cbb57bb8f9",
+      "id": "f173f521-dee3-41be-a4c0-2e043975c137",
       "name": "Claude Translate",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2848,
-        32
+        624,
+        272
       ],
       "executeOnce": false,
       "credentials": {
@@ -278,16 +466,15 @@
     },
     {
       "parameters": {
-        "language": "javaScript",
         "jsCode": "const results = [];\nconst preparedItems = $('Prepare and Expand').all();\n\nfor (let i = 0; i < $input.all().length; i++) {\n  const claudeResp = $input.all()[i].json;\n  const sourceItem = preparedItems[i]?.json || {};\n\n  let translations = {};\n  try {\n    let text = claudeResp.content?.[0]?.text?.trim() || '{}';\n    text = text.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n    const match = text.match(/\\{[\\s\\S]*\\}/);\n    if (match) translations = JSON.parse(match[0]);\n  } catch(e) {\n    console.log('Parse error for segment:', sourceItem.segment_id, e.message);\n  }\n\n  results.push({ json: {\n    segment_id: sourceItem.segment_id,\n    de_text: translations.de || '',\n    es_text: translations.es || '',\n    fr_text: translations.fr || '',\n    pl_text: translations.pl || '',\n    pt_text: translations.pt || '',\n    it_text: translations.it || '',\n    tr_text: translations.tr || '',\n  }});\n}\nreturn results;"
       },
-      "id": "6aafe771-c8fa-4f6d-9f16-d81f4f6d15f0",
+      "id": "807c2327-37ea-4a40-993a-f3c66442dde5",
       "name": "Extract Translations",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3056,
-        32
+        832,
+        272
       ]
     },
     {
@@ -295,28 +482,19 @@
         "operation": "appendOrUpdate",
         "documentId": {
           "__rl": true,
-          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
-          "mode": "id"
+          "value": "https://docs.google.com/spreadsheets/d/1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU/edit?usp=sharing",
+          "mode": "url"
         },
         "sheetName": {
           "__rl": true,
-          "value": "gid=0",
+          "value": 1010758544,
           "mode": "list",
           "cachedResultName": "segments",
-          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU/edit#gid=0"
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU/edit#gid=1010758544"
         },
         "columns": {
           "mappingMode": "autoMapInputData",
-          "value": {
-            "de_text": "=={{ $json.de }}",
-            "es_text": "=={{ $json.es }}",
-            "fr_text": "=={{ $json.fr }}",
-            "pl_text": "=={{ $json.pl }}",
-            "pt_text": "=={{ $json.pt }}",
-            "it_text": "=={{ $json.it }}",
-            "tr_text": "=={{ $json.tr }}",
-            "segment_id": "=={{ $json.segment_id }}"
-          },
+          "value": {},
           "matchingColumns": [
             "segment_id"
           ],
@@ -330,6 +508,60 @@
               "type": "string",
               "canBeUsedToMatch": true,
               "removed": false
+            },
+            {
+              "id": "en_text",
+              "displayName": "en_text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "en_start_sec",
+              "displayName": "en_start_sec",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "en_end_sec",
+              "displayName": "en_end_sec",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "en_duration_sec",
+              "displayName": "en_duration_sec",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "segment_type",
+              "displayName": "segment_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "movement_keywords",
+              "displayName": "movement_keywords",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
             },
             {
               "id": "de_text",
@@ -395,8 +627,71 @@
               "canBeUsedToMatch": true
             },
             {
-              "id": "segment_type",
-              "displayName": "segment_type",
+              "id": "de_adaptation_attempts",
+              "displayName": "de_adaptation_attempts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "es_adaptation_attempts",
+              "displayName": "es_adaptation_attempts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "fr_adaptation_attempts",
+              "displayName": "fr_adaptation_attempts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "pl_adaptation_attempts",
+              "displayName": "pl_adaptation_attempts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "pt_adaptation_attempts",
+              "displayName": "pt_adaptation_attempts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "it_adaptation_attempts",
+              "displayName": "it_adaptation_attempts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "tr_adaptation_attempts",
+              "displayName": "tr_adaptation_attempts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
               "required": false,
               "defaultMatch": false,
               "display": true,
@@ -409,13 +704,13 @@
         },
         "options": {}
       },
-      "id": "2211bafa-e1a6-4c91-8637-76a1af1d0bde",
+      "id": "ff49a74c-870c-4c80-83e3-355a158d1b88",
       "name": "Update Sheet",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        3264,
-        32
+        1040,
+        272
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -425,6 +720,7 @@
       }
     }
   ],
+  "pinData": {},
   "connections": {
     "Manual Trigger": {
       "main": [
@@ -548,13 +844,14 @@
       ]
     }
   },
-  "pinData": {},
   "active": false,
   "settings": {
     "executionOrder": "v1"
   },
+  "versionId": "d5525234-0b22-45c6-b0d1-961eae61aa7b",
   "meta": {
     "instanceId": "c12dc3211079879af783deee1a944ea9622a2040afb6e429392b5bbe95dd7037"
   },
+  "id": "NdbDWVCWZmDfurSg",
   "tags": []
 }
