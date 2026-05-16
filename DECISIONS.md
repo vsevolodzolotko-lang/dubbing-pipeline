@@ -278,4 +278,26 @@ Decision: Кожен сегмент-файл "володіє" silence-промі
 
 Також додано **hard truncate**: якщо після Claude adapt + speed 1.10 + 1.15 переклад все ще не влазить — обрізаємо PCM до `en_duration_sec` (може обрізати посередині слова) і ставимо `needs_attention=true` для ручного перегляду.
 
-Rationale: Без lead silence файли тільки локально влазять у свої en_duration_sec, але концатенація не реконструює оригінальний таймлайн. Захоплення pauses ПЕРЕД сегментом (а не ПІСЛЯ) — натуральніше: pause "належить" наступному сегменту як "вдих перед фразою". Hard truncate — компроміс strict timing: краще різке зрізання з needs_attention flag для review ніж тихе зсунення. Альтернатива — додаткові speed steps 1.20/1.25 — звучить штучно для медитативного контенту. (estimate → IF → Claude → loop back) спрощує граф. `helpers.httpRequest` дозволяє async loop в межах однієї ноди без n8n loop workarounds. Per-language tracking дає прозорість яка саме мова потребувала адаптації.
+Rationale: Без lead silence файли тільки локально влазять у свої en_duration_sec, але концатенація не реконструює оригінальний таймлайн. Захоплення pauses ПЕРЕД сегментом (а не ПІСЛЯ) — натуральніше: pause "належить" наступному сегменту як "вдих перед фразою". Hard truncate — компроміс strict timing: краще різке зрізання з needs_attention flag для review ніж тихе зсунення. Альтернатива — додаткові speed steps 1.20/1.25 — звучить штучно для медитативного контенту.
+
+---
+
+### 2026-05-16 — MIN_GAP_VIA_PREV_AUDIO_STEAL
+
+Context: При першому повному прогоні sleep_001 деякі сегменти EN мають натуральну паузу < 0.4с до наступного — голос дубляжу звучить наче два сегменти злипаються (різко обривається кінець попереднього і одразу починається наступний). Потрібен мінімум 0.4с пауза між дубльованими словами, але суму дубляжу хочеться зберегти = EN.
+
+Decision: Структура файлу тепер `[lead_silence] + [tts_budget audio] + [trailing_silence]`, де загальна довжина дорівнює `lead_silence + en_duration_sec` (slot size, як було). MIN_GAP досягається через **"крадіжку" часу** з аудіо-бюджету попереднього сегменту: якщо `natural_gap_after_i < MIN_GAP`, то `tts_budget_i = en_duration_sec_i - (MIN_GAP - natural_gap)` і ця різниця стає `trailing_silence_i`. W2/W3 адаптація тексту відштовхується від `tts_budget_sec` (а не `en_duration_sec`) — Claude скорочує текст до меншого бюджету, замість того щоб speed-up.
+
+MIN_GAP конфігурується через `config.min_inter_segment_gap_sec` (default 0.4). Sanity guard: `tts_budget` не падає нижче 50% від `en_duration` навіть якщо MIN_GAP вимагав би більше.
+
+Rationale: User-вибір серед трьох варіантів (extend timeline / steal from prev / steal from curr). "Steal from prev" зберігає total=EN, дає natural-sounding pause, і використовує існуючий W2/W3 adapt-flow для скорочення тексту замість штучного прискорення. Pause "після слів попереднього сегменту" звучить як кінець думки — природніший ніж пауза в середині нового сегменту.
+
+---
+
+### 2026-05-16 — DIAGNOSTIC_COLUMNS_FOR_ALIGNMENT
+
+Context: Користувач спостерігає що неперші сегменти стартують зі словами на ~0.25с раніше ніж EN, і сумарна тривалість дубляжу на ~0.25с коротша за EN. Експлорація коду підтвердила що математика slot'ів коректна — причина має бути в даних (Scribe word timestamps або TTS lead silence).
+
+Decision: Додати в localizations sheet 4 діагностичні колонки: `slot_start_sec`, `slot_end_sec`, `tts_budget_sec`, `trailing_silence_sec`. Після прогону user порівнює `slot_end_sec` останнього сегменту з `en_end_sec` (мають збігатись), і `lead_silence_sec` з `en_start_sec - slot_start_sec` (мають збігатись). Розбіжності точково покажуть звідки -0.25с.
+
+Rationale: Перед тим як додавати compensation hack (extra_lead_silence_sec) або silence trim в TTS-аудіо — потрібно зрозуміти ROOT CAUSE. Debug колонки дешеві, не змінюють поведінку pipeline, і дають конкретні числа для діагностики. (estimate → IF → Claude → loop back) спрощує граф. `helpers.httpRequest` дозволяє async loop в межах однієї ноди без n8n loop workarounds. Per-language tracking дає прозорість яка саме мова потребувала адаптації.

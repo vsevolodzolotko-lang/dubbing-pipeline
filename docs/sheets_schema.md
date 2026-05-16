@@ -46,13 +46,19 @@ Run-time table. Populated by Workflow_Synthesize. One row per segment × languag
 | lang | text | Language code, e.g. `de` |
 | text_translated | text | Final text used for TTS (copy from segments after adaptation) |
 | en_start_sec | number | Copy from segments for convenience |
-| en_duration_sec | number | Copy from segments — this is the timing budget for audio content |
-| lead_silence_sec | number | Silence prepended at start of file = `en_start_sec - prev_en_end_sec` (or `en_start_sec` for first segment). Captures inter-segment pauses so concat reproduces EN timeline. |
-| real_duration_sec | number | Actual TTS output duration (no padding/silence) |
-| final_duration_sec | number | Total file duration = `lead_silence_sec + en_duration_sec`. Files concatenated end-to-end reproduce original EN timeline. |
+| en_duration_sec | number | Copy from segments — `en_end_sec - en_start_sec` |
+| slot_start_sec | number | Position of this file's start in the concatenated dubbing timeline = `prev_en_end_sec` (or 0 for first). Diagnostic. |
+| slot_end_sec | number | Position of this file's end in the concatenated dubbing timeline = `en_end_sec`. Diagnostic. |
+| lead_silence_sec | number | Silence prepended at start = `en_start_sec - prev_en_end_sec` (or `en_start_sec` for first). Captures inter-segment EN pause. |
+| tts_budget_sec | number | Effective audio budget for TTS = `en_duration_sec - trailing_silence_sec`. Used by Claude adapt + speed retries + hard truncate. |
+| trailing_silence_sec | number | Silence appended at end = `max(0, MIN_GAP - natural_gap_to_next)`. Steals time from TTS to ensure ≥`min_inter_segment_gap_sec` between dubbed words. |
+| real_duration_sec | number | Actual TTS output duration (no silence). |
+| final_duration_sec | number | Total file duration = `lead_silence_sec + en_duration_sec`. Files concat end-to-end reproduce original EN timeline. |
 | final_speed | number | Speed used for TTS: `1.0` / `1.1` / `1.15` |
-| needs_attention | boolean | `true` if audio was hard-truncated (TTS still over budget after speed 1.15) |
+| needs_attention | boolean | `true` if audio was hard-truncated (TTS still over `tts_budget_sec` after speed 1.15). |
 | audio_drive_file_id | text | Google Drive file ID of the output wav |
+
+> **Note on Scribe accuracy**: `en_start_sec[0]` (and other timestamps) are auto-detected by ElevenLabs Scribe from the audio file in W1. Scribe can overshoot word boundaries by up to ~0.25s on some recordings. If after running W3 the seg_001 lead silence sounds too long, manually edit `en_start_sec` for that segment in the `segments` sheet and re-run W3.
 
 ---
 
@@ -84,3 +90,7 @@ Key-value store for pipeline-wide settings.
 | active_langs | `de,es,fr,it,pl,pt,tr` | Comma-separated list processed by Synthesize |
 | max_adaptation_attempts | `3` | Adaptation loop upper bound |
 | max_speed | `1.15` | Speed ceiling before flagging needs_attention |
+| min_inter_segment_gap_sec | `0.4` | Minimum silence between dubbed segments. When natural EN gap is smaller, time is "stolen" from the prev segment's TTS budget. Default 0.4 if missing. |
+| anthropic_api_key | `sk-ant-...` | Used by Adapt Translations (W2) and Check Timing + Pad (W3) for re-adaptation |
+| elevenlabs_api_key | `sk_...` | Used by Check Timing + Pad (W3) for speed retry TTS calls |
+| drive_output_folder_id | *(folder ID)* | Where W3 uploads `.wav` files |
