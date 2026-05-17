@@ -103,4 +103,5 @@ See [`docs/config_keys.md`](config_keys.md) for the full reference (defaults, ow
 | anthropic_api_key | `sk-ant-...` | Used by Adapt Translations (W2) and Check Timing + Pad (W3) for adaptation calls |
 | elevenlabs_api_key | `sk_...` | Used by Check Timing + Pad (W3) for re-TTS during shorten/expand and speed retry |
 | deepgram_api_key | *(token)* | Used by W1 Deepgram STT via n8n Header Auth credential. Replaced ElevenLabs Scribe to fix long-silence timestamp drift. |
-| drive_output_folder_id | *(folder ID)* | Where W3 uploads `.wav` files |
+| drive_output_folder_id | *(folder ID)* | Where W3 uploads per-segment `.wav` files |
+| drive_output_full_folder_id | *(folder ID, optional)* | Where W3 uploads concatenated full-lesson WAVs. Falls back to drive_output_folder_id if missing. |

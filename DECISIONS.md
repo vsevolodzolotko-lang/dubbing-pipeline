@@ -628,3 +628,34 @@ Decision:
 Conflict with prior decisions: розширює `ADAPTATION_PROMPT_PRESERVE_CONCEPTS` (2026-05-16) принципом "захист від LLM-misinterpretation". Спочатку розв'язали проблему контамінації виходу (sanitizer), тепер — проблему refusal/clarification виходу (skip-on-empty).
 
 Rationale: XML-тег — стандартний антипатерн для prompt injection / ambiguity у Claude. Sonnet 4.5 trained на respect такі межі. Defensive skip — захист на випадок якщо новий prompt все одно не справиться (LLM-обмеження). Combined: 99%+ випадків переклад успішний; 1% — old data preserved + error logged. Жодного scenarrio де ми silently записуємо порожні переклади.
+
+---
+
+### 2026-05-17 — W3_FINAL_STAGE_CONCAT_PER_LANG
+
+Context: Pipeline тепер виробляє стабільні per-segment WAV-и з ідеальним cross-lang таймінгом. Користувачу зручніше отримати один файл на мову (повний урок) ніж стек з 9-15 окремих сегментів — для дистрибуції через app або просто слухання. До цього concat робився вручну у DAW.
+
+Decision: Додано третій блок у W3 workflow, що активується через `done` output ноди Loop Over Items після завершення всіх ітерацій per-segment генерації:
+
+```
+Loop Over Items (done) → Read Localizations Fresh → Build Full Audio Per Lang → Save Full to Drive
+```
+
+**Read Localizations Fresh** — Sheets read, забирає всі рядки з localizations (вже записані попередньою ітерацією).
+
+**Build Full Audio Per Lang** — single Code node:
+1. Групує рядки по lang
+2. Для кожної мови сортує по segment_id (zero-padded sort — лексикографічно стабільний)
+3. Завантажує кожен per-segment WAV через Drive API (httpRequest, OAuth token з n8n credential via `getCredentials`)
+4. Зрізає 44-byte WAV header, аккумулює raw PCM
+5. Загортає в новий WAV header (22050Hz mono 16-bit — той самий формат що per-segment)
+6. Повертає 7 items з binary WAV, named `{lesson_id}_full_{lang}.wav`
+
+**Save Full to Drive** — Google Drive Upload node, обробляє кожен з 7 items. `folderId` тягнеться з нового config key `drive_output_full_folder_id` (fallback на `drive_output_folder_id` якщо відсутній).
+
+Rationale: Concat у Code node — найпростіший шлях. Drive API через `helpers.httpRequest` обходить обмеження що n8n Drive node не може напряму "join binaries". Реюз credentials з n8n (`getCredentials`) — без зайвих API keys у config. Виконується лише раз per W3 run (не loop) — мінімум API calls (1 Sheets read + 7×N Drive downloads + 7 Drive uploads, де N = кількість сегментів). Для 1-хв уроку = ~70 calls, ~10с overhead.
+
+Edge cases:
+- Якщо `audio_drive_file_id` порожнє для якогось рядка (теоретично можливо при skip-on-empty у W2) — той сегмент пропускається (немає WAV-у для concat). Full duration буде менша.
+- Якщо лесон дуже довгий (>12 хв, 50+ сегментів × 7 langs = 350 файлів × ~500KB = 170MB у пам'яті) — потенційний memory ризик у n8n Code node. Для типових 1-5 хв уроків — безпечно.
+- Drive folder для full files: рекомендовано окрема субпапка `full/` всередині `output/` (через `drive_output_full_folder_id`), але працює і з тим самим `drive_output_folder_id` як fallback.
