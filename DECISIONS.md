@@ -496,3 +496,40 @@ Conflict with prior decisions:
 - `SLOT_TIMELINE_EACH_SEGMENT_OWNS_LEAD_SILENCE` (2026-05-16) — незмінне в principle. Slot-size constancy зберігається (file = naturalLead + en_duration). Просто redistribute padding всередині слоту.
 
 Rationale: 20/80 правило базувалось на гіпотезі що "padding ~= маленьке breath room для природного звучання". Це viявилось правдою тільки для tight контенту. Для медитативного контенту з природніми тишами в EN — навпаки, штучний lead зміщує слова відносно EN-таймінгу і ламає сприйняття уроку (слухач відчуває "паузи не там"). Cap у 0.05с зберігає мінімальний акустичний transition від prev'sTTS, але не зсуває слова відчутно. Math: для типового padding=5с — old leadSec=1с, new leadSec=0.05с → 20× менший зсув.
+
+---
+
+### 2026-05-17 — STT_SWITCH_SCRIBE_TO_DEEPGRAM
+
+Context: Тестовий урок з природніми довгими паузами між фразами виявив що ElevenLabs Scribe **систематично зсуває позиції слів** — drift накопичувався 0с → 7.2с до кінця уроку. Корінь: Scribe не відстежує довгі inter-segment тиші, а просто chain'ить слова. Музика не була причиною (підтверджено Phase A — drift залишався після voice-isolation).
+
+Тестування Deepgram Nova-3 на тому ж аудіо (Phase B1):
+
+| seg | reality | scribe en_start | scribe drift | deepgram start | deepgram drift |
+|---|---|---|---|---|---|
+| 001 | 0.8с | 0.839 | 0.04 | 0.88 | +0.08 |
+| 002 | 9.5с | 7.319 | +2.18 | 9.36 | -0.14 |
+| 005 | 26.1с | 24.399 | +1.70 | 26.3 | +0.20 |
+| 006 | 40.5с | 35.199 | **+5.30** | 40.555 | +0.06 |
+| 007 | 46.9с | 41.559 | +5.34 | 46.955 | +0.06 |
+| 008 | 56.8с | 49.599 | +7.20 | 56.86 | +0.06 |
+
+Deepgram точність ±0.2с на всіх сегментах vs Scribe з 7с накопичувальним дрифтом.
+
+Decision: Замінити ElevenLabs Scribe на Deepgram Nova-3 у W1 для STT. Pipeline стає:
+- W1: Download Audio (Drive) → **Deepgram STT (Nova-3 з `utterances=true`, `utt_split=1.5`)** → Segment Transcript → Write to Sheet
+- W2, W3 — без змін
+
+Реалізація:
+- HTTP node POST `https://api.deepgram.com/v1/listen?model=nova-3&punctuate=true&smart_format=true&utterances=true&utt_split=1.5&language=en`
+- Auth: Header Auth credential з `Authorization: Token <KEY>`
+- Body: raw binary (audio file з Drive)
+- Segment Transcript code тепер парсить `data.results.utterances[]` напряму — Deepgram уже сегментує по punctuation + silence, наш custom sentence-detection і "merge < 3с" логіка не потрібні.
+
+Conflict with prior decisions:
+- `INGEST_WORKFLOW_ARCHITECTURE` (2026-05-10) — Scribe був вибраний як one-vendor convenience. Тепер цей aspect не критичний. ElevenLabs залишається для TTS (де він кращий за альтернативи).
+- Output schema segments sheet — без змін (en_text, en_start_sec, en_end_sec, en_duration_sec). W2/W3 не зачеплені.
+
+Сторонній бонус: Deepgram дав більше granular сегментацію — старий sleep_001 seg_005 ("As each word arrives... You are ready.") тепер дві окремі utterances (між ними 1.2с природньої тиші). Це коректніше — кожен sentence окремий slot.
+
+Rationale: Меди-контент має фундаментально інший audio profile від загального speech — короткі фрази з 1-5с тишами між ними. Scribe тренований на continuous speech і chain'ить слова. Deepgram Nova-3 з explicit utterance splitting розроблений саме під такі use cases. Точність ±0.2с робить timeline-aligned дубляж реально можливим без manual fix-up. Cost: ~$0.004/хв (Nova-3 base rate) ≈ $0.005 за наш 66-секундний урок — пренебрежно мало.

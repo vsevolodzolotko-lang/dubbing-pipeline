@@ -36,6 +36,7 @@ Every row has two columns: `key`, `value`. Missing keys fall back to the default
 |---|---|---|---|
 | `anthropic_api_key` | *(required)* | W2 Adapt Translations, W3 Check Timing + Pad | Claude API key for in-Code-node HTTP requests. Stored here (not in n8n credentials) because Code nodes can't easily access n8n credentials. |
 | `elevenlabs_api_key` | *(required)* | W3 Check Timing + Pad | ElevenLabs API key for speed-retry TTS calls from inside the Code node. The main `ElevenLabs TTS` HTTP Request node still uses n8n credentials. |
+| `deepgram_api_key` | *(required for W1)* | W1 Deepgram STT (via n8n credential) | Deepgram API token for speech-to-text. Configured as an n8n Header Auth credential ("Deepgram account") with header `Authorization` = `Token <KEY>`. Stored in config sheet for documentation/audit; actual auth via credential binding. |
 | `drive_output_folder_id` | *(required)* | W3 Save to Drive | Google Drive folder ID where `.wav` files are uploaded. The folder must already exist; W3 doesn't auto-create it. |
 
 ---

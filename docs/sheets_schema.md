@@ -102,4 +102,5 @@ See [`docs/config_keys.md`](config_keys.md) for the full reference (defaults, ow
 | silence_lead_max_sec | `0.05` | (v3) Hard cap on breath-lead silence when EN gap = 0. Prevents word misalignment in short-content-long-tail segments. |
 | anthropic_api_key | `sk-ant-...` | Used by Adapt Translations (W2) and Check Timing + Pad (W3) for adaptation calls |
 | elevenlabs_api_key | `sk_...` | Used by Check Timing + Pad (W3) for re-TTS during shorten/expand and speed retry |
+| deepgram_api_key | *(token)* | Used by W1 Deepgram STT via n8n Header Auth credential. Replaced ElevenLabs Scribe to fix long-silence timestamp drift. |
 | drive_output_folder_id | *(folder ID)* | Where W3 uploads `.wav` files |
