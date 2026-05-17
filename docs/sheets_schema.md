@@ -99,6 +99,7 @@ See [`docs/config_keys.md`](config_keys.md) for the full reference (defaults, ow
 | max_borrow_per_segment_sec | `2.0` | (v3) Upper bound on breath-borrow per segment. |
 | expansion_threshold | `0.85` | (v3) Trigger expansion when `real_duration < en_duration × this`. |
 | silence_lead_ratio | `0.2` | (v3) Fraction of padding placed before TTS (when EN lead gap = 0). |
+| silence_lead_max_sec | `0.05` | (v3) Hard cap on breath-lead silence when EN gap = 0. Prevents word misalignment in short-content-long-tail segments. |
 | anthropic_api_key | `sk-ant-...` | Used by Adapt Translations (W2) and Check Timing + Pad (W3) for adaptation calls |
 | elevenlabs_api_key | `sk_...` | Used by Check Timing + Pad (W3) for re-TTS during shorten/expand and speed retry |
 | drive_output_folder_id | *(folder ID)* | Where W3 uploads `.wav` files |

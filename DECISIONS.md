@@ -471,3 +471,28 @@ Context: Sleep_001 run 4 (post sanitizer + Haiku + caching + strict drift cap + 
 Decision: Прийнято як **production-ready baseline** для меди-контенту. Week 1 (segment-level pipeline) закрито. Якісні нюанси Haiku-адаптації не блокують — гото переходити до Week 2 (Drive trigger, atomic regenerate, multi-lesson real-world test).
 
 Rationale: Зелені light на drift/contamination/needs_attention — три головні фундаментальні баги фіксовані. Quality issues — інкрементальні, можна тюнити промпт або робити IT-fallback на Sonnet, коли матимемо більше даних з різних уроків.
+
+---
+
+### 2026-05-17 — LEAD_SILENCE_CAP_FOR_LONG_TAIL_CONTENT
+
+Context: Тестовий прогон на новому уроці з big-tail сегментами (короткі affirmation-фрази типу "I am here." з 5+с EN-тиші всередині слоту) виявив що дубльовані слова стартують на 1-1.5с пізніше за EN-слова. Приклади з sleep_001 run 5:
+- seg_006 de: real=1.254с, padding=5.126с, leadSec=1.025с → слова пізніше на 1.025с
+- seg_007 de: leadSec=0.978с → слова пізніше на 0.978с
+- seg_008 de: leadSec=1.551с → слова пізніше на 1.551с
+
+Причина: формула `leadSec = leadRatio × padding` (20% від padding'у) у no-natural-lead гілці працює коректно для tight microsegmentів (padding < 1с дає <0.2с lead), але для big-tail контенту (padding 5с+) дає 1с+ штучної тиші ПЕРЕД словами. EN мав слова на початку слоту + tail-тишу, наш дубляж — навпаки.
+
+Decision: Додано hard cap на lead-силенс у no-natural-lead випадку. Формула:
+```
+leadSec = min(padding × silence_lead_ratio, silence_lead_max_sec)
+tailSec = padding - leadSec
+```
+
+New config key: `silence_lead_max_sec` (default 0.05) — максимальна тиша перед словами коли natural EN-gap = 0. 0.05с = пів-склад breath, практично невідчутний на слух зсув. User може viставити 0 для строгого EN-alignment або більше для tight microsegmentів.
+
+Conflict with prior decisions:
+- `SILENCE_DISTRIBUTION_20_80` (2026-05-16) — soft revise. Ratio 0.2 залишається але обмежується max-cap'ом. Поведінка для маленьких padding (<0.25с) ідентична. Поведінка для big padding кардинально краща.
+- `SLOT_TIMELINE_EACH_SEGMENT_OWNS_LEAD_SILENCE` (2026-05-16) — незмінне в principle. Slot-size constancy зберігається (file = naturalLead + en_duration). Просто redistribute padding всередині слоту.
+
+Rationale: 20/80 правило базувалось на гіпотезі що "padding ~= маленьке breath room для природного звучання". Це viявилось правдою тільки для tight контенту. Для медитативного контенту з природніми тишами в EN — навпаки, штучний lead зміщує слова відносно EN-таймінгу і ламає сприйняття уроку (слухач відчуває "паузи не там"). Cap у 0.05с зберігає мінімальний акустичний transition від prev'sTTS, але не зсуває слова відчутно. Math: для типового padding=5с — old leadSec=1с, new leadSec=0.05с → 20× менший зсув.

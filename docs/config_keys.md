@@ -26,7 +26,8 @@ Every row has two columns: `key`, `value`. Missing keys fall back to the default
 |---|---|---|---|
 | `min_inter_segment_gap_sec` | `0.4` | W3 Expand TTS Jobs (steal-from-prev) AND W3 Check Timing + Pad (borrow-from-next buffer) | Minimum silence between dubbed segments. Used symmetrically: when natural EN gap < this → steal from prev's audio budget; when natural gap > this → max borrowable into next = `gap_after − this`. |
 | `max_borrow_per_segment_sec` | `2.0` | W3 Expand TTS Jobs (Synthesize v3) | Upper bound on breath-borrow: a single segment cannot extend more than this many seconds into the next gap, even if the natural gap is larger. Prevents micro-segments from eating all available silence. |
-| `silence_lead_ratio` | `0.2` | W3 Check Timing + Pad (Synthesize v3) | Fraction of padding silence placed BEFORE TTS audio (lead), with `1 − ratio` placed AFTER (tail). Only applied when natural EN lead gap = 0; otherwise full natural gap goes to lead and all padding goes to tail. |
+| `silence_lead_ratio` | `0.2` | W3 Check Timing + Pad (Synthesize v3) | Fraction of padding silence placed BEFORE TTS audio (lead), with `1 − ratio` placed AFTER (tail). Only applied when natural EN lead gap = 0; otherwise full natural gap goes to lead and all padding goes to tail. The final lead is `min(padding × ratio, silence_lead_max_sec)`. |
+| `silence_lead_max_sec` | `0.05` | W3 Check Timing + Pad | Hard cap (seconds) on the breath-lead silence placed before TTS when natural EN gap = 0. Prevents word misalignment for short-content-long-tail segments (e.g. "I am here." with 5s of EN silence after). Default 0.05 ≈ half a syllable of breath; set to 0 for strict EN alignment, higher for more breath. |
 | `max_speed` | `1.15` | W3 Check Timing + Pad | Hard ceiling on TTS speed adjustment. Speed retries go 1.10 → 1.15 (capped here). Higher values sound artificial for meditation content. |
 
 ## API keys & external services

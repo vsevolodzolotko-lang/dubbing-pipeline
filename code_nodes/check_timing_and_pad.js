@@ -25,7 +25,7 @@ const job = $('Expand TTS Jobs').item.json;
 const {
   voice_id, en_text, en_duration_sec,
   lead_silence_natural_sec, tts_budget_sec, effective_slot_sec, trailing_steal_sec,
-  silence_lead_ratio, expansion_threshold,
+  silence_lead_ratio, silence_lead_max_sec, expansion_threshold,
   stability, similarity_boost, segment_id, lang, lesson_id,
 } = job;
 
@@ -35,6 +35,7 @@ const budget       = parseFloat(tts_budget_sec)           || enDur;
 const slot         = parseFloat(effective_slot_sec)       || budget;
 const trailSteal   = parseFloat(trailing_steal_sec)       || 0;
 const leadRatio    = parseFloat(silence_lead_ratio)       || 0.2;
+const leadMaxSec   = parseFloat(silence_lead_max_sec)     || 0.05;
 const expThreshold = parseFloat(expansion_threshold)      || 0.75;
 const enRef        = en_text || '';
 
@@ -290,8 +291,11 @@ if (realDur <= enDur) {
     leadSec = naturalLead;
     tailSec = padding;
   } else {
-    leadSec = leadRatio * padding;
-    tailSec = (1 - leadRatio) * padding;
+    // Cap breath-lead so dubbed words align with EN even when EN slot has a long trailing silence.
+    // Without the cap, big padding (e.g. "I am here." + 5s of silence) gave 1+s of pre-word silence
+    // and pushed dubbed words 1s later than EN words.
+    leadSec = Math.min(padding * leadRatio, leadMaxSec);
+    tailSec = padding - leadSec;
   }
 } else {
   borrowedSec = realDur - enDur;
