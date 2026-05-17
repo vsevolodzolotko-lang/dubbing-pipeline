@@ -554,3 +554,55 @@ Decision: Перейти з Deepgram `utterances` на `paragraphs.paragraphs[].
 - Дуже довгі окремі речення (>150 chars) → 1 сегмент (не ріжемо посередині речення)
 
 Rationale: Sentences більш універсальні ніж utterances — Deepgram дає їх для будь-якого типу контенту. Char-based grouping (150) дає предсказуваний розмір сегмента для TTS budget і Claude adaptation. Gap-check зберігає природні паузи там де вони є. Без changes у W2/W3 — segments sheet contract той же.
+
+---
+
+### 2026-05-17 — STRICT_ALIGNMENT_DISABLE_BREATH_BORROW
+
+Context: Прогон з Deepgram + sentence-level segmentation виявив що breath-borrow механізм (BREATH_BORROW_MECHANISM, 2026-05-16) створює inter-lang inconsistency. Один сегмент мав різну `final_duration_sec` для різних мов (ті що позичили час vs ті що не позичили). Приклад з sleep_001 run 7:
+
+| seg_001 (slot 7.44с) | de | es | fr | pl | pt | it | tr |
+|---|---|---|---|---|---|---|---|
+| final_duration | 8.36 | 8.87 | 7.44 | 8.36 | 7.44 | 7.44 | 8.36 |
+| borrowed_sec | 0.92 | 1.43 | 0 | 0.92 | 0 | 0 | 0.92 |
+
+Cross-lang drift до 2.1с по сумі цілого уроку. Користувач вимагає строго consistent timing між мовами для multi-lang dubbing playback.
+
+Decision: Вимкнути breath-borrow. У Check Timing + Pad змінити `maxAllowed`:
+```
+// Старе:
+maxAllowed = maxBorrowable > 0 ? slot * BUDGET_FACTOR : enDur;
+// Нове:
+maxAllowed = enDur;  // always strict
+```
+
+Це гарантує що shorten loop, speed retry, hard truncate цілять у `en_duration` завжди. Реальне аудіо ніколи не перевищує `en_duration` → file_duration = `naturalLead + en_duration` константно для всіх мов.
+
+Borrow-else branch у lead/tail computation залишається як defensive (set `borrowedSec=0`, flag `needs_attention=true` у rounding edge cases).
+
+Conflict with prior decisions:
+- `BREATH_BORROW_MECHANISM` (2026-05-16) — фактично revoked. Конфіг key `max_borrow_per_segment_sec` залишається у схемі для backward compat але не впливає на pipeline (dead code).
+
+Rationale: Breath-borrow був спроектований для рідкого case'у "lang TTS overruns + adjacent gap available". На практиці він спрацьовував стихійно для 1-3 langs з 7 у тих самих сегментах, створюючи unpredictable cross-lang final_duration. Для multi-lang DAW playback (де користувач може миттєво перемикати мови) предсказуваність важливіша за гнучкість. Втрата: одна або кілька мов матимуть більш аґресивне shortening/speed замість borrow. Acceptable trade-off — обираємо alignment над breath room.
+
+---
+
+### 2026-05-17 — EXTEND_LAST_SEGMENT_TO_AUDIO_DURATION
+
+Context: Deepgram повертає word-level timestamps до останнього слова. Якщо EN-аудіо має trailing silence (5+с після останніх слів), Deepgram цей хвіст не покриває — `en_end_sec` останнього сегменту = час кінця останнього слова, не fileduration. Сума всіх slot'ів = `en_end_sec[last]` < actual audio duration.
+
+Для sleep_001 voice-only audio: actual = 66с, Deepgram last word.end = 60.46с, missing tail = 5.5с.
+
+Decision: У W1 Segment Transcript розширити `last_segment.end` до `data.metadata.duration` (Deepgram дає це поле у metadata response). Code:
+```
+const audioDuration = parseFloat(data.metadata?.duration) || null;
+if (audioDuration && segments.length && audioDuration > last.end) {
+  last.end = audioDuration;
+}
+```
+
+Останній сегмент тепер охоплює свої слова + trailing silence до кінця файлу. W3 згенерує TTS для тексту, padding-тиша заповнить решту слоту до повної `en_duration`.
+
+Result: сума final_duration всіх сегментів = audio total exactly. Дубляж по тривалості = EN audio.
+
+Rationale: Користувач вимагає total dub = EN audio. Найпростіший шлях — розширити slot останнього сегменту бо це silence regardless of мови (нікому не потрібно дублювати silence). TTS для тексту "I am whole exactly as I am." займе ~3с, далі 8с silence в кінці слоту — matches EN's pattern (words then long fade-out).

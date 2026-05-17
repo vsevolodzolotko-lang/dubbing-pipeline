@@ -42,8 +42,11 @@ const enRef        = en_text || '';
 // Strict drift cap:
 //   - borrow case (max_borrowable > 0): real may extend into next gap up to slot * 1.05
 //   - steal case  (max_borrowable = 0): real must NOT exceed en_duration — prevents drift
-const maxBorrowable = Math.max(0, slot - budget);
-const maxAllowed    = maxBorrowable > 0 ? slot * BUDGET_FACTOR : enDur;
+// Strict alignment: maxAllowed = enDur always.
+// Breath-borrow disabled to keep cross-lang final_duration_sec consistent.
+// max_borrowable_sec / effective_slot_sec from Expand TTS Jobs are kept in schema for diagnostics
+// but are NOT used to expand the audio budget here.
+const maxAllowed = enDur;
 
 const configMap = {};
 $('Read Config').all().forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });
@@ -298,9 +301,12 @@ if (realDur <= enDur) {
     tailSec = padding - leadSec;
   }
 } else {
-  borrowedSec = realDur - enDur;
+  // Defensive: with maxAllowed = enDur, real_dur should never exceed enDur after retries+truncate.
+  // If it does (rounding edge case), treat as pad with 0 padding and flag for review.
+  borrowedSec = 0;
   leadSec     = naturalLead;
   tailSec     = 0;
+  needsAttention = true;
 }
 
 // === Build WAV ===
