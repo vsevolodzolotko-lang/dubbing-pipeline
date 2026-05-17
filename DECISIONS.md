@@ -399,3 +399,30 @@ Decision: Гілкування тепер по `real ≤ en_duration_sec`. У pa
 Також виправлено side-bug: у W3 shorten-loop Claude інколи над-агресивно скорочував (pt_seg_001: 4.48с → 3.11с). Додано explicit floor `targetCharsLow = floor(targetChars × 0.85)` у промпт + code-side reject. Зняв guard `shortenRetries === 0` з expansion loop — тепер expansion може відновлювати над-скорочений текст незалежно від того чи shorten перед тим спрацював.
 
 Rationale: Drift у piped'і це не "feature, accept it" — це баг, що пропорційно росте з довжиною уроку. Branch на `en_duration` робить структуру файлу деtermined: для будь-якого `real ≤ enDur` файл = naturalLead + enDur. Borrow стає семантично коректним (тільки коли є overrun у фактичну тишу EN). Single-segment shorten + expansion разом утворюють Goldilocks-loop, що знаходить правильну довжину навіть коли Claude промахується в одну зі сторін.
+
+---
+
+### 2026-05-17 — COST_OPTIMIZATIONS_W3 + STRICT_DRIFT_CAP
+
+Context: Прогон W3 з'їдав ~$0.39 за один урок sleep_001 (8 сегментів × 7 мов). Аналіз показав ~180 API calls/прогон: 49 initial TTS + ~53 shorten attempts (Claude + re-TTS) + ~17 speed retries + ~4 expansion attempts. Друга проблема — IT мова мала залишковий positive drift +0.454с через `slot * 1.05` tolerance у steal-сценарії (де borrow недоступний).
+
+Decision: Кілька оптимізацій разом:
+
+1. **Claude → Haiku для W3 shorten/expand**: модель змінена на `claude-haiku-4-5-20251001`. Задачі (скоротити/розширити з збереженням concepts) прості — Sonnet overkill. ~4× дешевше per token. W2 Adapt Translations і Tone Analysis залишаються на Sonnet (тон-критичні).
+
+2. **Prompt caching з ephemeral TTL (5 хв)**: системний промпт у shorten/expand розбитий на static + dynamic частини, static markнут `cache_control: {type: ephemeral}`. ToV входить в static (часто 1000+ tokens). Cache TTL рефрешиться на кожному hit'і, тож для tightly-packed loop'у W3 кеш залишається теплим протягом усього прогону (навіть для довгих уроків). 1-hour TTL не вмикали — у нашому випадку beneficial gain marginal.
+
+3. **LANG_CPS retune за реальними даними**: з prog2 даних чарактерна швидкість TTS була нижча за оцінки v1: DE 13→12, ES 17→15, IT 16→14. Це дає W2 кращу estimate і зменшує false-positive triggers у W3.
+
+4. **expansion_threshold default 0.85 → 0.75**: експансія fired для real/en_duration ratio 0.75–0.85, де padding-тиша звучала прийнятно. Зменшує expansion calls без помітного якісного програшу.
+
+5. **STRICT_DRIFT_CAP**: уведено `maxAllowed = maxBorrowable > 0 ? slot * 1.05 : enDur`. У steal-сценарії (no borrow available) audio truncates строго на `en_duration` замість `slot * 1.05`. Це усуває +0.454с дрифт IT з prog2. Hard truncate з needs_attention flag для ручного review.
+
+Conflict with prior decisions:
+- SPEED_ADJUSTMENT_AS_FALLBACK (2026-05-10) — speed loop ціль тепер `maxAllowed` замість `slot * 1.05`.
+- NEEDS_ATTENTION_ONLY_ON_REAL_OVERFLOW (2026-05-16) — поріг для needs_attention тепер строгіший у steal-сценарії.
+- ADAPTATION_PROMPT_PRESERVE_CONCEPTS (2026-05-16) — Sonnet → Haiku для W3 single-segment ops. W2 multi-lang adapt залишається на Sonnet.
+
+Rationale: Економія — це не цілком про "менше API calls", а про **дешевше за виклик**. Haiku 4.5 справляється з "скороти зі збереженням concepts" майже як Sonnet (задача добре формалізована у промпті, не вимагає глибокого reasoning). Caching робить input tokens у 10× дешевшими після першого виклику. CPS-tune перерозподіляє роботу: W2 (one call per segment-bulk) робить більше — W3 (per segment×lang) фіриться менше. Strict drift cap прибирає накопичувальну похибку, яка для 12-хв уроку давала би ~5с зсуву.
+
+Очікувана економія: $0.39 → ~$0.10–0.15 per W3 run.

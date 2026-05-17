@@ -16,7 +16,8 @@
 //
 // Requires n8n ≥ 1.x (uses this.helpers.httpRequest)
 
-const LANG_CPS     = { de: 13, es: 17, fr: 15, pl: 14, pt: 16, it: 16, tr: 14 };
+// CPS tuned against real ElevenLabs PCM output (sleep_001 run 2 observations).
+const LANG_CPS     = { de: 12, es: 15, fr: 15, pl: 14, pt: 16, it: 14, tr: 14 };
 const LANGS        = ['de', 'es', 'fr', 'pl', 'pt', 'it', 'tr'];
 const BUDGET_FACTOR = 1.05;
 const MAX_ATTEMPTS  = 3;
