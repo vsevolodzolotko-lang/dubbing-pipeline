@@ -532,4 +532,25 @@ Conflict with prior decisions:
 
 Сторонній бонус: Deepgram дав більше granular сегментацію — старий sleep_001 seg_005 ("As each word arrives... You are ready.") тепер дві окремі utterances (між ними 1.2с природньої тиші). Це коректніше — кожен sentence окремий slot.
 
-Rationale: Меди-контент має фундаментально інший audio profile від загального speech — короткі фрази з 1-5с тишами між ними. Scribe тренований на continuous speech і chain'ить слова. Deepgram Nova-3 з explicit utterance splitting розроблений саме під такі use cases. Точність ±0.2с робить timeline-aligned дубляж реально можливим без manual fix-up. Cost: ~$0.004/хв (Nova-3 base rate) ≈ $0.005 за наш 66-секундний урок — пренебрежно мало.
+Rationale: Меди-контент має фундаментально інший audio profile від загального speech — короткі фрази з 1-5с тишами між ними. Scribe тренований на continuous speech і chain'ить слова. Deepgram Nova-3 з explicit utterance splitting розроблений саме під такі use cases. Точність ±0.2с робить timeline-aligned дубляж реально можливим без manual fix-up. Cost: ~$0.004/хв (Nova-3 base rate) ≈ $0.005 за наш 66-секундний урок — пренеброжно мало.
+
+---
+
+### 2026-05-17 — W1_SEGMENTATION_BY_SENTENCES_WITH_GROUPING
+
+Context: Перший прогін W1 з Deepgram на повільному медитативному контенті (з довгими паузами) дав акуратні segments через `utterances` (silence-split). Але другий прогін на швидкому/розмовному контенті (без довгих пауз) дав лише 4 великі сегменти — користувач хоче гранулярність 1-2 речення / до ~150 символів на сегмент.
+
+Decision: Перейти з Deepgram `utterances` на `paragraphs.paragraphs[].sentences[]` як основу сегментації:
+- Sentences розбиваються Deepgram по пунктуації (більш надійно для змішаних швидкостей мовлення)
+- Paragraph boundaries — природні довгі паузи (Deepgram сам визначає)
+- Додано grouping логіка: послідовні речення в одному paragraph об'єднуються в один сегмент якщо:
+  - сумарна довжина ≤ `MAX_CHARS = 150`
+  - пауза між ними ≤ `MAX_GAP_FOR_GROUPING = 1.0с`
+- Paragraph boundaries завжди закривають current segment (не групуємо через довгі паузи)
+
+Поведінка:
+- Швидкий контент → багато сегментів по 1-2 речення (групуються до 150 chars)
+- Повільний меди-контент з паузами → кожне речення = окремий сегмент (paragraph boundaries і gap-перевірка не дають згрупувати)
+- Дуже довгі окремі речення (>150 chars) → 1 сегмент (не ріжемо посередині речення)
+
+Rationale: Sentences більш універсальні ніж utterances — Deepgram дає їх для будь-якого типу контенту. Char-based grouping (150) дає предсказуваний розмір сегмента для TTS budget і Claude adaptation. Gap-check зберігає природні паузи там де вони є. Без changes у W2/W3 — segments sheet contract той же.
