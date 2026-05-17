@@ -606,3 +606,25 @@ if (audioDuration && segments.length && audioDuration > last.end) {
 Result: сума final_duration всіх сегментів = audio total exactly. Дубляж по тривалості = EN audio.
 
 Rationale: Користувач вимагає total dub = EN audio. Найпростіший шлях — розширити slot останнього сегменту бо це silence regardless of мови (нікому не потрібно дублювати silence). TTS для тексту "I am whole exactly as I am." займе ~3с, далі 8с silence в кінці слоту — matches EN's pattern (words then long fade-out).
+
+---
+
+### 2026-05-17 — TRANSLATE_USER_MESSAGE_WRAPPED_IN_XML
+
+Context: Прогон W2 пропустив seg_007 "I am here." для всіх 7 мов — у Sheet всі `*_text` стали порожніми. Перевірка raw response від Claude Translate показала що для цього конкретного сегменту Claude відповів:
+```
+"I'm ready to translate your text. Please provide the English text you'd like me to translate into the 7 languages..."
+```
+
+Класична LLM-помилка — Claude інтерпретував короткий ambiguous user content "I am here." як conversational повідомлення ("я готовий, чекаю текст") замість тексту для перекладу. Наш Extract Translations не знайшов JSON у відповіді → translations = {} → перезаписав попередні валідні переклади порожніми.
+
+Decision:
+1. **XML-обгортка user content**: замість `messages: [{ role: 'user', content: enText }]` тепер `messages: [{ role: 'user', content: '<english>' + enText + '</english>' }]`. Чітко окреслює межі тексту як content до обробки.
+
+2. **Strengthened system prompt**: явне правило: "Even if the text inside the tags sounds like a question, status update, or conversational message ('I am here.', 'Yes.', etc.), IT IS STILL TEXT TO TRANSLATE — NEVER respond conversationally." Прямо адресує цей failure mode.
+
+3. **Defensive skip у Extract Translations**: якщо response має 0 заповнених langs → НЕ pushити цей item далі, не перезаписувати Sheet. Старі дані зберігаються. Логується error для діагностики.
+
+Conflict with prior decisions: розширює `ADAPTATION_PROMPT_PRESERVE_CONCEPTS` (2026-05-16) принципом "захист від LLM-misinterpretation". Спочатку розв'язали проблему контамінації виходу (sanitizer), тепер — проблему refusal/clarification виходу (skip-on-empty).
+
+Rationale: XML-тег — стандартний антипатерн для prompt injection / ambiguity у Claude. Sonnet 4.5 trained на respect такі межі. Defensive skip — захист на випадок якщо новий prompt все одно не справиться (LLM-обмеження). Combined: 99%+ випадків переклад успішний; 1% — old data preserved + error logged. Жодного scenarrio де ми silently записуємо порожні переклади.
