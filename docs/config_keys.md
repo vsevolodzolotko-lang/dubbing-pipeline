@@ -42,11 +42,22 @@ Every row has two columns: `key`, `value`. Missing keys fall back to the default
 
 ---
 
+## Per-language CPS overrides
+
+| Key | Default | Read by | Purpose |
+|---|---|---|---|
+| `cps_estimate_de` | `12`   | W2 Adapt Translations, W3 Check Timing + Pad | Per-language chars-per-second estimate. Used to predict whether a translation will fit in the slot before TTS (W2) and to compute `target_chars` for Claude shorten/expand prompts (W3). Defaults are baked into `CPS_DEFAULTS` in both code nodes. If a key is present in config, it overrides the default. |
+| `cps_estimate_es` | `15`   | (same) | |
+| `cps_estimate_fr` | `15`   | (same) | |
+| `cps_estimate_it` | `14`   | (same) | |
+| `cps_estimate_pl` | `14`   | (same) | |
+| `cps_estimate_pt` | `16`   | (same) | |
+| `cps_estimate_tr` | `14`   | (same) | |
+
+Run `node scripts/analyze_cps.js <localizations.csv>` after any W3 run to compute the observed CPS per language and see whether to update the config values. Voice changes can shift CPS noticeably (different voice = different speaking pace).
+
 ## Dead keys to remove from your live sheet
 
-The following keys are NOT read by any current workflow. If your `config` tab has rows with these keys, you can safely delete them:
-
-- `cps_estimate_de`, `cps_estimate_es`, `cps_estimate_fr`, `cps_estimate_it`, `cps_estimate_pl`, `cps_estimate_pt`, `cps_estimate_tr` — CPS values were briefly configurable, now hardcoded as `LANG_CPS` constants in `code_nodes/check_timing_and_pad.js` and `code_nodes/adapt_translations.js`. To change CPS, edit those files (and the matching jsCode inside the workflow JSON), not the sheet.
 - `min_speed` — never wired up. Speed is always 1.0 baseline with 1.10 / 1.15 retry.
 
 ## Adding new keys

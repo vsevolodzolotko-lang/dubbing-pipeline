@@ -80,8 +80,9 @@ One row = one key. Read by all workflows. **Edit manually** when you need to twe
 | **Timing** | `min_inter_segment_gap_sec` (0.3), `max_borrow_per_segment_sec` (2.0 — currently unused), `silence_lead_ratio` (0.2), `silence_lead_max_sec` (0.05), `expansion_threshold` (0.75) | W3 |
 | **Speed/retry** | `max_speed` (1.15), `max_adaptation_attempts` (3) | W2, W3 |
 
-> **Dead keys** — if your sheet has any of these, remove them (unused in code):
-> `cps_estimate_de`, `cps_estimate_es`, `cps_estimate_fr`, `cps_estimate_it`, `cps_estimate_pl`, `cps_estimate_pt`, `cps_estimate_tr`, `min_speed`. CPS is hardcoded in `code_nodes/check_timing_and_pad.js` and `code_nodes/adapt_translations.js`.
+> **Optional CPS tuning**: `cps_estimate_de`, …, `cps_estimate_tr` — per-lang chars-per-second overrides. If present, override `CPS_DEFAULTS` in the W2/W3 code. Run `node scripts/analyze_cps.js <localizations.csv>` after a W3 run to derive recommended values from real TTS output. Useful after voice changes.
+>
+> **Dead key**: `min_speed` — never wired up, safe to delete.
 
 ### `segments` — source data, one row per EN sentence-group
 
@@ -171,7 +172,7 @@ Full schema (every column explained): [`docs/sheets_schema.md#sheet-localization
 - **Add a new language** → add row to `voices` tab + add code to `active_langs` config key
 - **Regenerate one segment** → manually clear that row's `{lang}_text` in `segments`, re-run W2 then W3
 - **Tune translation tone** → edit `tone_of_voice` config value
-- **Tune shortening aggressiveness** → edit `LANG_CPS` constants in `code_nodes/adapt_translations.js` and `code_nodes/check_timing_and_pad.js` (per-language chars/sec estimate)
+- **Tune shortening aggressiveness** → set `cps_estimate_{lang}` in the `config` sheet (per-language chars/sec). Run `node scripts/analyze_cps.js <localizations.csv>` to get recommended values from real TTS data. Falls back to `CPS_DEFAULTS` in `code_nodes/check_timing_and_pad.js` / `code_nodes/adapt_translations.js`.
 - **Tune inter-segment gap** → change `min_inter_segment_gap_sec` in config
 
 ---

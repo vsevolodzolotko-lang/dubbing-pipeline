@@ -695,3 +695,32 @@ Decision: Hard delete з git:
 - `docs/config_keys.md` — додано секцію "Dead keys to remove from your live sheet" (cps_estimate_*, min_speed)
 
 Rationale: Згідно з користувацьким принципом proactive documentation maintenance (memory: feedback_doc_maintenance). Чистий репо = легше onboarding. Видалені файли збережено у git history якщо колись знадобляться. Live Google Sheet config tab матиме рекомендацію в README прибрати застарілі ключі — це manual cleanup для user.
+
+---
+
+### 2026-05-17 — CPS_DRIVEN_BY_CONFIG_NOT_HARDCODED
+
+Context: Раніше LANG_CPS була hardcoded константою в `code_nodes/adapt_translations.js` і `code_nodes/check_timing_and_pad.js` (`{ de: 12, es: 15, ... }`). Користувач додав `cps_estimate_de=13`, `cps_estimate_es=15.5`, ... в config sheet, але код їх не читав — Sheet-значення були dead. Окрім того, плануються voice changes (наприклад, перехід на чоловічі голоси), які можуть зсунути CPS на 1-3 одиниці.
+
+Decision: Зробити CPS config-driven з code-side defaults як fallback. Архітектура:
+
+```js
+// Top of code node — defaults bakery
+const CPS_DEFAULTS = { de: 12, es: 15, fr: 15, pl: 14, pt: 16, it: 14, tr: 14 };
+
+// After configMap is built
+const LANG_CPS = {
+  de: parseFloat(configMap.cps_estimate_de) || CPS_DEFAULTS.de,
+  // ... per-lang fallback ...
+};
+```
+
+Якщо `cps_estimate_{lang}` присутній в config → override default. Якщо відсутній → fallback на code-side default (зберігає backward compat).
+
+Додано `scripts/analyze_cps.js` — standalone Node-скрипт що читає expoрт `localizations.csv` і виводить observed CPS per lang (для рядків з `final_speed=1.0`, щоб не плутати з прискореними сегментами). Поряд порівнює з current `cps_estimate_*` з `config.csv` (якщо є sibling файл), пропонує rounded recommendations. Запускається вручну після кожного W3 прогону або при зміні голосів.
+
+Conflict with prior decisions: ослаблює `CLEANUP_LEGACY_FILES_AND_DOCS` (2026-05-17) — там `cps_estimate_*` був позначений як "dead key". Тепер ці keys — live optional overrides. Documentation в `docs/config_keys.md`, `docs/sheets_schema.md`, `README.md` оновлено відповідно.
+
+Rationale: Voice changes (планується переходити на male/female + інші мови) роблять CPS не universal-константою, а voice-pair-specific. Виносити в config дозволяє швидко тюнити з Sheet без редагування коду. Code-side defaults захищають від config-shutdown. Analyze script закриває data-driven loop: запустив W3 → дивишся observed → оновлюєш config якщо drift.
+
+Заплановано окремо (не в цьому коміті): **W0_Calibrate workflow** — автоматизована калібрація CPS на test sample audio після зміни voice_id. Триггер manual, output — рекомендовані значення з можливістю автозапису у config. Дизайн обговорюється з користувачем.

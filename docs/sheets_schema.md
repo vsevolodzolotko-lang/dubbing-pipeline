@@ -89,9 +89,9 @@ Key-value store for pipeline-wide settings.
 
 See [`config_keys.md`](config_keys.md) for the full reference (defaults, owners, purpose). Summary below.
 
-> **Dead keys** — if your live sheet has any of these rows, delete them. They are NOT read by any current workflow:
-> - `cps_estimate_de`, `cps_estimate_es`, `cps_estimate_fr`, `cps_estimate_it`, `cps_estimate_pl`, `cps_estimate_pt`, `cps_estimate_tr` — CPS values are hardcoded in `code_nodes/check_timing_and_pad.js` and `code_nodes/adapt_translations.js` (was: configurable; now: tuned in code).
-> - `min_speed` — never wired up.
+> **Optional CPS overrides**: `cps_estimate_de`, `cps_estimate_es`, `cps_estimate_fr`, `cps_estimate_it`, `cps_estimate_pl`, `cps_estimate_pt`, `cps_estimate_tr` — per-language characters-per-second estimates. If present, override the `CPS_DEFAULTS` baked into the W2/W3 code nodes. See [config_keys.md](config_keys.md#per-language-cps-overrides) and use `scripts/analyze_cps.js` after a W3 run to derive observed values from real data.
+>
+> **Dead key**: `min_speed` — never wired up, safe to delete.
 
 | key | value | Notes |
 |-----|-------|-------|

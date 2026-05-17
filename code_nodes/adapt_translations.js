@@ -16,8 +16,10 @@
 //
 // Requires n8n ≥ 1.x (uses this.helpers.httpRequest)
 
-// CPS tuned against real ElevenLabs PCM output (sleep_001 run 2 observations).
-const LANG_CPS     = { de: 12, es: 15, fr: 15, pl: 14, pt: 16, it: 14, tr: 14 };
+// Per-language CPS — defaults tuned against real ElevenLabs output; can be overridden
+// per-language via config keys cps_estimate_de, cps_estimate_es, …, cps_estimate_tr.
+// LANG_CPS is constructed below, after configMap is populated.
+const CPS_DEFAULTS = { de: 12, es: 15, fr: 15, pl: 14, pt: 16, it: 14, tr: 14 };
 const LANGS        = ['de', 'es', 'fr', 'pl', 'pt', 'it', 'tr'];
 const BUDGET_FACTOR = 1.05;
 const MAX_ATTEMPTS  = 3;
@@ -29,6 +31,17 @@ const configMap = {};
 configItems.forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });
 const apiKey = configMap['anthropic_api_key'] || '';
 if (!apiKey) throw new Error('anthropic_api_key missing from config sheet');
+
+// Resolve per-language CPS from config (with defaults). Override in config via cps_estimate_{lang}.
+const LANG_CPS = {
+  de: parseFloat(configMap.cps_estimate_de) || CPS_DEFAULTS.de,
+  es: parseFloat(configMap.cps_estimate_es) || CPS_DEFAULTS.es,
+  fr: parseFloat(configMap.cps_estimate_fr) || CPS_DEFAULTS.fr,
+  pl: parseFloat(configMap.cps_estimate_pl) || CPS_DEFAULTS.pl,
+  pt: parseFloat(configMap.cps_estimate_pt) || CPS_DEFAULTS.pt,
+  it: parseFloat(configMap.cps_estimate_it) || CPS_DEFAULTS.it,
+  tr: parseFloat(configMap.cps_estimate_tr) || CPS_DEFAULTS.tr,
+};
 
 const SYSTEM_PROMPT = `You are a localization editor for meditation/wellness audio. Your job is to shorten a translated text so it fits within a strict time budget for audio dubbing.
 
