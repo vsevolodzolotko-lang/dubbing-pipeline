@@ -1,12 +1,14 @@
 # docs/
 
-Additional documentation for the pipeline — runbooks, reference guides, and architecture notes.
+Deep-dive reference for the pipeline. Casual overview lives in the root [`README.md`](../README.md); this folder is for when you need exact column names, exact decision rationales, or first-time setup checklists.
 
-| File | Purpose |
-|------|---------|
-| `runbook.md` | Step-by-step operational guide: how to trigger a localization run, monitor progress in n8n, rerun failed segments, and deliver output files. |
-| `reaper-hotkeys.md` | Hotkey reference for the ReaScript workflow inside Reaper: what each key does, how to install the scripts, and troubleshooting tips. |
-| `architecture.md` | High-level diagram and narrative description of the full pipeline data flow: Google Sheets → n8n → Claude → ElevenLabs → RPP → Reaper. |
-| `voice-calibration.md` | Notes on ElevenLabs voice selection per language: which voice IDs are in use, why they were chosen, and how to recalibrate if quality degrades. |
+| File | When to open |
+|---|---|
+| `config_keys.md` | You need to add or change a row in the `config` sheet — full table of every key, default value, who reads it, and what behavior it controls. |
+| `sheets_schema.md` | You need exact column meanings for `segments`, `localizations`, `voices`, `config` — all fields explained, plus notes on Scribe/Deepgram timestamp accuracy. |
+| `drive_structure.md` | Layout of input/output Drive folders and how the pipeline names files. |
+| `localization_rules.md` | Per-language translation conventions (informal address, EU vs Latin variants, etc.). Source for the system prompt. |
+| `tone_of_voice.md` | Spirio brand voice reference. The `tone_of_voice` config key is a copy of this (or shorter excerpt) — keep them aligned when editing. |
+| `day1_verification_checklist.md` | One-time setup checklist used during initial pipeline bring-up. Useful when onboarding a new clone of the repo. |
 
-Files are added here as each feature reaches a stable state. Work-in-progress notes belong in the relevant week's PLAN.md checklist, not here.
+Decisions log (why anything was designed the way it is) lives in the root [`DECISIONS.md`](../DECISIONS.md).

@@ -670,3 +670,28 @@ Read Localizations Fresh
 ```
 
 Drive Download handles OAuth automatically via the n8n credential. Code node only does pure JS concat. No credential lookup needed in Code.
+
+---
+
+### 2026-05-17 — CLEANUP_LEGACY_FILES_AND_DOCS
+
+Context: Після того як pipeline вийшов на production-ready стан, у репо залишилося багато legacy-файлів і застарілих README з посиланнями на Reaper-інтеграцію (викинута 2026-05-16) та неіснуючі файли (`translate.json`, `synthesize.json`, `build-tts-payload.js`, etc.).
+
+Decision: Hard delete з git:
+- `workflows/W2_Translate.json` — заміщений `W2_Translate_v2.json`
+- `workflows/W3_Synthesize.json` — заміщений `W3_Synthesize_v2.json`
+- `workflows/cascade_test.json` — cascade-логіка викинута (`STRICT_TIMING_OVER_CASCADE`)
+- `workflows/synthesize_v2_post_cleanup.json` — experimental dump
+- `code_nodes/cascade_positioning.js` — cascade math, не використовується
+- `scripts/spike_test.js` — ранній спайк, замінений n8n workflow
+- `scripts/test_pipeline.js` — local pipeline test, дублює W1+W2+W3
+
+Переписані README файли:
+- `README.md` (root) — повний rewrite: production-ready status, quick-start, pipeline overview, Sheets cheatsheet section, file structure, common tasks, cost estimate
+- `workflows/README.md`, `code_nodes/README.md`, `prompts/README.md`, `scripts/README.md`, `docs/README.md` — synced з реальним вмістом folder'ів
+
+Документація фіксів:
+- `docs/sheets_schema.md` — `status` колонка позначена як legacy/unused; додано список dead config keys
+- `docs/config_keys.md` — додано секцію "Dead keys to remove from your live sheet" (cps_estimate_*, min_speed)
+
+Rationale: Згідно з користувацьким принципом proactive documentation maintenance (memory: feedback_doc_maintenance). Чистий репо = легше onboarding. Видалені файли збережено у git history якщо колись знадобляться. Live Google Sheet config tab матиме рекомендацію в README прибрати застарілі ключі — це manual cleanup для user.

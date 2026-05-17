@@ -42,6 +42,13 @@ Every row has two columns: `key`, `value`. Missing keys fall back to the default
 
 ---
 
+## Dead keys to remove from your live sheet
+
+The following keys are NOT read by any current workflow. If your `config` tab has rows with these keys, you can safely delete them:
+
+- `cps_estimate_de`, `cps_estimate_es`, `cps_estimate_fr`, `cps_estimate_it`, `cps_estimate_pl`, `cps_estimate_pt`, `cps_estimate_tr` — CPS values were briefly configurable, now hardcoded as `LANG_CPS` constants in `code_nodes/check_timing_and_pad.js` and `code_nodes/adapt_translations.js`. To change CPS, edit those files (and the matching jsCode inside the workflow JSON), not the sheet.
+- `min_speed` — never wired up. Speed is always 1.0 baseline with 1.10 / 1.15 retry.
+
 ## Adding new keys
 
 1. Add a row in the config sheet with the new `key` and `value`.

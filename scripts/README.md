@@ -1,12 +1,27 @@
 # scripts/
 
-Node.js utility scripts for local development, calibration, and testing. These run outside n8n — either on the command line or in CI.
+Local Node.js helpers — run outside n8n on the command line. Requires `.env` with valid API keys.
 
 | File | Purpose |
-|------|---------|
-| `calibrate-voices.js` | Calls ElevenLabs API for each configured voice ID and saves a short sample clip to `/tmp/calibration/`. Used to verify voice mapping before a full batch run. |
-| `test-claude.js` | Smoke test for the Claude API: sends a minimal tone-analysis prompt and prints the raw response. Validates API key and model availability. |
-| `test-elevenlabs.js` | Smoke test for ElevenLabs TTS: synthesizes one sentence per language and reports latency + character count. |
-| `estimate-cost.js` | Given a transcript file, estimates token cost (Claude) and character cost (ElevenLabs) for a full 7-language run. |
+|---|---|
+| `test_apis.js` | Smoke test for `ANTHROPIC_API_KEY` and `ELEVENLABS_API_KEY`. Hits Claude with a one-token completion and ElevenLabs voice-list endpoint. Confirms both keys work before running the full n8n pipeline. |
 
-Run with `node scripts/<file>.js`. Requires `.env` with valid API keys.
+## Usage
+
+```bash
+# from repo root
+node scripts/test_apis.js
+```
+
+Reads `.env` (via `dotenv`). Expected output:
+```
+[1] Claude API
+  ✓ key valid
+[2] ElevenLabs API
+  ✓ key valid
+  ✓ N voices available
+```
+
+## History
+
+Earlier development included `spike_test.js` (EN→DE end-to-end spike) and `test_pipeline.js` (local clone of W1+W2+W3 logic for prototyping). Both were removed once the n8n workflows became production. Their behavior lives in `workflows/W1_STT_and_Segment.json`, `workflows/W2_Translate_v2.json`, `workflows/W3_Synthesize_v2.json`.
