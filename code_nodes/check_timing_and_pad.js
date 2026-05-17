@@ -83,6 +83,19 @@ async function tts(t, speed) {
   return Buffer.from(resp.body);
 }
 
+// Strip Claude meta-commentary (character counts, reasoning, alternative drafts).
+// Claude separates main answer from meta-commentary with a blank line — cut at first \n\n.
+// Also strip markdown emphasis and surrounding quotes.
+function sanitizeClaudeOutput(rawText) {
+  if (!rawText) return '';
+  let t = rawText.trim();
+  const sepIdx = t.indexOf('\n\n');
+  if (sepIdx >= 0) t = t.substring(0, sepIdx).trim();
+  t = t.replace(/^[\*_]+|[\*_]+$/g, '').trim();
+  t = t.replace(/^["'`]+|["'`]+$/g, '').trim();
+  return t;
+}
+
 // Reusable Claude caller with prompt-caching support.
 // systemBlocks: array of { type:'text', text, cache_control?: {type:'ephemeral'} }
 async function callClaude(systemBlocks, userText) {
@@ -118,7 +131,14 @@ ATTEMPT LEVEL DESCRIPTIONS:
 - Level medium: Rephrase for compactness. May drop redundant qualifiers but keep all content.
 - Level max:    Compress to essential meaning only. May drop secondary context but preserve core message.
 
-OUTPUT: ONLY the shortened translation text. No commentary, no quotes.`;
+OUTPUT FORMAT (strict — any violation will cause your reply to be rejected and re-tried):
+- Reply with ONLY the new translated text, as a single block of text in the target language.
+- DO NOT include character counts, "(N characters)", or any meta-commentary.
+- DO NOT include reasoning words like "Wait", "Let me", "Actually", "Note:", "Hmm".
+- DO NOT use markdown formatting (**, __, backticks).
+- DO NOT include multiple drafts or alternatives — pick ONE and output only it.
+- DO NOT include surrounding quotes.
+- DO NOT include any blank lines.`;
 
 async function claudeShorten(currentText, realSec, level) {
   const minChars       = Math.floor(currentText.length * MIN_RETAIN);
@@ -138,7 +158,8 @@ ATTEMPT LEVEL: ${level}`;
     { type: 'text', text: SHORTEN_STATIC, cache_control: { type: 'ephemeral' } },
     { type: 'text', text: dynamicPart },
   ];
-  const result = await callClaude.call(this, systemBlocks, currentText);
+  const raw    = await callClaude.call(this, systemBlocks, currentText);
+  const result = sanitizeClaudeOutput(raw);
   if (!result || result.length < floorChars) return currentText;
   return result;
 }
@@ -160,7 +181,14 @@ RULES:
 7. Preserve negations and contrasts from the English source.
 8. Preserve specific nouns, named techniques, numbers, proper names.
 
-OUTPUT: ONLY the expanded translation. No commentary, no quotes.`;
+OUTPUT FORMAT (strict — any violation will cause your reply to be rejected and re-tried):
+- Reply with ONLY the new translated text, as a single block of text in the target language.
+- DO NOT include character counts, "(N characters)", or any meta-commentary.
+- DO NOT include reasoning words like "Wait", "Let me", "Actually", "Note:", "Hmm".
+- DO NOT use markdown formatting (**, __, backticks).
+- DO NOT include multiple drafts or alternatives — pick ONE and output only it.
+- DO NOT include surrounding quotes.
+- DO NOT include any blank lines.`;
 
 async function claudeExpand(currentText, realSec) {
   const targetChars = Math.floor(enDur * (LANG_CPS[lang] || 15));
@@ -174,7 +202,8 @@ TARGET LENGTH: ~${targetChars} characters`;
     { type: 'text', text: EXPAND_STATIC, cache_control: { type: 'ephemeral' } },
     { type: 'text', text: dynamicPart },
   ];
-  return await callClaude.call(this, systemBlocks, currentText);
+  const raw = await callClaude.call(this, systemBlocks, currentText);
+  return sanitizeClaudeOutput(raw);
 }
 
 // Guard: no timing data

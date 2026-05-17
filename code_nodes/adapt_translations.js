@@ -41,7 +41,12 @@ CRITICAL RULES — these override the shortening request:
 - Preserve '...' and '—' as pause timing cues
 - Do NOT translate or switch languages — edit only the given translation
 - Only remove genuinely redundant filler words (e.g., "really", "very", "just", "actually")
-- Return ONLY the shortened text. No explanation, no quotes, no preamble.`;
+- Return ONLY the shortened text. No explanation, no quotes, no preamble.
+- DO NOT include character counts, "(N characters)", or any meta-commentary.
+- DO NOT include reasoning words ("Wait", "Let me", "Actually", "Note:", "Hmm").
+- DO NOT use markdown formatting (**, __, backticks).
+- DO NOT include multiple drafts — pick ONE and output only it.
+- DO NOT include blank lines.`;
 
 const ATTEMPT_PROMPTS = [
   (lang, budget, est, en, trans, minChars) =>
@@ -67,6 +72,17 @@ Original English (preserve all concepts): ${en}
 Current translation: ${trans}`,
 ];
 
+// Strip Claude meta-commentary (character counts, reasoning, alternative drafts).
+function sanitizeClaudeOutput(rawText) {
+  if (!rawText) return '';
+  let t = rawText.trim();
+  const sepIdx = t.indexOf('\n\n');
+  if (sepIdx >= 0) t = t.substring(0, sepIdx).trim();
+  t = t.replace(/^[\*_]+|[\*_]+$/g, '').trim();
+  t = t.replace(/^["'`]+|["'`]+$/g, '').trim();
+  return t;
+}
+
 function estimateDuration(text, lang) {
   return text.length / (LANG_CPS[lang] || 15);
 }
@@ -79,7 +95,7 @@ async function callClaude(userContent) {
     body: { model: 'claude-sonnet-4-5', max_tokens: 500, system: SYSTEM_PROMPT, messages: [{ role: 'user', content: userContent }] },
     json: true,
   });
-  return resp.content?.[0]?.text?.trim() || '';
+  return sanitizeClaudeOutput(resp.content?.[0]?.text || '');
 }
 
 const results = [];

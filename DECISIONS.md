@@ -426,3 +426,29 @@ Conflict with prior decisions:
 Rationale: Економія — це не цілком про "менше API calls", а про **дешевше за виклик**. Haiku 4.5 справляється з "скороти зі збереженням concepts" майже як Sonnet (задача добре формалізована у промпті, не вимагає глибокого reasoning). Caching робить input tokens у 10× дешевшими після першого виклику. CPS-tune перерозподіляє роботу: W2 (one call per segment-bulk) робить більше — W3 (per segment×lang) фіриться менше. Strict drift cap прибирає накопичувальну похибку, яка для 12-хв уроку давала би ~5с зсуву.
 
 Очікувана економія: $0.39 → ~$0.10–0.15 per W3 run.
+
+---
+
+### 2026-05-17 — SANITIZE_CLAUDE_OUTPUT
+
+Context: Перший прогон з Haiku 4.5 виявив контамінацію: у стресових випадках (shorten_retries=3, max attempt) Haiku включала свої метакоментарі в payload разом з перекладом. Приклади з sleep_001 run 3:
+- es_seg_001: "Solo necesitas las yemas de tus dedos.\n\n(57 characters — within target range)"
+- tr_seg_002: "EFT...kullanır.\n\n(Character count: 95 characters — within range)"
+- pl_seg_003: дві версії перекладу з reasoning'ом між ними ("Wait — this falls below minimum. Let me adjust:")
+
+Ці рядки повністю проникали: записувались у localizations.text_translated І озвучувались TTS'ом у фінальний WAV (включно з "(57 characters — within target range)" в аудіо). Наш length-check `result.length >= floorChars` не виявляв контамінацію — навпаки, додаткові символи робили текст "достатньо довгим".
+
+Decision: Дві комплементарні міри:
+
+1. **Sanitizer `sanitizeClaudeOutput`** після кожного Claude-виклику в W2 Adapt Translations і W3 Check Timing + Pad:
+   - Обрізає все після першого `\n\n` (Haiku використовує double-newline як роздільник між основною відповіддю і коментарем)
+   - Видаляє leading/trailing markdown emphasis (`*`, `**`, `__`)
+   - Видаляє surrounding quotes
+
+2. **Жорсткіші OUTPUT-правила в промптах**:
+   - Список явних заборон: no character counts, no reasoning words ("Wait", "Let me", "Actually"), no markdown, no multiple drafts, no blank lines
+   - Framing: "any violation will cause your reply to be rejected and re-tried" (стимулює виправлення)
+
+Rationale: Sanitizer — код-side defense in depth: навіть якщо Claude ігнорує промпт, ми не записуємо контамінований текст. Prompt rules — first line of defense. Не повертаємось до Sonnet, бо вартість того не варта: sanitizer + tighter rules мають закрити >95% випадків. Якщо наступний прогон покаже залишкову контамінацію — fallback на Sonnet для shorten/expand.
+
+Side effect: коли Haiku виводить дві версії з reasoning'ом між (як pl_seg_003), sanitizer бере ПЕРШУ. Якщо вона коротша за floorChars — наш існуючий length-check її reject'нув, повертає original input. Goldilocks-loop через shorten+expansion в наступних ітераціях знайде правильний баланс.
