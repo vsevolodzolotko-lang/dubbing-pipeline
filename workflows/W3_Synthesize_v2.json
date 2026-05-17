@@ -489,7 +489,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const SAMPLE_RATE = 22050;\nconst BPS         = 2;\n\nconst rows = $('Read Localizations Fresh').all().map(i => i.json);\nif (!rows.length) throw new Error('No localization rows found — run W3 main loop first');\n\n// Get Drive OAuth token (n8n exposes via getCredentials)\nconst driveCreds = await this.getCredentials('googleDriveOAuth2Api');\nconst driveToken = driveCreds.oauthTokenData?.access_token;\nif (!driveToken) throw new Error('Drive OAuth token unavailable from credential');\n\n// Group rows by lang\nconst byLang = {};\nfor (const row of rows) {\n  if (!row.lang || !row.audio_drive_file_id) continue;\n  if (!byLang[row.lang]) byLang[row.lang] = [];\n  byLang[row.lang].push(row);\n}\n\nconst results = [];\nfor (const lang of Object.keys(byLang).sort()) {\n  const sortedRows = byLang[lang].sort((a, b) =>\n    String(a.segment_id).localeCompare(String(b.segment_id))\n  );\n\n  // Download each segment WAV from Drive, strip 44-byte header, accumulate PCM\n  const pcmChunks = [];\n  for (const row of sortedRows) {\n    const resp = await this.helpers.httpRequest({\n      method: 'GET',\n      url: `https://www.googleapis.com/drive/v3/files/${row.audio_drive_file_id}?alt=media`,\n      headers: { Authorization: `Bearer ${driveToken}` },\n      returnFullResponse: true,\n      encoding: 'arraybuffer',\n    });\n    const wavBuf = Buffer.from(resp.body);\n    if (wavBuf.length <= 44) continue;\n    pcmChunks.push(wavBuf.subarray(44));\n  }\n\n  const fullPcm = Buffer.concat(pcmChunks);\n  const n = fullPcm.length;\n\n  // Build WAV header (22050Hz mono 16-bit PCM — matches per-segment files)\n  const h = Buffer.alloc(44);\n  h.write('RIFF', 0);          h.writeUInt32LE(36 + n, 4);\n  h.write('WAVE', 8);          h.write('fmt ', 12);\n  h.writeUInt32LE(16, 16);     h.writeUInt16LE(1, 20);\n  h.writeUInt16LE(1, 22);      h.writeUInt32LE(SAMPLE_RATE, 24);\n  h.writeUInt32LE(SAMPLE_RATE * BPS, 28);\n  h.writeUInt16LE(BPS, 32);    h.writeUInt16LE(16, 34);\n  h.write('data', 36);         h.writeUInt32LE(n, 40);\n  const fullWav = Buffer.concat([h, fullPcm]);\n\n  const lessonId = String(sortedRows[0].segment_id).split('_seg_')[0] || 'lesson';\n  const fileName = `${lessonId}_full_${lang}.wav`;\n\n  results.push({\n    json: {\n      lang,\n      lesson_id:           lessonId,\n      file_name:           fileName,\n      total_segments:      sortedRows.length,\n      full_duration_sec:   parseFloat((n / (SAMPLE_RATE * BPS)).toFixed(3)),\n    },\n    binary: {\n      data: {\n        data:     fullWav.toString('base64'),\n        mimeType: 'audio/wav',\n        fileName,\n      }\n    }\n  });\n}\n\nreturn results;"
+        "jsCode": "const SAMPLE_RATE = 22050;\nconst BPS         = 2;\n\nconst items = $input.all();\nif (!items.length) throw new Error('No items — Download Segment WAV must run first');\n\n// Group items by lang\nconst byLang = {};\nfor (const item of items) {\n  const row = item.json || {};\n  if (!row.lang) continue;\n  if (!byLang[row.lang]) byLang[row.lang] = [];\n  byLang[row.lang].push({ row, binary: item.binary });\n}\n\nconst results = [];\nfor (const lang of Object.keys(byLang).sort()) {\n  const entries = byLang[lang].sort((a, b) =>\n    String(a.row.segment_id).localeCompare(String(b.row.segment_id))\n  );\n\n  // Strip 44-byte WAV header from each segment, accumulate raw PCM\n  const pcmChunks = [];\n  for (const e of entries) {\n    const binData = e.binary?.data;\n    if (!binData?.data) continue;\n    const wavBuf = Buffer.from(binData.data, 'base64');\n    if (wavBuf.length <= 44) continue;\n    pcmChunks.push(wavBuf.subarray(44));\n  }\n\n  const fullPcm = Buffer.concat(pcmChunks);\n  const n = fullPcm.length;\n\n  // Build fresh WAV header (22050Hz mono 16-bit — matches segments)\n  const h = Buffer.alloc(44);\n  h.write('RIFF', 0);          h.writeUInt32LE(36 + n, 4);\n  h.write('WAVE', 8);          h.write('fmt ', 12);\n  h.writeUInt32LE(16, 16);     h.writeUInt16LE(1, 20);\n  h.writeUInt16LE(1, 22);      h.writeUInt32LE(SAMPLE_RATE, 24);\n  h.writeUInt32LE(SAMPLE_RATE * BPS, 28);\n  h.writeUInt16LE(BPS, 32);    h.writeUInt16LE(16, 34);\n  h.write('data', 36);         h.writeUInt32LE(n, 40);\n  const fullWav = Buffer.concat([h, fullPcm]);\n\n  const lessonId = String(entries[0].row.segment_id).split('_seg_')[0] || 'lesson';\n  const fileName = `${lessonId}_full_${lang}.wav`;\n\n  results.push({\n    json: {\n      lang,\n      lesson_id:         lessonId,\n      file_name:         fileName,\n      total_segments:    entries.length,\n      full_duration_sec: parseFloat((n / (SAMPLE_RATE * BPS)).toFixed(3)),\n    },\n    binary: {\n      data: {\n        data:     fullWav.toString('base64'),\n        mimeType: 'audio/wav',\n        fileName,\n      },\n    },\n  });\n}\n\nreturn results;"
       },
       "id": "f1000001-0000-0000-0000-000000000002",
       "name": "Build Full Audio Per Lang",
@@ -522,6 +522,31 @@
       "typeVersion": 3,
       "position": [
         1000,
+        200
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "MoWG4XRaoJGU18eu",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "={{ $json.audio_drive_file_id }}",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "id": "f1000001-0000-0000-0000-000000000004",
+      "name": "Download Segment WAV",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        700,
         200
       ],
       "credentials": {
@@ -677,7 +702,7 @@
       "main": [
         [
           {
-            "node": "Build Full Audio Per Lang",
+            "node": "Download Segment WAV",
             "type": "main",
             "index": 0
           }
@@ -689,6 +714,17 @@
         [
           {
             "node": "Save Full to Drive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Segment WAV": {
+      "main": [
+        [
+          {
+            "node": "Build Full Audio Per Lang",
             "type": "main",
             "index": 0
           }

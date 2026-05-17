@@ -659,3 +659,14 @@ Edge cases:
 - Якщо `audio_drive_file_id` порожнє для якогось рядка (теоретично можливо при skip-on-empty у W2) — той сегмент пропускається (немає WAV-у для concat). Full duration буде менша.
 - Якщо лесон дуже довгий (>12 хв, 50+ сегментів × 7 langs = 350 файлів × ~500KB = 170MB у пам'яті) — потенційний memory ризик у n8n Code node. Для типових 1-5 хв уроків — безпечно.
 - Drive folder для full files: рекомендовано окрема субпапка `full/` всередині `output/` (через `drive_output_full_folder_id`), але працює і з тим самим `drive_output_folder_id` як fallback.
+
+**Update 2026-05-17 (kept here for traceability)**: Initial implementation used `this.getCredentials('googleDriveOAuth2Api')` inside the Code node to authenticate Drive downloads via `helpers.httpRequest`. This is **not supported in n8n Code nodes** — `this.getCredentials is not a function`. Refactored to a 3-node chain:
+
+```
+Read Localizations Fresh
+  → Download Segment WAV  (n8n Drive Download, processes each row, binary out)
+  → Build Full Audio Per Lang  (Code, $input.all() has N items with binaries)
+  → Save Full to Drive  (Drive Upload, 7 items)
+```
+
+Drive Download handles OAuth automatically via the n8n credential. Code node only does pure JS concat. No credential lookup needed in Code.

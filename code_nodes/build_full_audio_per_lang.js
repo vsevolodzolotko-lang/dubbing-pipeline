@@ -1,58 +1,46 @@
-// W3 final stage — after Loop Over Items completes, builds a full-lesson WAV per language
-// by concatenating all per-segment files in segment_id order, then emits 7 binary items
-// for the downstream "Save Full to Drive" node.
+// W3 final stage — concatenates per-segment WAVs into one full-lesson file per lang.
 //
-// Reads:
-//   $('Read Localizations Fresh').all() — every row written by the loop
-//   $('Read Config').all()              — drive_output_full_folder_id (or fallback to drive_output_folder_id)
-//   Drive OAuth credential               — via this.getCredentials('googleDriveOAuth2Api')
+// Receives N items (one per localization row), each with:
+//   item.json    — row data: segment_id, lang, audio_drive_file_id, etc.
+//   item.binary.data — the per-segment WAV binary (downloaded by upstream
+//                       "Download Segment WAV" Google Drive node)
 //
 // For each lang:
-//   1. Sort rows by segment_id (works because we use zero-padded `seg_NNN` ids).
-//   2. Download each segment WAV from Drive via the v3 files API (alt=media).
-//   3. Strip the 44-byte WAV header, concatenate raw PCM data.
-//   4. Wrap the result in a fresh WAV header (22050Hz mono 16-bit, same as segments).
-//   5. Emit one item per lang with the WAV as binary, named `{lesson_id}_full_{lang}.wav`.
+//   1. Sort items by segment_id (zero-padded → lexicographic order works).
+//   2. Strip 44-byte WAV header from each segment, accumulate raw PCM.
+//   3. Wrap with fresh WAV header (22050Hz mono 16-bit — same format as segments).
+//   4. Emit one item with the full WAV as binary, named `{lesson_id}_full_{lang}.wav`.
 //
-// Notes:
-//   - The concat works because every segment file has identical PCM format (set in
-//     Check Timing + Pad). Stripping the 44-byte header is safe — it's a standard PCM WAV.
-//   - n8n Drive node downstream uploads each item by reading $binary.data and the
-//     file_name in $json.
+// Why pre-download via n8n Drive node instead of fetching via httpRequest here:
+//   `this.getCredentials` is NOT available in Code nodes, so we can't get the
+//   OAuth token directly. The upstream Drive Download node handles auth and
+//   exposes binaries on each item.
 
 const SAMPLE_RATE = 22050;
 const BPS         = 2;
 
-const rows = $('Read Localizations Fresh').all().map(i => i.json);
-if (!rows.length) throw new Error('No localization rows found — run W3 main loop first');
-
-const driveCreds = await this.getCredentials('googleDriveOAuth2Api');
-const driveToken = driveCreds.oauthTokenData?.access_token;
-if (!driveToken) throw new Error('Drive OAuth token unavailable from credential');
+const items = $input.all();
+if (!items.length) throw new Error('No items — Download Segment WAV must run first');
 
 const byLang = {};
-for (const row of rows) {
-  if (!row.lang || !row.audio_drive_file_id) continue;
+for (const item of items) {
+  const row = item.json || {};
+  if (!row.lang) continue;
   if (!byLang[row.lang]) byLang[row.lang] = [];
-  byLang[row.lang].push(row);
+  byLang[row.lang].push({ row, binary: item.binary });
 }
 
 const results = [];
 for (const lang of Object.keys(byLang).sort()) {
-  const sortedRows = byLang[lang].sort((a, b) =>
-    String(a.segment_id).localeCompare(String(b.segment_id))
+  const entries = byLang[lang].sort((a, b) =>
+    String(a.row.segment_id).localeCompare(String(b.row.segment_id))
   );
 
   const pcmChunks = [];
-  for (const row of sortedRows) {
-    const resp = await this.helpers.httpRequest({
-      method: 'GET',
-      url: `https://www.googleapis.com/drive/v3/files/${row.audio_drive_file_id}?alt=media`,
-      headers: { Authorization: `Bearer ${driveToken}` },
-      returnFullResponse: true,
-      encoding: 'arraybuffer',
-    });
-    const wavBuf = Buffer.from(resp.body);
+  for (const e of entries) {
+    const binData = e.binary?.data;
+    if (!binData?.data) continue;
+    const wavBuf = Buffer.from(binData.data, 'base64');
     if (wavBuf.length <= 44) continue;
     pcmChunks.push(wavBuf.subarray(44));
   }
@@ -70,7 +58,7 @@ for (const lang of Object.keys(byLang).sort()) {
   h.write('data', 36);         h.writeUInt32LE(n, 40);
   const fullWav = Buffer.concat([h, fullPcm]);
 
-  const lessonId = String(sortedRows[0].segment_id).split('_seg_')[0] || 'lesson';
+  const lessonId = String(entries[0].row.segment_id).split('_seg_')[0] || 'lesson';
   const fileName = `${lessonId}_full_${lang}.wav`;
 
   results.push({
@@ -78,7 +66,7 @@ for (const lang of Object.keys(byLang).sort()) {
       lang,
       lesson_id:         lessonId,
       file_name:         fileName,
-      total_segments:    sortedRows.length,
+      total_segments:    entries.length,
       full_duration_sec: parseFloat((n / (SAMPLE_RATE * BPS)).toFixed(3)),
     },
     binary: {
