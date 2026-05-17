@@ -452,3 +452,22 @@ Decision: Дві комплементарні міри:
 Rationale: Sanitizer — код-side defense in depth: навіть якщо Claude ігнорує промпт, ми не записуємо контамінований текст. Prompt rules — first line of defense. Не повертаємось до Sonnet, бо вартість того не варта: sanitizer + tighter rules мають закрити >95% випадків. Якщо наступний прогон покаже залишкову контамінацію — fallback на Sonnet для shorten/expand.
 
 Side effect: коли Haiku виводить дві версії з reasoning'ом між (як pl_seg_003), sanitizer бере ПЕРШУ. Якщо вона коротша за floorChars — наш існуючий length-check її reject'нув, повертає original input. Goldilocks-loop через shorten+expansion в наступних ітераціях знайде правильний баланс.
+
+---
+
+### 2026-05-17 — MILESTONE: sleep_001 baseline зелений
+
+Context: Sleep_001 run 4 (post sanitizer + Haiku + caching + strict drift cap + CPS retune) дав чисту картину для всіх 49 рядків × 7 мов.
+
+Зведення метрик:
+- **Drift**: 0/49 рядків. Сума `final_duration_sec` для кожної мови = `en_end_sec` останнього сегменту (64.119с) точно.
+- **Контамінація** (метакоментарі від Haiku в payload): 0/49. Sanitizer + жорсткіші OUTPUT-правила закрили клас.
+- **needs_attention**: 0/49. Жоден сегмент не потребує ручного перегляду.
+- **Експансія fired**: 2/49 (seg_001_fr відновив "supplémentaire", seg_003_es відновив "downregulate stress response").
+- **Shorten retries**: ~30/49 (виключно нормальна робота — Haiku підтягує до бюджету).
+- **Speed retries (>1.0)**: 8/49 (~16%).
+- **Якість перекладу**: 95%+ концептів збережено. Дрібні втрати qualifier-слів ("significantly", "even", "Stanford-trained") у ~10% сегментів. Дві IT-проблеми з реальною concept loss (seg_005, seg_007) — задокументовано як known follow-up.
+
+Decision: Прийнято як **production-ready baseline** для меди-контенту. Week 1 (segment-level pipeline) закрито. Якісні нюанси Haiku-адаптації не блокують — гото переходити до Week 2 (Drive trigger, atomic regenerate, multi-lesson real-world test).
+
+Rationale: Зелені light на drift/contamination/needs_attention — три головні фундаментальні баги фіксовані. Quality issues — інкрементальні, можна тюнити промпт або робити IT-fallback на Sonnet, коли матимемо більше даних з різних уроків.
