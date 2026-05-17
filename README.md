@@ -172,7 +172,7 @@ Full schema (every column explained): [`docs/sheets_schema.md#sheet-localization
 - **Add a new language** → add row to `voices` tab + add code to `active_langs` config key
 - **Regenerate one segment** → manually clear that row's `{lang}_text` in `segments`, re-run W2 then W3
 - **Tune translation tone** → edit `tone_of_voice` config value
-- **Tune shortening aggressiveness** → set `cps_estimate_{lang}` in the `config` sheet (per-language chars/sec). Run `node scripts/analyze_cps.js <localizations.csv>` to get recommended values from real TTS data. Falls back to `CPS_DEFAULTS` in `code_nodes/check_timing_and_pad.js` / `code_nodes/adapt_translations.js`.
+- **Tune shortening aggressiveness / calibrate after a voice swap** → set `cps_estimate_{lang}` in the `config` sheet (per-language chars/sec). Full 5-step runbook with example output is in [`scripts/README.md`](scripts/README.md#cps-calibration-runbook). Falls back to `CPS_DEFAULTS` in `code_nodes/check_timing_and_pad.js` / `code_nodes/adapt_translations.js` when a config row is missing.
 - **Tune inter-segment gap** → change `min_inter_segment_gap_sec` in config
 
 ---
