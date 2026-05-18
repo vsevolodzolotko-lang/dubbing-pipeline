@@ -80,8 +80,8 @@ The Drive trigger watches *file-created* events only — moving an existing file
 | Get Params (Code) | Normalizes the two trigger paths into `{ lesson_id }`; null when manual |
 | Read Config / Read Voices / Read Segments | Pull inputs |
 | Expand TTS Jobs (Code) | Cross-join: emit one item per (segment × active_lang). Pre-compute slot timing — `slot_start_sec`, `slot_end_sec`, `lead_silence_natural_sec`, `tts_budget_sec`, `effective_slot_sec`. Filters by `lesson_id` prefix. |
-| Loop Over Items (Split In Batches) | Per-segment-per-lang loop. `batchSize=5` — 5 items pass through the body per iteration. |
-| ↳ ElevenLabs TTS | POST text to `eleven_multilingual_v2` with `output_format=pcm_22050`. HTTP batching `batchSize=5, batchInterval=0` → up to 5 concurrent requests. Requires ElevenLabs Scale tier (15 concurrent capacity) for safety. |
+| Loop Over Items (Split In Batches) | Per-segment-per-lang loop. `batchSize=1` (one item per iteration) — required because Check Timing + Pad uses singular `.item` accessors. Parallel-TTS optimization removed due to data-loss bug (see DECISIONS.md `W3_LOOP_BATCHING_REVERTED_DATA_LOSS_BUG`). |
+| ↳ ElevenLabs TTS | POST text to `eleven_multilingual_v2` with `output_format=pcm_22050`. One request per item (sequential). |
 | ↳ Check Timing + Pad (Code) | The brains. Re-adapt via Claude Haiku if over budget (3-tier shorten), retry at speed 1.10/1.15, hard-truncate as last resort, expand if too short (max 2 attempts), prepend `lead_silence`, append `tail_silence`, build WAV |
 | ↳ Save to Drive | Upload per-segment WAV |
 | ↳ Prepare Localization Row + Update Localizations | Write diagnostics row |

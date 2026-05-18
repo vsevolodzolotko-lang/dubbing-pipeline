@@ -912,3 +912,43 @@ What is NOT in this change (можливі follow-ups для 30+ хв lessons):
 - **Adaptive batchSize** — підбирати batchSize під lesson size (1 для коротких, 10 для дуже довгих). Зараз hardcoded 5.
 
 Conflict with prior decisions: жодних.
+
+---
+
+### 2026-05-18 — W3_LOOP_BATCHING_REVERTED_DATA_LOSS_BUG (postmortem)
+
+Context: попередній SCALING_FOR_LONG_FORM_LESSONS зміни (batchSize=5 на Loop Over Items + `options.batching.batch={batchSize:5, batchInterval:0}` на ElevenLabs TTS) дали data-loss на real-world прогоні `the_anchor.mp3` (4.5 хв, 31 сегмент). У `localizations` потрапили 43 рядки замість очікуваних 217 (31×7).
+
+**Pattern провалу** — рівно 1 рядок per Loop iteration (217 items / batchSize=5 ≈ 44 batches → 43 рядки):
+```
+seg_001: de, it    seg_002: pl    seg_003: es, tr    seg_004: pt    seg_005: fr
+seg_006: de, it    seg_007: pl    ...
+```
+Lang-розподіл циклічний по 5 сегментах (35 items/cycle) — точно 1 langs per batch.
+
+**Корінь**: `Check Timing + Pad` Code-нода використовує singular accessors:
+- `$('Expand TTS Jobs').item.json` — paired-item accessor (singular)
+- `$input.first().binary?.data` — тільки перший input binary
+- `return [{ json, binary }]` — завжди 1 output item
+
+З `batchSize=5` Code-нода отримує 5 input items, але обробляє тільки перший. Решта 4 губляться. Build Full Audio Per Lang потім склеює тільки ці fragmented кусочки → final WAV-и значно коротші за оригінал.
+
+Decision: **revert** обидві batching-зміни в `workflows/W3_Synthesize_v2.json`:
+1. Loop Over Items: видалити `batchSize: 5` (за замовчуванням 1).
+2. ElevenLabs TTS: видалити `options.batching.batch` блок.
+
+Залишаємо **в силі**:
+- Rate Limit Guard Wait 0.5с (не пов'язано з batching, дає ~3× прискорення без ризику).
+- Prepare Localization Row JOIN-by-filename (robust навіть з batchSize=1).
+- Save to Drive `={{ $json.file_name }}` (працює коректно).
+
+Rationale: correctness > speed. Краще ~24 хв на 4.5-хв лекцію зі 100% даних ніж ~10 хв з 20% даних. Reverted state однаково ~3× швидший за оригінал (через Wait 0.5с замість 3с).
+
+**Lessons learned**:
+1. Per-item Code-ноди з `.item` / `.first()` accessors НЕ можна тримати в batched Loop without rewriting. Перевіряти все code path при зміні batchSize.
+2. n8n's `options.batching.batch` на HTTP Request — туманна семантика. Точно не дає 5× concurrent без додаткових змін у downstream нодах. Краще уникати поки немає чіткого розуміння.
+3. Pattern-based detection працює: подивитись на distribution row-counts (43 ≈ 217/5) одразу натякає на batching проблему.
+
+Future (Phase 2, окремий план): для true parallelism — замінити Loop Over Items + ElevenLabs TTS + Check Timing + Pad на **єдину Code-ноду з Promise.all**. Усе в одному JS-контексті — без n8n-pairing-pitfalls. Дасть 5-10× speedup без data-loss ризиків.
+
+Conflict with prior decisions: відкочує частину SCALING_FOR_LONG_FORM_LESSONS_10_PLUS_MINUTES (батчинг W3). Tone Analysis batching у W2 + Wait 0.5с у W3 — залишаються в силі.
