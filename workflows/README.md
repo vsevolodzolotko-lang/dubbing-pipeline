@@ -59,9 +59,9 @@ The Drive trigger watches *file-created* events only — moving an existing file
 | Claude Tone Analysis | HTTP POST to Anthropic, model sonnet-4-5 |
 | Parse Tone Map (Code) | Extract JSON, one item per segment_id |
 | Update Tone Columns | Write `segment_type`, `movement_keywords` back to `segments` |
-| Prepare and Expand (Code) | Build one Claude translate request per segment, with `<english>...</english>`-wrapped user content and ToV in system prompt. Filters by `lesson_id` prefix. |
-| Wait + Claude Translate | Rate-limit-safe per-segment translation |
-| Extract Translations (Code) | Parse JSON response, defensive skip on empty/refused responses |
+| Prepare and Expand (Code) | Builds **batched** Claude translate requests (default 8 segments per batch). System prompt cached via `cache_control: ephemeral`; user content is a JSON map `{segment_id: {text, type?, key_concepts?}}`. Filters by `lesson_id` prefix. |
+| Wait + Claude Translate | Rate-limit-safe per-batch translation. Retries up to 4× with 5s backoff on HTTP errors. |
+| Extract Translations (Code) | Parses batched JSON response (`{segment_id: {de, es, fr, pl, pt, it, tr}}`), emits one item per segment. Defensive skip on empty/missing segment in batch. |
 | Adapt Translations (Code) | CPS-based estimation + up to 3-tier Claude shorten loop per (segment × lang) when text won't fit |
 | Update Sheet | Append/update `{lang}_text` + `{lang}_adaptation_attempts` columns |
 

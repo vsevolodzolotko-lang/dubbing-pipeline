@@ -810,5 +810,44 @@ Tradeoffs:
 Conflict with prior decisions: жодних. Доповнює існуючий `onError: continueRegularOutput` патерн на Claude Translate.
 
 What is NOT in this fix (можливі follow-ups):
-- **Batched translation** (~3-7 Claude викликів замість 31 на 31-сегментну лекцію) — фундаментально краще, але вимагає переробки промпту і парсера. Окремий план.
+- ~~**Batched translation**~~ ← реалізовано наступним фіксом (див. нижче).
 - **Detect-and-mark-failed у sheet** — додати notes/status колонку, щоб юзер бачив які саме сегменти failed без читання execution logs. Невелика зміна, але окремий план.
+
+---
+
+### 2026-05-18 — BATCHED_TRANSLATION_TO_AVOID_TOKEN_RATE_LIMIT
+
+Context: Після додавання retry+backoff протестували 4.5-хвилинну лекцію the_anchor (31 сегмент). Результат: 17 успіхів, 14 провалів — той самий ~45% failure rate. Identical text "I am enough." успіх у seg_019 і seg_021, провал у seg_020. Retry допоміг сповільнити failure rate (попередньо було 14 провалів сходу, тепер scatter), але не виправив root cause.
+
+Корінь — **output-tokens-per-minute обмеження Anthropic Default Tier**: 8K вихідних токенів/хв. Один Claude-виклик за сегмент = ~600 токенів output × 31 сегмент = 18K/хв. Перші ~14 запитів проходять, потім API повертає 429 / порожній content / interrupted response. Retry/backoff лише трохи розтягує в часі без зміни total rate.
+
+Decision: переписано W2 `Prepare and Expand` + `Extract Translations` на **батчований режим**. Замість 1 запит на сегмент — 1 запит на 8 сегментів (`BATCH_SIZE = 8`). Для 31-сегментної лекції це **4 запити замість 31**.
+
+**Архітектура батчу**:
+
+- `Prepare and Expand` групує сегменти у батчі. Кожен emit-item містить `claude_body` де:
+  - System prompt — instructions + ToV. Обгорнуто в `cache_control: ephemeral` (Anthropic prompt caching) щоб 2-й, 3-й, 4-й batch не оплачував токени за повторюваний system prompt.
+  - User content — JSON map `{ segment_id: { text: "...", type: "narrative", key_concepts: "..." } }` для всіх сегментів батчу.
+- `Claude Translate` HTTP node — без змін структури, просто менше викликів.
+- `Extract Translations` — оновлено: парсить batched JSON response (`{ segment_id: { de: ..., es: ..., ... } }`) і emit-ить per-segment items для downstream `Adapt Translations`.
+- `Adapt Translations` (CPS-driven shorten) — без змін, працює per-segment як раніше.
+
+`max_tokens` для Claude bumped з 2000 на 8000 (бо batched response більший).
+
+Rationale:
+- **Tokens-per-minute compliance**: 4 batches × ~5000 tokens output × 60s = 1.25K tokens/min. Глибоко під 8K ліміт.
+- **Latency**: 31 окремих виклики × ~2с claude + 4с wait = ~190с. 4 батчі × ~8с claude + 4с wait = ~50с. **~4× швидше**.
+- **Cost**: 31 окремих system prompts × ~1500 input tokens = 47K input tokens. 4 батчі з prompt caching: 1 повний system + 3 cached × ~150 tokens = 1.95K input. **~24× менше input tokens**. Output token count приблизно той самий.
+- **Quality**: Claude бачить контекст всього батчу разом — кращі переклади для повторюваних affirmations ("I am enough." × 3) і consistency between related segments.
+- **Reliability**: Менше HTTP запитів = менше точок відмови. Single batched failure впливає на 8 сегментів, але retry-логіка на HTTP node level (`maxTries=4, waitBetweenTries=5000`) лікує більшість випадків.
+
+Tradeoffs:
+- **Batch-level failure radius**: якщо Claude повертає некоректний JSON для батчу (наприклад, truncated) — втрачаємо до 8 сегментів за раз. Mitigation: `max_tokens=8000` робить truncation малоймовірним; defensive parser у Extract Translations логує помилку але не падає.
+- **Order matters less**: раніше segment_id ↔ claude response пара була 1-to-1. Тепер маємо JSON map ключований по segment_id всередині батчу — більш explicit, але mismap ризики є якщо Claude переплутає id-шки (рідко).
+- **Tone analysis context per batch**: tone info (type, key_concepts) пакується в user JSON. Це додає ~50 токенів per segment, але preserves quality.
+
+Conflict with prior decisions: жодних. Працює поверх попереднього RETRY_AND_BACKOFF фіксу — retry на batch-level спрацьовує на rare server errors.
+
+Future work:
+- Adaptive BATCH_SIZE на основі total segment count (наприклад 16 для >50 сегментів).
+- Detect-and-mark-failed у segments sheet (`notes` колонка) для observability — щоб юзер відразу бачив які сегменти failed замість читання execution logs.
