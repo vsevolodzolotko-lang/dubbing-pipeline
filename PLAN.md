@@ -81,9 +81,11 @@
 ## Week 2 — Drive trigger + Atomic regenerate + Polish
 
 ### Days 1-2 — Drive-folder тригер
-- [ ] Workflow_Master: Trigger = Google Drive folder watch на input/
-- [ ] При новому файлі → запускає Ingest → Tone Analysis → Translate → Synthesize послідовно
-- [ ] Notification у Telegram коли все готово (з посиланнями на output папку)
+- [x] Workflow_Master: Trigger = Google Drive folder watch на input/
+- [x] При новому файлі → запускає Ingest → Tone Analysis → Translate → Synthesize послідовно
+- [x] Notification у Telegram коли все готово (з посиланнями на output папку)
+- NOTE: реалізовано як `workflows/W_Master.json` (2026-05-17). Drive Trigger polls `drive_input_folder_id` щохвилини, `Parse Filename` витягує `lesson_id` з імені файлу (`sleep_002.mp3` → `sleep_002`), три Execute Workflow ноди викликають W1/W2/W3 з retry=1 (5s backoff, потім `stopWorkflow`). W1 розширено: додано Execute Workflow Trigger + Get Params Code-ноду, щоб приймати `{file_id, lesson_id}` від W_Master і fallback-ити на хардкод при ручному запуску. Telegram повідомлення містить lesson_id, filename, active_langs і лінк на `drive_output_full_folder_id`. Нові config-ключі: `drive_input_folder_id`, `telegram_chat_id`.
+- NOTE (2026-05-17): зловлено баг — W2 і W3 читали ВСІ рядки з `segments` без `lesson_id` фільтра, тому при наявності залишкових рядків попередніх уроків нові дропи генерували дубляж не того файлу (test3_small.wav → `sleep_001_full_*.wav`). Виправлено: W2 і W3 отримали той самий dual-trigger pattern (Manual + Execute Workflow Trigger → Get Params), а Code-ноди `Prepare Tone Analysis`, `Prepare and Expand`, `Expand TTS Jobs`, `Build Full Audio Per Lang` тепер фільтрують по `segment_id.startsWith(lesson_id + '_')`. Якщо lesson_id null (ручний запуск через Manual Trigger) — фільтр пропускається (backward compat). У W_Master виправлено `$('Parse Filename').first()` → `$json.lesson_id` для коректної per-item ітерації, і Build Telegram Message переписано щоб емітити N items (по одному на дропнутий файл). Multi-file drop тепер працює коректно як побічний продукт.
 
 ### Days 3-4 — Atomic regenerate single segment
 - [ ] Workflow_Regenerate_Single: webhook trigger

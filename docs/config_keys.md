@@ -38,7 +38,9 @@ Every row has two columns: `key`, `value`. Missing keys fall back to the default
 | `elevenlabs_api_key` | *(required)* | W3 Check Timing + Pad | ElevenLabs API key for speed-retry TTS calls from inside the Code node. The main `ElevenLabs TTS` HTTP Request node still uses n8n credentials. |
 | `deepgram_api_key` | *(required for W1)* | W1 Deepgram STT (via n8n credential) | Deepgram API token for speech-to-text. Configured as an n8n Header Auth credential ("Deepgram account") with header `Authorization` = `Token <KEY>`. Stored in config sheet for documentation/audit; actual auth via credential binding. |
 | `drive_output_folder_id` | *(required)* | W3 Save to Drive | Google Drive folder ID where per-segment `.wav` files are uploaded. The folder must already exist; W3 doesn't auto-create it. |
-| `drive_output_full_folder_id` | *(optional)* | W3 Save Full to Drive | Google Drive folder ID for concatenated full-lesson WAVs (`{lesson_id}_full_{lang}.wav`). Falls back to `drive_output_folder_id` if missing. Recommended: create a `full/` subfolder for clean separation. |
+| `drive_output_full_folder_id` | *(optional)* | W3 Save Full to Drive, W_Master Telegram link | Google Drive folder ID for concatenated full-lesson WAVs (`{lesson_id}_full_{lang}.wav`). Falls back to `drive_output_folder_id` if missing. Recommended: create a `full/` subfolder for clean separation. |
+| `drive_input_folder_id` | *(required if using W_Master)* | W_Master Drive Trigger | Google Drive folder ID watched by W_Master for new audio files. Set on the Drive Trigger node directly in n8n UI (not read from sheet at runtime — n8n needs the folder ID when registering the poll). Documented here so the same value is recorded alongside the other folder IDs. |
+| `telegram_chat_id` | *(required if using W_Master)* | W_Master Build Telegram Message | Numeric Telegram chat ID where W_Master posts the completion message. Use [@userinfobot](https://t.me/userinfobot) to find your own ID, or invite the bot to a group and use the group's negative ID. The bot itself authenticates via an n8n Telegram credential, not via the config sheet. |
 
 ---
 

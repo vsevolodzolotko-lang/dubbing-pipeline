@@ -8,6 +8,30 @@
       "type": "n8n-nodes-base.manualTrigger",
       "typeVersion": 1,
       "position": [
+        -208,
+        -80
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "f1d72a4e-7c10-4d2b-9b8e-d3f4a5b6c7d8",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        -208,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Accept params from either Execute Workflow Trigger (parent passes {file_id, lesson_id})\n// or Manual Trigger (fall back to hardcoded test defaults).\nconst incoming = $input.first()?.json || {};\nconst file_id = incoming.file_id || '1gDRuwWEtfeHcQwEjEMbg4cQOHZQC_nYR';\nconst lesson_id = incoming.lesson_id || 'sleep_001';\nif (!file_id) throw new Error('Missing file_id');\nif (!lesson_id) throw new Error('Missing lesson_id');\nreturn [{ json: { file_id, lesson_id } }];"
+      },
+      "id": "2a3b4c5d-6e7f-8901-2345-6789abcdef01",
+      "name": "Get Params",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
         0,
         0
       ]
@@ -17,7 +41,7 @@
         "operation": "download",
         "fileId": {
           "__rl": true,
-          "value": "1gDRuwWEtfeHcQwEjEMbg4cQOHZQC_nYR",
+          "value": "={{ $json.file_id }}",
           "mode": "id"
         },
         "options": {}
@@ -65,7 +89,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const data = $input.first().json;\nconst lesson_id = 'sleep_001';\nconst MAX_CHARS            = 150;\nconst MAX_GAP_FOR_GROUPING = 1.0;\n\nconst alt           = data.results?.channels?.[0]?.alternatives?.[0];\nconst paragraphs    = alt?.paragraphs?.paragraphs || [];\nconst audioDuration = parseFloat(data.metadata?.duration) || null;\nconst segments      = [];\nlet current         = null;\n\nfunction flush() { if (current) { segments.push(current); current = null; } }\n\nfor (const para of paragraphs) {\n  flush();\n  for (const s of (para.sentences || [])) {\n    if (current === null) {\n      current = { text: s.text, start: s.start, end: s.end };\n      continue;\n    }\n    const combined = current.text + ' ' + s.text;\n    const gap      = s.start - current.end;\n    if (combined.length <= MAX_CHARS && gap <= MAX_GAP_FOR_GROUPING) {\n      current.text = combined;\n      current.end  = s.end;\n    } else {\n      flush();\n      current = { text: s.text, start: s.start, end: s.end };\n    }\n  }\n}\nflush();\n\n// Fallback if paragraphs missing\nif (!segments.length) {\n  const utts = data.results?.utterances || [];\n  if (!utts.length) throw new Error('No sentences/utterances returned from Deepgram');\n  for (const u of utts) segments.push({ text: u.transcript, start: u.start, end: u.end });\n}\n\n// Extend last segment to full audio duration so concatenated slot sum = EN total.\n// Deepgram's last word.end stops at the last spoken word; audio may have trailing silence.\nif (audioDuration && segments.length > 0) {\n  const last = segments[segments.length - 1];\n  if (audioDuration > last.end) {\n    last.end = audioDuration;\n  }\n}\n\nreturn segments.map((seg, i) => ({\n  json: {\n    segment_id: lesson_id + '_seg_' + String(i + 1).padStart(3, '0'),\n    lesson_id,\n    en_text: seg.text,\n    en_start_sec: parseFloat(seg.start.toFixed(3)),\n    en_end_sec: parseFloat(seg.end.toFixed(3)),\n    en_duration_sec: parseFloat((seg.end - seg.start).toFixed(3)),\n    de_text: '',\n    es_text: '',\n    fr_text: '',\n    pl_text: '',\n    pt_text: '',\n    it_text: '',\n    tr_text: '',\n    status: 'pending',\n    notes: '',\n  }\n}));"
+        "jsCode": "const data = $input.first().json;\nconst lesson_id = $('Get Params').first().json.lesson_id;\nconst MAX_CHARS            = 150;\nconst MAX_GAP_FOR_GROUPING = 1.0;\n\nconst alt           = data.results?.channels?.[0]?.alternatives?.[0];\nconst paragraphs    = alt?.paragraphs?.paragraphs || [];\nconst audioDuration = parseFloat(data.metadata?.duration) || null;\nconst segments      = [];\nlet current         = null;\n\nfunction flush() { if (current) { segments.push(current); current = null; } }\n\nfor (const para of paragraphs) {\n  flush();\n  for (const s of (para.sentences || [])) {\n    if (current === null) {\n      current = { text: s.text, start: s.start, end: s.end };\n      continue;\n    }\n    const combined = current.text + ' ' + s.text;\n    const gap      = s.start - current.end;\n    if (combined.length <= MAX_CHARS && gap <= MAX_GAP_FOR_GROUPING) {\n      current.text = combined;\n      current.end  = s.end;\n    } else {\n      flush();\n      current = { text: s.text, start: s.start, end: s.end };\n    }\n  }\n}\nflush();\n\n// Fallback if paragraphs missing\nif (!segments.length) {\n  const utts = data.results?.utterances || [];\n  if (!utts.length) throw new Error('No sentences/utterances returned from Deepgram');\n  for (const u of utts) segments.push({ text: u.transcript, start: u.start, end: u.end });\n}\n\n// Extend last segment to full audio duration so concatenated slot sum = EN total.\n// Deepgram's last word.end stops at the last spoken word; audio may have trailing silence.\nif (audioDuration && segments.length > 0) {\n  const last = segments[segments.length - 1];\n  if (audioDuration > last.end) {\n    last.end = audioDuration;\n  }\n}\n\nreturn segments.map((seg, i) => ({\n  json: {\n    segment_id: lesson_id + '_seg_' + String(i + 1).padStart(3, '0'),\n    lesson_id,\n    en_text: seg.text,\n    en_start_sec: parseFloat(seg.start.toFixed(3)),\n    en_end_sec: parseFloat(seg.end.toFixed(3)),\n    en_duration_sec: parseFloat((seg.end - seg.start).toFixed(3)),\n    de_text: '',\n    es_text: '',\n    fr_text: '',\n    pl_text: '',\n    pt_text: '',\n    it_text: '',\n    tr_text: '',\n    status: 'pending',\n    notes: '',\n  }\n}));"
       },
       "id": "6b5c97ce-a22f-4319-8039-863b8146373b",
       "name": "Segment Transcript",
@@ -306,6 +330,28 @@
       "main": [
         [
           {
+            "node": "Get Params",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Params",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Params": {
+      "main": [
+        [
+          {
             "node": "Download Audio",
             "type": "main",
             "index": 0
@@ -351,7 +397,7 @@
   "settings": {
     "executionOrder": "v1"
   },
-  "versionId": "6b99a3ea-a7f2-4551-95c0-6e97392437d5",
+  "versionId": "7c00b4fb-b803-4662-a6d1-7f08503548e6",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "c12dc3211079879af783deee1a944ea9622a2040afb6e429392b5bbe95dd7037"

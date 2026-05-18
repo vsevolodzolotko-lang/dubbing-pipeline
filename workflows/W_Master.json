@@ -1,0 +1,388 @@
+{
+  "name": "W_Master - Drive Trigger Orchestrator",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "triggerOn": "specificFolder",
+        "folderToWatch": {
+          "__rl": true,
+          "value": "REPLACE_WITH_DRIVE_INPUT_FOLDER_ID",
+          "mode": "id"
+        },
+        "event": "fileCreated",
+        "options": {}
+      },
+      "id": "01a2b3c4-d5e6-7890-1234-aaaaaaaaaaaa",
+      "name": "Drive Trigger (input/)",
+      "type": "n8n-nodes-base.googleDriveTrigger",
+      "typeVersion": 1,
+      "position": [
+        -400,
+        0
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "MoWG4XRaoJGU18eu",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse each Drive trigger payload → extract { file_id, lesson_id, filename, mime_type }.\n// Iterates over ALL input items so multi-file drops produce one output item per file.\n// lesson_id is derived from filename (e.g., 'sleep_002.mp3' → 'sleep_002').\nconst out = [];\nfor (const i of $input.all()) {\n  const item = i.json || {};\n  const filename = item.name || '';\n  const file_id = item.id;\n  const mime_type = item.mimeType || '';\n\n  if (!file_id || !filename) {\n    console.warn('Drive trigger payload missing id/name — skipping:', JSON.stringify(item));\n    continue;\n  }\n\n  // Strip extension and sanitize for use as a sheet/file key.\n  const baseName = filename.replace(/\\.[^./\\\\]+$/, '');\n  const lesson_id = baseName.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '');\n  if (!lesson_id) {\n    console.warn('Could not derive lesson_id from filename — skipping:', filename);\n    continue;\n  }\n\n  // Sanity: skip non-audio files (Drive trigger may fire on any file dropped in the folder).\n  const looksAudio = /^audio\\//.test(mime_type) || /\\.(mp3|wav|m4a|aac|flac|ogg|opus)$/i.test(filename);\n  if (!looksAudio) {\n    console.warn('Skipping non-audio file:', filename, mime_type);\n    continue;\n  }\n\n  out.push({ json: { file_id, lesson_id, filename, mime_type } });\n}\nreturn out;"
+      },
+      "id": "02a2b3c4-d5e6-7890-1234-bbbbbbbbbbbb",
+      "name": "Parse Filename",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -176,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "wb3JGXcIgU4iI1Hb",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "file_id": "={{ $json.file_id }}",
+            "lesson_id": "={{ $json.lesson_id }}"
+          },
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "03a2b3c4-d5e6-7890-1234-cccccccccccc",
+      "name": "Execute W1 (STT)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        48,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "onError": "stopWorkflow"
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "NdbDWVCWZmDfurSg",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lesson_id": "={{ $json.lesson_id }}"
+          },
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "04a2b3c4-d5e6-7890-1234-dddddddddddd",
+      "name": "Execute W2 (Translate)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        272,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "onError": "stopWorkflow"
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_W3_WORKFLOW_ID",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lesson_id": "={{ $json.lesson_id }}"
+          },
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "05a2b3c4-d5e6-7890-1234-eeeeeeeeeeee",
+      "name": "Execute W3 (Synthesize)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        496,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "onError": "stopWorkflow"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "config",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "06a2b3c4-d5e6-7890-1234-ffffffffffff",
+      "name": "Read Config",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        720,
+        0
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build one Telegram message per Parse Filename item (one per source audio file).\n// Read Config (upstream) provides chat_id, output folder, active_langs — same for all messages.\nconst configRows = $input.all().map(i => i.json);\nconst cfg = {};\nfor (const row of configRows) {\n  if (row && row.key) cfg[row.key] = row.value;\n}\n\nconst fullFolder = cfg.drive_output_full_folder_id || cfg.drive_output_folder_id;\nconst chat_id = cfg.telegram_chat_id;\nif (!chat_id) throw new Error('telegram_chat_id missing from config sheet');\n\nconst folderUrl = fullFolder ? `https://drive.google.com/drive/folders/${fullFolder}` : '(output folder id not configured)';\nconst activeLangs = (cfg.active_langs || 'de,es,fr,it,pl,pt,tr').split(',').map(s => s.trim()).filter(Boolean);\n\n// Iterate all Parse Filename items so multi-file drops produce one message per file.\nconst parsed = $('Parse Filename').all();\nreturn parsed.map(p => {\n  const lesson_id = p.json.lesson_id;\n  const filename = p.json.filename;\n  const text = [\n    '✅ Dubbing complete',\n    '',\n    `Lesson: ${lesson_id}`,\n    `Source file: ${filename}`,\n    `Languages: ${activeLangs.length} (${activeLangs.join(', ')})`,\n    '',\n    `Output: ${folderUrl}`,\n  ].join('\\n');\n  return { json: { chat_id, text } };\n});"
+      },
+      "id": "07a2b3c4-d5e6-7890-1234-aaaabbbbcccc",
+      "name": "Build Telegram Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        944,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Collapse downstream item stream back to one item per source lesson.\n// Execute Workflow with mode=each emits aggregated sub-workflow output, which\n// would multiply downstream item count and make the next Execute Workflow node\n// call the sub-workflow far more times than intended. Re-emit Parse Filename items\n// so the count is stable at N (= number of dropped files).\nreturn $('Parse Filename').all().map(i => ({ json: i.json }));"
+      },
+      "id": "09a2b3c4-d5e6-7890-1234-pass1passpass",
+      "name": "Pass Lessons (after W1)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return $('Parse Filename').all().map(i => ({ json: i.json }));"
+      },
+      "id": "0aa2b3c4-d5e6-7890-1234-pass2passpass",
+      "name": "Pass Lessons (after W2)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        384,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return $('Parse Filename').all().map(i => ({ json: i.json }));"
+      },
+      "id": "0ba2b3c4-d5e6-7890-1234-pass3passpass",
+      "name": "Pass Lessons (after W3)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        608,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "08a2b3c4-d5e6-7890-1234-ddddeeeeffff",
+      "name": "Telegram Notify",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1168,
+        0
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Drive Trigger (input/)": {
+      "main": [
+        [
+          {
+            "node": "Parse Filename",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Filename": {
+      "main": [
+        [
+          {
+            "node": "Execute W1 (STT)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute W1 (STT)": {
+      "main": [
+        [
+          {
+            "node": "Pass Lessons (after W1)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pass Lessons (after W1)": {
+      "main": [
+        [
+          {
+            "node": "Execute W2 (Translate)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute W2 (Translate)": {
+      "main": [
+        [
+          {
+            "node": "Pass Lessons (after W2)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pass Lessons (after W2)": {
+      "main": [
+        [
+          {
+            "node": "Execute W3 (Synthesize)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute W3 (Synthesize)": {
+      "main": [
+        [
+          {
+            "node": "Pass Lessons (after W3)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pass Lessons (after W3)": {
+      "main": [
+        [
+          {
+            "node": "Read Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Config": {
+      "main": [
+        [
+          {
+            "node": "Build Telegram Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Telegram Message": {
+      "main": [
+        [
+          {
+            "node": "Telegram Notify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "11111111-2222-3333-4444-555555555555",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "c12dc3211079879af783deee1a944ea9622a2040afb6e429392b5bbe95dd7037"
+  },
+  "id": "MasterDubbingOrch01",
+  "tags": []
+}

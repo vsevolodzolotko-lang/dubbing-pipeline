@@ -1,33 +1,65 @@
 # n8n Workflows
 
-Three workflows that run sequentially: W1 → W2 → W3. Each is imported into n8n and triggered manually (Week 2 plan adds a Drive folder trigger).
+Four workflows: **W_Master** (Drive folder trigger, optional) chains **W1 → W2 → W3** sequentially. W1/W2/W3 can also be run manually — useful for debugging or one-off lessons.
+
+## W_Master.json — Drive folder trigger orchestrator
+
+**Input**: any audio file dropped into the Drive `input/` folder (configured by `drive_input_folder_id`).
+**Output**: triggers W1 → W2 → W3 in sequence, then posts a Telegram notification with the link to the per-lang `full/` output folder.
+
+| Node | Purpose |
+|---|---|
+| Drive Trigger (input/) | Polls the configured `drive_input_folder_id` for new files (every minute) |
+| Parse Filename (Code) | Derives `lesson_id` from the filename (e.g. `sleep_002.mp3` → `sleep_002`); skips non-audio drops |
+| Execute W1 (STT) | Calls W1 with `{file_id, lesson_id}`. Retry: 1 attempt on fail, then stop |
+| Execute W2 (Translate) | Calls W2 with `{lesson_id}`. Retry: 1 attempt on fail, then stop |
+| Execute W3 (Synthesize) | Calls W3 with `{lesson_id}`. Retry: 1 attempt on fail, then stop |
+| Read Config | Pulls `drive_output_full_folder_id`, `telegram_chat_id`, `active_langs` |
+| Build Telegram Message (Code) | Composes the completion message |
+| Telegram Notify | Sends the message via Telegram bot credential |
+
+**Setup checklist** (after importing):
+1. Drive Trigger → set `folderToWatch` to your `input/` folder ID (or leave the placeholder and set via expression to read from config).
+2. Execute W1 / W2 / W3 → re-bind to the workflow IDs assigned by your n8n instance after import.
+3. Telegram credential → create one in n8n (HTTP Bot Token), then bind it to `Telegram Notify`.
+4. Add `telegram_chat_id` to the `config` sheet (numeric chat ID — your DM or a group; use [@userinfobot](https://t.me/userinfobot) to find your own).
+5. Set `active = true` on the workflow only after manual smoke-test (otherwise polling starts immediately).
+
+The Drive trigger watches *file-created* events only — moving an existing file into the folder also counts. Modifying an already-processed file does not retrigger.
+
+**Retry semantics**: each Execute Workflow node retries once with 5s backoff. If still failing → the master workflow stops (no Telegram). Open the n8n execution log to see which sub-workflow failed.
 
 ## W1_STT_and_Segment.json — Speech-to-text + segmentation
 
-**Input**: an MP3/WAV in Google Drive (file ID hardcoded in `Download Audio` node).
+**Input**: an MP3/WAV in Google Drive. Accepts either `{file_id, lesson_id}` from a parent Execute Workflow call, or falls back to hardcoded defaults when triggered manually (for debug).
 **Output**: rows in the `segments` sheet — one per sentence-group.
 
 | Node | Purpose |
 |---|---|
-| Manual Trigger | Start the run |
-| Download Audio | Pull the source file from Drive as binary |
+| Manual Trigger | Debug entry point — uses fallback `file_id` / `lesson_id` defaults baked into `Get Params` |
+| Execute Workflow Trigger | Production entry point — receives `{file_id, lesson_id}` from W_Master |
+| Get Params (Code) | Normalizes the two trigger paths into a single `{file_id, lesson_id}` item |
+| Download Audio | Pull the source file from Drive as binary (uses `={{ $json.file_id }}`) |
 | Deepgram STT | POST audio to Deepgram Nova-3 with `utterances=true&utt_split=1.5&smart_format=true&punctuate=true` |
-| Segment Transcript (Code) | Walk `data.results.channels[0].alternatives[0].paragraphs.paragraphs[].sentences[]`, group consecutive sentences up to 150 chars (gap ≤ 1.0s), extend last segment to `data.metadata.duration` |
+| Segment Transcript (Code) | Walk `data.results.channels[0].alternatives[0].paragraphs.paragraphs[].sentences[]`, group consecutive sentences up to 150 chars (gap ≤ 1.0s), extend last segment to `data.metadata.duration`. Reads `lesson_id` from `Get Params`. |
 | Write to Sheet | Append/update rows in `segments` keyed on `segment_id` |
 
 ## W2_Translate_v2.json — Tone analysis + translation + adapt
 
-**Input**: pending rows in `segments` (those without translations).
+**Input**: when called from W_Master → `{ lesson_id }` via Execute Workflow Trigger (filters segments to that lesson only). When run manually → no payload → operates on **all** rows in `segments` (legacy behavior, useful for debugging).
 **Output**: same rows now have `de_text` … `tr_text`, `segment_type`, `movement_keywords`.
 
 | Node | Purpose |
 |---|---|
+| Manual Trigger | Debug entry point (no payload → no lesson_id filter) |
+| Execute Workflow Trigger | Production entry point — receives `{ lesson_id }` from W_Master |
+| Get Params (Code) | Normalizes the two trigger paths into `{ lesson_id }`; null when manual |
 | Read Config / Read Pending Segments | Pull config and translatable rows |
-| Prepare Tone Analysis (Code) | Build one Claude request for all segments to classify types and key concepts |
+| Prepare Tone Analysis (Code) | Build one Claude request for all segments to classify types and key concepts. Filters by `lesson_id` prefix if provided. |
 | Claude Tone Analysis | HTTP POST to Anthropic, model sonnet-4-5 |
 | Parse Tone Map (Code) | Extract JSON, one item per segment_id |
 | Update Tone Columns | Write `segment_type`, `movement_keywords` back to `segments` |
-| Prepare and Expand (Code) | Build one Claude translate request per segment, with `<english>...</english>`-wrapped user content and ToV in system prompt |
+| Prepare and Expand (Code) | Build one Claude translate request per segment, with `<english>...</english>`-wrapped user content and ToV in system prompt. Filters by `lesson_id` prefix. |
 | Wait + Claude Translate | Rate-limit-safe per-segment translation |
 | Extract Translations (Code) | Parse JSON response, defensive skip on empty/refused responses |
 | Adapt Translations (Code) | CPS-based estimation + up to 3-tier Claude shorten loop per (segment × lang) when text won't fit |
@@ -35,17 +67,19 @@ Three workflows that run sequentially: W1 → W2 → W3. Each is imported into n
 
 ## W3_Synthesize_v2.json — TTS + timing + per-segment + per-lang concat
 
-**Input**: `segments` rows with translations + `voices` + `config`.
+**Input**: when called from W_Master → `{ lesson_id }` via Execute Workflow Trigger (filters segments + localizations to that lesson only). When run manually → no payload → operates on all rows.
 **Output**:
 - Per-segment WAVs in `drive_output_folder_id` (one per segment × lang)
-- Full-lesson WAVs in `drive_output_full_folder_id` (one per lang, all segments concatenated)
+- Full-lesson WAVs in `drive_output_full_folder_id` (one per lang, all segments of that lesson concatenated)
 - `localizations` sheet populated with per-row diagnostics
 
 | Node | Purpose |
 |---|---|
-| Manual Trigger | Start |
+| Manual Trigger | Debug entry point (no payload → no lesson_id filter) |
+| Execute Workflow Trigger | Production entry point — receives `{ lesson_id }` from W_Master |
+| Get Params (Code) | Normalizes the two trigger paths into `{ lesson_id }`; null when manual |
 | Read Config / Read Voices / Read Segments | Pull inputs |
-| Expand TTS Jobs (Code) | Cross-join: emit one item per (segment × active_lang). Pre-compute slot timing — `slot_start_sec`, `slot_end_sec`, `lead_silence_natural_sec`, `tts_budget_sec`, `effective_slot_sec` |
+| Expand TTS Jobs (Code) | Cross-join: emit one item per (segment × active_lang). Pre-compute slot timing — `slot_start_sec`, `slot_end_sec`, `lead_silence_natural_sec`, `tts_budget_sec`, `effective_slot_sec`. Filters by `lesson_id` prefix. |
 | Loop Over Items (Split In Batches) | Per-segment-per-lang loop |
 | ↳ ElevenLabs TTS | POST text to `eleven_multilingual_v2` with `output_format=pcm_22050` |
 | ↳ Check Timing + Pad (Code) | The brains. Re-adapt via Claude Haiku if over budget (3-tier shorten), retry at speed 1.10/1.15, hard-truncate as last resort, expand if too short (max 2 attempts), prepend `lead_silence`, append `tail_silence`, build WAV |
@@ -54,14 +88,15 @@ Three workflows that run sequentially: W1 → W2 → W3. Each is imported into n
 | ↳ Rate Limit Guard (Wait) | 3s between TTS calls |
 | Loop done → Read Localizations Fresh | Get all rows for concat stage |
 | Download Segment WAV | Per-row Drive download, attaches binary |
-| Build Full Audio Per Lang (Code) | Group by lang, sort by `segment_id`, strip 44-byte WAV headers, concat raw PCM, wrap fresh WAV header |
+| Build Full Audio Per Lang (Code) | Group by lang, sort by `segment_id`, strip 44-byte WAV headers, concat raw PCM, wrap fresh WAV header. Filters localizations by `lesson_id` prefix so multi-lesson runs don't mix segments. |
 | Save Full to Drive | Upload 7 full WAVs |
 
 ## Re-importing into n8n
 
 After cloning this repo or pulling new workflow JSON:
-1. n8n → Workflows → ⋯ → Import from file
-2. Re-bind credentials on each node (Google Sheets account, Google Drive account, Deepgram Header Auth, ElevenLabs Header Auth)
-3. Re-verify sheet IDs and `audio_drive_file_id` if the lesson changed
+1. n8n → Workflows → ⋯ → Import from file (import W1, W2, W3 first, then W_Master)
+2. Re-bind credentials on each node (Google Sheets account, Google Drive account, Deepgram Header Auth, ElevenLabs Header Auth, Telegram account if using W_Master)
+3. In `W_Master.json`: re-bind the three Execute Workflow nodes to the IDs n8n assigned to W1/W2/W3 after import
+4. Re-verify sheet IDs and Drive folder IDs in the config sheet
 
 The full reference for credentials, config keys and sheet schemas is in [`../docs/`](../docs/).

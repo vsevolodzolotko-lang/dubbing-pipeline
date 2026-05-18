@@ -724,3 +724,64 @@ Conflict with prior decisions: ослаблює `CLEANUP_LEGACY_FILES_AND_DOCS` 
 Rationale: Voice changes (планується переходити на male/female + інші мови) роблять CPS не universal-константою, а voice-pair-specific. Виносити в config дозволяє швидко тюнити з Sheet без редагування коду. Code-side defaults захищають від config-shutdown. Analyze script закриває data-driven loop: запустив W3 → дивишся observed → оновлюєш config якщо drift.
 
 Заплановано окремо (не в цьому коміті): **W0_Calibrate workflow** — автоматизована калібрація CPS на test sample audio після зміни voice_id. Триггер manual, output — рекомендовані значення з можливістю автозапису у config. Дизайн обговорюється з користувачем.
+
+---
+
+### 2026-05-17 — W0_CALIBRATE_NOT_BUILT (analyze_cps.js покриває use case)
+
+Context: Розглядали окремий n8n workflow W0_Calibrate, який би на reference audio + поточні `voices` робив TTS кожною мовою на speed 1.0 → міряв observed CPS → автоматично оновлював `cps_estimate_{lang}` в config sheet. Use case — швидка перекалібровка після voice swap.
+
+Decision: **Не будуємо W0.** Існуючий `scripts/analyze_cps.js` + runbook у `scripts/README.md#cps-calibration-runbook` закривають той же flow без додаткової інфраструктури.
+
+Rationale: Кожен сценарій, де потрібна перекалібровка (voice swap, нова мова, periodic drift check), все одно вимагає W3-прогону — або щоб почути новий голос, або щоб згенерувати production output. W3 пише в `localizations` рядки з `real_duration_sec` і `final_speed=1.0`, які analyze_cps.js якраз і споживає. W0 би просто дублював TTS-проходи (~$0.25 на запуск) без економії жодного user step. Висновок задокументовано у `/Users/vsevolodzolotko/.claude/plans/distributed-stirring-stroustrup.md`.
+
+---
+
+### 2026-05-17 — W_MASTER_DRIVE_TRIGGER_ORCHESTRATOR
+
+Context: До цього моменту pipeline запускався вручну: користувач клав файл у Drive, копіював file_id у W1's Download Audio, ставив `lesson_id` хардкодом у W1's Segment Transcript jsCode, виконував W1 → W2 → W3 послідовно. Це OK для розробки, але не масштабується на десятки уроків.
+
+Decision: Створено `workflows/W_Master.json` — orchestrator з 7 нодами: Drive Trigger (input/) → Parse Filename → Execute W1 → Execute W2 → Execute W3 → Read Config → Build Telegram Message → Telegram Notify. W1 модифіковано — додано Execute Workflow Trigger + Get Params Code-ноду, щоб приймати `{file_id, lesson_id}` від W_Master і fallback-ити на хардкодні defaults при ручному запуску (Manual Trigger зберіг).
+
+**lesson_id derivation**: з імені файлу через `replace(/\.[^./\\]+$/, '')` → trim/lowercase → `replace(/[^a-z0-9_-]+/g, '_')`. Тобто `sleep_002.mp3` → `sleep_002`, `Sleep Lesson 003.wav` → `sleep_lesson_003`. Non-audio drops (за mime або extension) soft-skip — Parse Filename повертає `[]`, downstream нічого не робить.
+
+**Retry semantics**: кожна з трьох Execute Workflow нод — `retryOnFail=true`, `maxTries=2` (= 1 retry), `waitBetweenTries=5000`, `onError=stopWorkflow`. Один retry — компроміс між self-healing (transient API errors) і fail-fast (real bugs не повинні мовчки повторюватись 5 разів). Якщо все одно fail → workflow зупиняється, Telegram НЕ відправляється; debug через n8n execution log.
+
+**Telegram payload**: lesson_id, source filename, active_langs count + list, лінк на `https://drive.google.com/drive/folders/{drive_output_full_folder_id}`. Bot authenticates через n8n credential, chat_id зчитується з config sheet (`telegram_chat_id`). Якщо chat_id missing — Build Telegram Message кидає error до того, як Telegram нода виконується.
+
+Нові config-ключі: `drive_input_folder_id` (для документації — фактично прив'язується в Drive Trigger ноду в UI), `telegram_chat_id` (зчитується з sheet у Build Telegram Message).
+
+Rationale: Drive trigger відразу дає auto-pipeline без додаткових webhook ендпоінтів, а filename-based lesson_id виключає ручний крок копіювання file_id. Retry=1 (а не 3) — щоб не маскувати справжні баги. Telegram-нотифікація — мінімальне push-сповіщення; для повніших dashboard alerts можна додавати поверх. W0_Calibrate (див. вище) свідомо не будемо — analyze_cps.js покриває.
+
+---
+
+### 2026-05-17 — W1_DUAL_TRIGGER_PATTERN
+
+Context: W1 раніше мав тільки Manual Trigger з `fileId` і `lesson_id` хардкодними. Тепер його викликає W_Master через Execute Workflow Trigger, але хочеться зберегти можливість ручного debug-запуску.
+
+Decision: Додано другий тригер (Execute Workflow Trigger) паралельно Manual Trigger. Обидва конвергують на нову `Get Params` Code-ноду, яка нормалізує `{file_id, lesson_id}` з вхідного payload, fallback-ить на захардкоджені defaults (`1gDRuwWEtfeHcQwEjEMbg4cQOHZQC_nYR` / `sleep_001`) коли запуск ручний (Manual Trigger не передає payload). Download Audio тепер використовує `={{ $json.file_id }}`, а Segment Transcript jsCode читає `lesson_id` через `$('Get Params').first().json.lesson_id`.
+
+Rationale: Pattern "два тригери → один normalizer" коштує однієї додаткової ноди, але дає 2 переваги: (1) parent workflow (W_Master) і ручне виконання використовують той самий downstream pipeline без розгалуження, (2) defaults у Get Params задокументовані як constants, а не "магічні" числа у різних місцях.
+
+---
+
+### 2026-05-17 — MULTI_LESSON_FILTERING_IN_W2_W3
+
+Context: Користувач прогнав W_Master, дропнув `test3_small.wav` (26 сек), а pipeline видав `sleep_001_full_tr.wav` тривалістю >1 хв. Тобто згенерувався дубляж попереднього уроку, а не того що дропнули. Корінь — W2 і W3 не мали Execute Workflow Trigger нод і ігнорували `lesson_id` параметр який W_Master їм передавав, плюс їхні Code-ноди читали ВСІ рядки з `segments` / `localizations` без жодного фільтра. Залишені рядки `sleep_001_seg_*` з попереднього прогону потрапили в обробку разом з новими `test3_small_seg_*`.
+
+Decision: W2 і W3 отримали той самий dual-trigger pattern що й W1 (Manual + Execute Workflow Trigger → Get Params Code-нода), а Code-ноди тепер фільтрують усі читання по `segment_id.startsWith(lesson_id + '_')`:
+
+- **W2**: `Prepare Tone Analysis` і `Prepare and Expand` після читання `Read Pending Segments` додано `.filter(i => !lesson_id || i.json.segment_id.startsWith(lesson_id + '_'))`.
+- **W3**: `Expand TTS Jobs` фільтрує sortedSegs, `Build Full Audio Per Lang` фільтрує `items` перед групуванням по lang. Це критично для concat — без фільтра в Build Full було б склеювання сегментів різних уроків в один WAV.
+
+Якщо `lesson_id === null` (Manual Trigger без payload) — фільтр пропускається. Це зберігає backward compat для ручних debug-запусків коли користувач хоче пройти всі pending рядки за один раз.
+
+Side fix у `workflows/W_Master.json`: вирази `={{ $('Parse Filename').first().json.lesson_id }}` в Execute W2 і W3 замінено на `={{ $json.lesson_id }}`, бо `first()` для multi-item потоку завжди повертав lesson_id ПЕРШОГО файлу. `Build Telegram Message` переписано щоб емітити N items (по одному на Parse Filename item) через `$('Parse Filename').all().map(...)` — тепер кожен файл отримує власне Telegram-повідомлення.
+
+Rationale: Це фіксить single-file correctness (для якого є реальний баг-репорт), і безкоштовно вмикає multi-file drop як побічний продукт. Альтернатива — auto-cleanup `segments` sheet перед кожним запуском — створює нову точку відмови (а якщо cleanup тільки частковий, дані змішуються все одно). Фільтрація по `lesson_id` strict-superset workflow's behavior — попередні випадки коли sheet чистий або містить тільки один урок працюють так само як раніше.
+
+Tradeoffs:
+- `Read Localizations Fresh` у W3 все ще читає всі рядки, тому `Download Segment WAV` витрачає Drive API виклики на стара уроки. Прийнятно бо a) для clean sheets немає stale рядків, b) Drive read free. Якщо стане проблемою — додати окрему Filter ноду між Read Localizations Fresh і Download Segment WAV.
+- Filter не оптимальний для дуже великих sheets — кожен виклик W3 робить .filter() over full localizations table. Це O(N) per run, тривіально до ~10K рядків.
+
+Conflict with prior decisions: жодних.

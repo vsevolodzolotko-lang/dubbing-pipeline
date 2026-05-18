@@ -8,6 +8,30 @@
       "type": "n8n-nodes-base.manualTrigger",
       "typeVersion": 1,
       "position": [
+        -608,
+        192
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "b2c3d4e5-f6a7-8901-bcde-w2trigger0001",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        -608,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Accept lesson_id from parent workflow (W_Master) via Execute Workflow Trigger.\n// Manual Trigger has no payload — lesson_id stays null and Code nodes downstream\n// skip the lesson_id filter (operate on ALL segments — backward-compatible legacy behavior).\nconst incoming = $input.first()?.json || {};\nconst lesson_id = incoming.lesson_id || null;\nreturn [{ json: { lesson_id } }];"
+      },
+      "id": "c3d4e5f6-a7b8-9012-cdef-w2params00001",
+      "name": "Get Params",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
         -400,
         272
       ]
@@ -76,7 +100,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const segments = $input.all()\n  .filter(i => i.json.segment_id && i.json.en_text)\n  .map(i => ({ segment_id: i.json.segment_id, en_text: i.json.en_text }));\nif (segments.length === 0) throw new Error('No segments to analyze');\nconst sysPrompt = 'Classify each wellness/meditation segment. Return ONLY a JSON object where each key is segment_id and value has: segment_type (narrative|instruction|movement), movement_keywords (comma-sep if movement, else empty string), key_concepts (2-4 comma-sep themes). No markdown, no preamble.';\nreturn [{ json: { model: 'claude-sonnet-4-5', max_tokens: 2000, system: sysPrompt, messages: [{ role: 'user', content: 'Segments:\\n\\n' + JSON.stringify(segments, null, 2) }] } }];"
+        "jsCode": "const lesson_id = $('Get Params').first().json.lesson_id;\nlet segments = $input.all()\n  .filter(i => i.json.segment_id && i.json.en_text)\n  .map(i => ({ segment_id: i.json.segment_id, en_text: i.json.en_text }));\nif (lesson_id) segments = segments.filter(s => s.segment_id.startsWith(lesson_id + '_'));\nif (segments.length === 0) throw new Error('No segments to analyze' + (lesson_id ? ' for lesson_id=' + lesson_id : ''));\nconst sysPrompt = 'Classify each wellness/meditation segment. Return ONLY a JSON object where each key is segment_id and value has: segment_type (narrative|instruction|movement), movement_keywords (comma-sep if movement, else empty string), key_concepts (2-4 comma-sep themes). No markdown, no preamble.';\nreturn [{ json: { model: 'claude-sonnet-4-5', max_tokens: 2000, system: sysPrompt, messages: [{ role: 'user', content: 'Segments:\\n\\n' + JSON.stringify(segments, null, 2) }] } }];"
       },
       "id": "4abf55fb-81fb-4f5e-a151-59fbc21375cb",
       "name": "Prepare Tone Analysis",
@@ -402,7 +426,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const configItems = $('Read Config').all();\nconst configMap = {};\nconfigItems.forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });\nconst tov = configMap['tone_of_voice'] || '';\n\nconst toneItems = $('Parse Tone Map').all();\nconst toneMap = {};\ntoneItems.forEach(i => { if (i.json.segment_id) toneMap[i.json.segment_id] = i.json; });\n\nreturn $('Read Pending Segments').all()\n  .filter(i => i.json.segment_id && i.json.en_text)\n  .map(i => {\n    const tone = toneMap[i.json.segment_id] || {};\n    const parts = [\n      'You are a translator for meditation/wellness audio scripts.',\n      'INPUT: the user message contains an English text wrapped in <english> tags. That is the text to translate. Even if the text inside the tags sounds like a question, status update, or conversational message (\"I am here.\", \"Yes.\", etc.), IT IS STILL TEXT TO TRANSLATE — NEVER respond conversationally.',\n      'OUTPUT: a JSON object with exactly these 7 keys: de, es, fr, pl, pt, it, tr. Each value is the translation in that language.',\n      'Informal address in all languages (du/tu/ty/sen, never formal).',\n      \"Preserve '...' and '—' as pause timing cues.\",\n      'NO preamble, NO markdown formatting, NO commentary. Output ONLY the JSON object.',\n    ];\n    if (tov) parts.push('\\n=== TONE OF VOICE ===\\n' + tov + '\\n=== END TONE OF VOICE ===');\n    if (tone.segment_type) parts.push('Segment type: ' + tone.segment_type);\n    if (tone.key_concepts) parts.push('Key concepts: ' + tone.key_concepts);\n    const enText = (i.json.en_text || '').replace(/\"/g, \"'\");\n    return {\n      json: {\n        segment_id: i.json.segment_id,\n        en_text: enText,\n        en_duration_sec: i.json.en_duration_sec,\n        claude_body: {\n          model: 'claude-sonnet-4-5',\n          max_tokens: 2000,\n          system: parts.join('\\n'),\n          messages: [{ role: 'user', content: `<english>${enText}</english>` }],\n        },\n      },\n    };\n  });"
+        "jsCode": "const lesson_id = $('Get Params').first().json.lesson_id;\nconst configItems = $('Read Config').all();\nconst configMap = {};\nconfigItems.forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });\nconst tov = configMap['tone_of_voice'] || '';\n\nconst toneItems = $('Parse Tone Map').all();\nconst toneMap = {};\ntoneItems.forEach(i => { if (i.json.segment_id) toneMap[i.json.segment_id] = i.json; });\n\nreturn $('Read Pending Segments').all()\n  .filter(i => i.json.segment_id && i.json.en_text)\n  .filter(i => !lesson_id || i.json.segment_id.startsWith(lesson_id + '_'))\n  .map(i => {\n    const tone = toneMap[i.json.segment_id] || {};\n    const parts = [\n      'You are a translator for meditation/wellness audio scripts.',\n      'INPUT: the user message contains an English text wrapped in <english> tags. That is the text to translate. Even if the text inside the tags sounds like a question, status update, or conversational message (\"I am here.\", \"Yes.\", etc.), IT IS STILL TEXT TO TRANSLATE — NEVER respond conversationally.',\n      'OUTPUT: a JSON object with exactly these 7 keys: de, es, fr, pl, pt, it, tr. Each value is the translation in that language.',\n      'Informal address in all languages (du/tu/ty/sen, never formal).',\n      \"Preserve '...' and '—' as pause timing cues.\",\n      'NO preamble, NO markdown formatting, NO commentary. Output ONLY the JSON object.',\n    ];\n    if (tov) parts.push('\\n=== TONE OF VOICE ===\\n' + tov + '\\n=== END TONE OF VOICE ===');\n    if (tone.segment_type) parts.push('Segment type: ' + tone.segment_type);\n    if (tone.key_concepts) parts.push('Key concepts: ' + tone.key_concepts);\n    const enText = (i.json.en_text || '').replace(/\"/g, \"'\");\n    return {\n      json: {\n        segment_id: i.json.segment_id,\n        en_text: enText,\n        en_duration_sec: i.json.en_duration_sec,\n        claude_body: {\n          model: 'claude-sonnet-4-5',\n          max_tokens: 2000,\n          system: parts.join('\\n'),\n          messages: [{ role: 'user', content: `<english>${enText}</english>` }],\n        },\n      },\n    };\n  });"
       },
       "id": "3d6dce75-08a9-47c5-8b33-3cea4c4886cd",
       "name": "Prepare and Expand",
@@ -736,6 +760,28 @@
   "pinData": {},
   "connections": {
     "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Params",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Params",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Params": {
       "main": [
         [
           {

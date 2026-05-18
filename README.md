@@ -4,11 +4,11 @@ Automated dubbing for wellness/meditation video courses. English audio in → 7 
 
 ## Status
 
-**Production-ready** for the segment-level dub flow. End-to-end run (≈60-second lesson) takes ~2 minutes and costs ~$0.10–0.15 per language.
+**Production-ready** for the segment-level dub flow. End-to-end run (≈60-second lesson) takes ~2 minutes and costs ~$0.10–0.15 per language. Drop a file into a Drive `input/` folder and W_Master chains W1 → W2 → W3 automatically, then pings Telegram on completion.
 
 ## Stack
 
-- **n8n** — orchestrates 3 workflows (W1 → W2 → W3)
+- **n8n** — orchestrates 3 workflows (W1 → W2 → W3), optionally chained by W_Master (Drive folder trigger)
 - **Deepgram Nova-3** — STT + sentence-level timestamps (W1)
 - **Claude Sonnet 4.5** — translation, tone analysis, large adapt loop (W2)
 - **Claude Haiku 4.5** — short-tail adapt + expansion inside synthesize (W3)
@@ -21,6 +21,9 @@ Automated dubbing for wellness/meditation video courses. English audio in → 7 
 ## Pipeline at a glance
 
 ```
+[W_Master]  Drive Trigger (input/) → Parse Filename → Execute W1 → W2 → W3 → Telegram
+                                                              │
+                                                              ▼  (file_id, lesson_id passed in)
 EN audio (Drive)
     │
     ▼
@@ -51,16 +54,19 @@ Output in Drive:
 
 ## Quick start
 
-1. **Google Sheet** — create a sheet with 4 tabs: `config`, `segments`, `voices`, `localizations`. Schema details in [`docs/sheets_schema.md`](docs/sheets_schema.md). Required config keys: `anthropic_api_key`, `elevenlabs_api_key`, `tone_of_voice`, `drive_output_folder_id`, `drive_output_full_folder_id`. See [`docs/config_keys.md`](docs/config_keys.md) for the full list.
+1. **Google Sheet** — create a sheet with 4 tabs: `config`, `segments`, `voices`, `localizations`. Schema details in [`docs/sheets_schema.md`](docs/sheets_schema.md). Required config keys: `anthropic_api_key`, `elevenlabs_api_key`, `tone_of_voice`, `drive_output_folder_id`, `drive_output_full_folder_id`. Optional (for W_Master): `drive_input_folder_id`, `telegram_chat_id`. See [`docs/config_keys.md`](docs/config_keys.md) for the full list.
 2. **n8n credentials** — bind:
     - Google Sheets account (for all Sheets nodes)
-    - Google Drive account (for all Drive nodes)
+    - Google Drive account (for all Drive nodes, including W_Master's Drive Trigger)
     - Deepgram Header Auth (`Authorization: Token <key>`) — for W1 STT
     - ElevenLabs Header Auth (`xi-api-key: <key>`) — for W3 TTS
-3. **Drive folders** — create `output/` and `output/full/` folders, copy their IDs into config.
+    - Telegram account (HTTP Bot Token) — for W_Master completion notification
+3. **Drive folders** — create `input/`, `output/`, and `output/full/` folders, copy their IDs into config.
 4. **Voices tab** — fill in voice IDs from ElevenLabs Studio for the 7 langs.
-5. **Import workflows** — `workflows/W1_STT_and_Segment.json`, `workflows/W2_Translate_v2.json`, `workflows/W3_Synthesize_v2.json` into n8n. Re-bind credentials on each node after import.
-6. **Run** — drop EN audio into Drive, paste its file ID into W1's Download Audio node, execute W1 → W2 → W3.
+5. **Import workflows** — `workflows/W1_STT_and_Segment.json`, `workflows/W2_Translate_v2.json`, `workflows/W3_Synthesize_v2.json`, then `workflows/W_Master.json` into n8n. Re-bind credentials on each node after import. In W_Master: re-bind the three Execute Workflow nodes to the IDs n8n assigned to W1/W2/W3.
+6. **Run**:
+    - **Auto**: drop an EN audio file (named `{lesson_id}.mp3`, e.g. `sleep_002.mp3`) into the Drive `input/` folder. W_Master picks it up within ~1 min and runs the whole pipeline.
+    - **Manual** (debug): execute W1's Manual Trigger (uses hardcoded defaults baked into the `Get Params` node), then run W2 and W3.
 
 ---
 
@@ -137,6 +143,7 @@ Full schema (every column explained): [`docs/sheets_schema.md#sheet-localization
 ├── PLAN.md                              # 2-week MVP roadmap (Week 1 done, Week 2 pending)
 ├── DECISIONS.md                         # architecture decisions log
 ├── workflows/                           # n8n workflow exports
+│   ├── W_Master.json                    # Drive folder trigger → W1 → W2 → W3 → Telegram
 │   ├── W1_STT_and_Segment.json          # Deepgram STT → segments sheet
 │   ├── W2_Translate_v2.json             # Tone + Translate + Adapt → segments sheet
 │   └── W3_Synthesize_v2.json            # TTS + Timing + Concat → Drive + localizations
