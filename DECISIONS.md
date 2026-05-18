@@ -785,3 +785,30 @@ Tradeoffs:
 - Filter не оптимальний для дуже великих sheets — кожен виклик W3 робить .filter() over full localizations table. Це O(N) per run, тривіально до ~10K рядків.
 
 Conflict with prior decisions: жодних.
+
+---
+
+### 2026-05-18 — RETRY_AND_BACKOFF_ON_CLAUDE_AND_ELEVENLABS_CALLS
+
+Context: На тестовому 4.5-хвилинному аудіо ("the_anchor") W2 пропустив 14 з 31 сегментів (5, 12, 17, 20-31). Patterns failures розкидані спочатку (5, 12, 17), а потім зплошним блоком з seg_020 до кінця. Той самий текст "I am enough." успішно пройшов в seg_019, але провалився у seg_020/021 — це підтверджує що проблема **не в контенті**, а у транзитному стані Anthropic API: timeout / 429 / порожня відповідь. W2 "Extract Translations" має захист (skip якщо немає валідних перекладів) щоб не перезаписувати existing sheet rows порожніми рядками — це і призводить до того, що сегменти "беззвучно" пропускаються в кінцевих результатах.
+
+Decision: Додано retry з exponential backoff на всі Claude / ElevenLabs HTTP-виклики:
+
+- **W2 Claude Tone Analysis** (HTTP Request node): `retryOnFail=true, maxTries=4, waitBetweenTries=5000` (n8n-level retry).
+- **W2 Claude Translate** (HTTP Request node): те ж саме. Плюс `onError: continueRegularOutput` залишений — якщо після 4 спроб і досі fail, downstream Extract Translations skip-ить рядок (existing захист).
+- **W2 Wait node**: збільшено з 2с до 4с між Claude requests. Per 31-сегментну лекцію це додає ~62с але дає Anthropic API ~12 RPM steady замість 30 — добре нижче за 50 RPM ліміт default tier.
+- **W2 Adapt Translations** (Code node, helpers.httpRequest): JS-level retry wrapper навколо `callClaude()` — 4 спроби з backoff 2s/4s/8s. Після всіх невдалих спроб повертає `''` (empty) → length-floor check у `claudeShorten` (60% from MIN_RETAIN) залишає попередній рядок без змін.
+- **W3 Check Timing + Pad** (Code node): retry wrapper навколо `tts()` (ElevenLabs) AND `callClaude()` (Anthropic Haiku). 4 спроби з backoff. tts() кидає throw на остаточному fail (бо без TTS нічого не зробити); callClaude() повертає `''` (м'який graceful — Claude shorten/expand просто не зменшить текст, original залишається).
+
+Rationale: Rate limit / network glitches — норма у multi-step API pipelines. Замість заходу "fail loud" обираю "retry few times, then skip gracefully" бо meditation script — не критична транзакція; краще втратити 1 сегмент і дізнатись з logs, ніж зривати весь run. Exponential backoff (2s→4s→8s) — стандартна стратегія для 429 — дає API час відновити квоту перед наступною спробою.
+
+Tradeoffs:
+- **Час**: на чистих API без помилок зміни не впливають (бо retry не fire). На API з 429 — додаткові 2-14с на сегмент, проте кейс passing rate стає ~100% замість попередніх ~55%.
+- **Cost**: retry → можливі дубльовані виклики (платні). Але оскільки failure-rate без retry була ~45% на довгих лекціях, retry економить більше (запобігаючи re-run всього pipeline) ніж витрачає.
+- **Observability**: failures у Code-нодах ловляться у `console.error` → видно у n8n execution logs, але НЕ пишуться у segments sheet. Майбутній improvement — писати "FAILED" або attempt count у `notes` колонку коли всі retry вичерпані.
+
+Conflict with prior decisions: жодних. Доповнює існуючий `onError: continueRegularOutput` патерн на Claude Translate.
+
+What is NOT in this fix (можливі follow-ups):
+- **Batched translation** (~3-7 Claude викликів замість 31 на 31-сегментну лекцію) — фундаментально краще, але вимагає переробки промпту і парсера. Окремий план.
+- **Detect-and-mark-failed у sheet** — додати notes/status колонку, щоб юзер бачив які саме сегменти failed без читання execution logs. Невелика зміна, але окремий план.
