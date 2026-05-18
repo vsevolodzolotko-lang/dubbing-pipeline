@@ -142,6 +142,7 @@
     },
     {
       "parameters": {
+        "batchSize": 5,
         "options": {}
       },
       "id": "a1000001-0000-0000-0000-000000000006",
@@ -179,6 +180,12 @@
           "response": {
             "response": {
               "responseFormat": "file"
+            }
+          },
+          "batching": {
+            "batch": {
+              "batchSize": 5,
+              "batchInterval": 0
             }
           }
         }
@@ -469,7 +476,7 @@
     },
     {
       "parameters": {
-        "amount": 3,
+        "amount": 0.5,
         "unit": "seconds"
       },
       "id": "a1000001-0000-0000-0000-000000000012",

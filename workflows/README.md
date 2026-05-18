@@ -55,9 +55,9 @@ The Drive trigger watches *file-created* events only — moving an existing file
 | Execute Workflow Trigger | Production entry point — receives `{ lesson_id }` from W_Master |
 | Get Params (Code) | Normalizes the two trigger paths into `{ lesson_id }`; null when manual |
 | Read Config / Read Pending Segments | Pull config and translatable rows |
-| Prepare Tone Analysis (Code) | Build one Claude request for all segments to classify types and key concepts. Filters by `lesson_id` prefix if provided. |
-| Claude Tone Analysis | HTTP POST to Anthropic, model sonnet-4-5 |
-| Parse Tone Map (Code) | Extract JSON, one item per segment_id |
+| Prepare Tone Analysis (Code) | Builds **batched** Claude requests (default 40 segments per batch) to classify types and key concepts. Filters by `lesson_id` prefix if provided. |
+| Claude Tone Analysis | HTTP POST to Anthropic, model sonnet-4-5. Retries 4× with 5s backoff. |
+| Parse Tone Map (Code) | Merges JSON responses from all batches, emits one item per segment_id. Defensive — skips broken batches with error log. |
 | Update Tone Columns | Write `segment_type`, `movement_keywords` back to `segments` |
 | Prepare and Expand (Code) | Builds **batched** Claude translate requests (default 8 segments per batch). System prompt cached via `cache_control: ephemeral`; user content is a JSON map `{segment_id: {text, type?, key_concepts?}}`. Filters by `lesson_id` prefix. |
 | Wait + Claude Translate | Rate-limit-safe per-batch translation. Retries up to 4× with 5s backoff on HTTP errors. |
@@ -80,12 +80,12 @@ The Drive trigger watches *file-created* events only — moving an existing file
 | Get Params (Code) | Normalizes the two trigger paths into `{ lesson_id }`; null when manual |
 | Read Config / Read Voices / Read Segments | Pull inputs |
 | Expand TTS Jobs (Code) | Cross-join: emit one item per (segment × active_lang). Pre-compute slot timing — `slot_start_sec`, `slot_end_sec`, `lead_silence_natural_sec`, `tts_budget_sec`, `effective_slot_sec`. Filters by `lesson_id` prefix. |
-| Loop Over Items (Split In Batches) | Per-segment-per-lang loop |
-| ↳ ElevenLabs TTS | POST text to `eleven_multilingual_v2` with `output_format=pcm_22050` |
+| Loop Over Items (Split In Batches) | Per-segment-per-lang loop. `batchSize=5` — 5 items pass through the body per iteration. |
+| ↳ ElevenLabs TTS | POST text to `eleven_multilingual_v2` with `output_format=pcm_22050`. HTTP batching `batchSize=5, batchInterval=0` → up to 5 concurrent requests. Requires ElevenLabs Scale tier (15 concurrent capacity) for safety. |
 | ↳ Check Timing + Pad (Code) | The brains. Re-adapt via Claude Haiku if over budget (3-tier shorten), retry at speed 1.10/1.15, hard-truncate as last resort, expand if too short (max 2 attempts), prepend `lead_silence`, append `tail_silence`, build WAV |
 | ↳ Save to Drive | Upload per-segment WAV |
 | ↳ Prepare Localization Row + Update Localizations | Write diagnostics row |
-| ↳ Rate Limit Guard (Wait) | 3s between TTS calls |
+| ↳ Rate Limit Guard (Wait) | 0.5s between batched iterations (ElevenLabs Scale tier has plenty of RPM headroom) |
 | Loop done → Read Localizations Fresh | Get all rows for concat stage |
 | Download Segment WAV | Per-row Drive download, attaches binary |
 | Build Full Audio Per Lang (Code) | Group by lang, sort by `segment_id`, strip 44-byte WAV headers, concat raw PCM, wrap fresh WAV header. Filters localizations by `lesson_id` prefix so multi-lesson runs don't mix segments. |
