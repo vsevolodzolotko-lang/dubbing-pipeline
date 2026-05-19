@@ -14,20 +14,17 @@ Four workflows: **W_Master** (Drive folder trigger, optional) chains **W1 → W2
 | Execute W1 (STT) | Calls W1 with `{file_id, lesson_id}`. Retry: 1 attempt on fail, then stop |
 | Execute W2 (Translate) | Calls W2 with `{lesson_id}`. Retry: 1 attempt on fail, then stop |
 | Execute W3 (Synthesize) | Calls W3 with `{lesson_id}`. Retry: 1 attempt on fail, then stop |
-| Read Config | Pulls `drive_output_full_folder_id`, `slack_channel`, `active_langs` |
-| Build Slack Message (Code) | Composes the completion message with Slack mrkdwn formatting |
-| Slack Notify | Sends the message via Slack bot credential |
+| (Slack notification stage not yet wired — pending workspace app approval) | Build Slack Message + Slack Notify nodes will append here once OAuth scopes are granted. |
 
 **Setup checklist** (after importing):
-1. Drive Trigger → set `folderToWatch` to your `input/` folder ID (or leave the placeholder and set via expression to read from config).
+1. Drive Trigger → set `folderToWatch` to your `input/` folder ID.
 2. Execute W1 / W2 / W3 → re-bind to the workflow IDs assigned by your n8n instance after import.
-3. Slack credential → create one in n8n (Bot User OAuth Token, `xoxb-...`), then bind it to `Slack Notify`.
-4. Add `slack_channel` to the `config` sheet (channel ID like `C01234ABCDE`). Invite your bot to the channel via `/invite @YourBotName` unless its scopes include `chat:write.public`.
-5. Set `active = true` on the workflow only after manual smoke-test (otherwise polling starts immediately).
+3. (Optional, pending Slack workspace approval) Once the Slack app is installed, add Build Slack Message Code node + Slack Notify node after Pass Lessons (after W3). Bind a Slack credential (`xoxb-...` Bot User OAuth Token) and add `slack_channel` to the `config` sheet.
+4. Set `active = true` on the workflow only after manual smoke-test (otherwise polling starts immediately).
 
 The Drive trigger watches *file-created* events only — moving an existing file into the folder also counts. Modifying an already-processed file does not retrigger.
 
-**Retry semantics**: each Execute Workflow node retries once with 5s backoff. If still failing → the master workflow stops (no Slack notification). Open the n8n execution log to see which sub-workflow failed.
+**Retry semantics**: Execute W1 and Execute W2 retry once with 5s backoff. Execute W3 is NOT retried (it's long + has Drive side effects — retrying duplicates work). On any sub-workflow failure W_Master stops; open the n8n execution log to see which sub-workflow failed.
 
 ## W1_STT_and_Segment.json — Speech-to-text + segmentation
 
@@ -62,8 +59,7 @@ The Drive trigger watches *file-created* events only — moving an existing file
 | Prepare and Expand (Code) | Builds **batched** Claude translate requests (default 8 segments per batch). System prompt cached via `cache_control: ephemeral`; user content is a JSON map `{segment_id: {text, type?, key_concepts?}}`. Filters by `lesson_id` prefix. |
 | Wait + Claude Translate | Rate-limit-safe per-batch translation. Retries up to 4× with 5s backoff on HTTP errors. |
 | Extract Translations (Code) | Parses batched JSON response (`{segment_id: {de, es, fr, pl, pt, it, tr}}`), emits one item per segment. Defensive skip on empty/missing segment in batch. |
-| Verify Translations (Code) | QA pass on Sonnet's initial output. Batches segments (8 at a time), sends to Claude with anti-pattern rules (DE `gültig`, FR `suffisant`, TR `geçerli`, PL bare `Jestem dość`, etc). Applies corrections; pass-through for clean translations. Retries 4× with backoff on failure. Cost ~$0.04 per lesson. |
-| Adapt Translations (Code) | CPS-based estimation + up to 3-tier Claude shorten loop per (segment × lang) when text won't fit. Anti-pattern rules in SYSTEM_PROMPT prevent shortening from regressing good translations back to literal-bureaucratic equivalents. |
+| Adapt Translations (Code) | CPS-based estimation + up to 3-tier Claude shorten loop per (segment × lang) when text won't fit. |
 | Update Sheet | Append/update `{lang}_text` + `{lang}_adaptation_attempts` columns |
 
 ## W3_Synthesize_v2.json — TTS + timing + per-segment + per-lang concat

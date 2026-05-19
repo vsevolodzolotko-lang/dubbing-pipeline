@@ -3,7 +3,7 @@
   "nodes": [
     {
       "parameters": {},
-      "id": "9371aa37-1e63-4b3d-b661-17237659a31a",
+      "id": "ded0a4d7-2215-4a2c-a7a4-5963ce21c86d",
       "name": "Manual Trigger",
       "type": "n8n-nodes-base.manualTrigger",
       "typeVersion": 1,
@@ -14,7 +14,7 @@
     },
     {
       "parameters": {},
-      "id": "b2c3d4e5-f6a7-8901-bcde-w2trigger0001",
+      "id": "3747d5ff-86a8-48e1-9e3d-63fa31d12545",
       "name": "Execute Workflow Trigger",
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1,
@@ -27,7 +27,7 @@
       "parameters": {
         "jsCode": "// Accept lesson_id from parent workflow (W_Master) via Execute Workflow Trigger.\n// Manual Trigger has no payload — lesson_id stays null and Code nodes downstream\n// skip the lesson_id filter (operate on ALL segments — backward-compatible legacy behavior).\nconst incoming = $input.first()?.json || {};\nconst lesson_id = incoming.lesson_id || null;\nreturn [{ json: { lesson_id } }];"
       },
-      "id": "c3d4e5f6-a7b8-9012-cdef-w2params00001",
+      "id": "3b733e5e-8f13-4a2b-bad0-9c562244d32d",
       "name": "Get Params",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -52,7 +52,7 @@
         },
         "options": {}
       },
-      "id": "8f0eb9e3-ef8b-4228-b01f-62718b233d93",
+      "id": "9265e6df-33f2-4c83-a276-f7ef87c70f7a",
       "name": "Read Config",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
@@ -83,7 +83,7 @@
         },
         "options": {}
       },
-      "id": "dfbdefcc-34f0-489b-91e8-df3ae3b00f19",
+      "id": "f5bb31ba-5492-4ef2-97a5-8be60acbb8ba",
       "name": "Read Pending Segments",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
@@ -102,7 +102,7 @@
       "parameters": {
         "jsCode": "// Batches tone analysis into chunks of TONE_BATCH so a long lesson (100+ segments)\n// doesn't overflow a single Claude call or exceed max_tokens.\nconst TONE_BATCH = 40;\nconst lesson_id = $('Get Params').first().json.lesson_id;\nlet segments = $input.all()\n  .filter(i => i.json.segment_id && i.json.en_text)\n  .map(i => ({ segment_id: i.json.segment_id, en_text: i.json.en_text }));\nif (lesson_id) segments = segments.filter(s => s.segment_id.startsWith(lesson_id + '_'));\nif (segments.length === 0) throw new Error('No segments to analyze' + (lesson_id ? ' for lesson_id=' + lesson_id : ''));\n\nconst sysPrompt = 'Classify each wellness/meditation segment. Return ONLY a JSON object where each key is segment_id and value has: segment_type (narrative|instruction|movement), movement_keywords (comma-sep if movement, else empty string), key_concepts (2-4 comma-sep themes). No markdown, no preamble. Every input segment_id MUST appear in the output.';\n\nconst batches = [];\nfor (let i = 0; i < segments.length; i += TONE_BATCH) {\n  batches.push(segments.slice(i, i + TONE_BATCH));\n}\n\nreturn batches.map(batch => ({\n  json: {\n    model: 'claude-sonnet-4-5',\n    max_tokens: 4000,\n    system: sysPrompt,\n    messages: [{ role: 'user', content: 'Segments:\\n\\n' + JSON.stringify(batch, null, 2) }],\n  },\n}));"
       },
-      "id": "4abf55fb-81fb-4f5e-a151-59fbc21375cb",
+      "id": "dd7f9745-a7c4-4849-ac63-a65c58b71122",
       "name": "Prepare Tone Analysis",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -131,7 +131,7 @@
         "jsonBody": "={{ JSON.stringify($json) }}",
         "options": {}
       },
-      "id": "d2e34db2-a15e-4917-a17d-ec8427773087",
+      "id": "a0c9d74b-1260-485d-bea2-42c37e3d7491",
       "name": "Claude Tone Analysis",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
@@ -139,21 +139,21 @@
         208,
         0
       ],
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 5000,
       "credentials": {
         "anthropicApi": {
           "id": "OX04ALIGnl0azgXe",
           "name": "Anthropic account 2"
         }
-      },
-      "retryOnFail": true,
-      "maxTries": 4,
-      "waitBetweenTries": 5000
+      }
     },
     {
       "parameters": {
-        "jsCode": "// Merges tone analysis from one or more batched Claude responses → emits per-segment items.\nconst merged = {};\nfor (const item of $input.all()) {\n  try {\n    let raw = item.json.content?.[0]?.text?.trim() || '{}';\n    const match = raw.match(/\\{[\\s\\S]*\\}/);\n    if (!match) { console.error('Parse Tone Map: no JSON in batch response'); continue; }\n    const batchMap = JSON.parse(match[0]);\n    Object.assign(merged, batchMap);\n  } catch (e) {\n    console.error('Parse Tone Map: parse failed for one batch:', e.message);\n  }\n}\nif (Object.keys(merged).length === 0) throw new Error('Tone analysis returned empty results across all batches');\nreturn Object.entries(merged).map(([segment_id, meta]) => ({\n  json: { segment_id, segment_type: meta.segment_type || 'narrative', movement_keywords: meta.movement_keywords || '', key_concepts: meta.key_concepts || '' }\n}));"
+        "jsCode": "// Merges tone analysis from one or more batched Claude responses — emits per-segment items.\nconst merged = {};\nfor (const item of $input.all()) {\n  try {\n    let raw = item.json.content?.[0]?.text?.trim() || '{}';\n    const match = raw.match(/\\{[\\s\\S]*\\}/);\n    if (!match) { console.error('Parse Tone Map: no JSON in batch response'); continue; }\n    const batchMap = JSON.parse(match[0]);\n    Object.assign(merged, batchMap);\n  } catch (e) {\n    console.error('Parse Tone Map: parse failed for one batch:', e.message);\n  }\n}\nif (Object.keys(merged).length === 0) throw new Error('Tone analysis returned empty results across all batches');\nreturn Object.entries(merged).map(([segment_id, meta]) => ({\n  json: { segment_id, segment_type: meta.segment_type || 'narrative', movement_keywords: meta.movement_keywords || '', key_concepts: meta.key_concepts || '' }\n}));"
       },
-      "id": "9e93fb29-4f5c-4f82-976b-da4da2bae72e",
+      "id": "6261bd83-bb8b-4238-9913-b485e7776c1b",
       "name": "Parse Tone Map",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -412,7 +412,7 @@
         },
         "options": {}
       },
-      "id": "0be30612-b47c-416d-8da2-dc9446ba9925",
+      "id": "00bc5199-a817-4d67-934f-25addfe37de2",
       "name": "Update Tone Columns",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
@@ -429,9 +429,9 @@
     },
     {
       "parameters": {
-        "jsCode": "// Batched translation: groups segments into batches of BATCH_SIZE and emits one Claude request per batch.\n// This dramatically reduces Anthropic API request count (31 → 4 for a typical lesson) and stays under\n// the default tier's output-tokens-per-minute ceiling (8K), which 1-segment-per-call hits at ~14 segments.\nconst lesson_id = $('Get Params').first().json.lesson_id;\nconst configItems = $('Read Config').all();\nconst configMap = {};\nconfigItems.forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });\nconst tov = configMap['tone_of_voice'] || '';\n\nconst toneItems = $('Parse Tone Map').all();\nconst toneMap = {};\ntoneItems.forEach(i => { if (i.json.segment_id) toneMap[i.json.segment_id] = i.json; });\n\nconst BATCH_SIZE = 8;\n\nconst segments = $('Read Pending Segments').all()\n  .filter(i => i.json.segment_id && i.json.en_text)\n  .filter(i => !lesson_id || i.json.segment_id.startsWith(lesson_id + '_'));\n\nconst sysParts = [\n  'You are a translator for meditation/wellness audio scripts.',\n  'INPUT: a JSON object mapping segment_id → { text, type?, key_concepts? }. Each \"text\" value is the English text to translate. Even when the text is very short or sounds conversational (\"I am here.\", \"Yes.\", \"I am.\"), IT IS STILL TEXT TO TRANSLATE — never respond conversationally and never skip a segment.',\n  'OUTPUT: a single JSON object mapping every input segment_id to an object with EXACTLY these 7 keys: de, es, fr, pl, pt, it, tr. Each value = translation in that language.',\n  'EVERY input segment_id MUST appear in the output. If you skip any, the run fails downstream.',\n  'Informal address in all languages (du/tu/ty/sen, never formal).',\n  \"Preserve '...' and '—' as pause timing cues.\",\n  '',\n  '=== MEANING PRESERVATION (CRITICAL for short affirmations) ===',\n  'These texts are PSYCHOLOGICAL/THERAPEUTIC affirmations, not bureaucratic statements. Translate the emotional core, not the literal dictionary meaning. Even on 3-word phrases like \"I am valid.\" or \"I am enough.\" — these are therapeutic self-acceptance statements about being WHOLE, WORTHY, ENOUGH-AS-A-PERSON.',\n  '',\n  'FORBIDDEN literal translations (these have bureaucratic/legal meanings in the target language):',\n  '- DE: NEVER use \"gültig\" for \"valid\" (means \"valid ticket/document\"). Use \"Ich bin richtig, so wie ich bin\" or \"Ich bin wertvoll\".',\n  '- FR: NEVER use \"suffisant\" for \"enough\" when applied to a person (means \"arrogant, conceited\"). Use \"Je suis assez\", \"Cela me suffit\", or \"Je me suffis\".',\n  '- FR: NEVER use \"valide\" for \"valid\" applied to a person (means \"able-bodied\" or \"legally valid\"). Use \"Je suis légitime\" or \"J\\'ai ma place\".',\n  '- TR: NEVER use \"geçerli/geçerliyim\" for \"valid\" (means \"valid as a rule/password\"). Use \"değerliyim\" or \"yeterliyim\" or \"olduğum gibi iyiyim\".',\n  '- PL: NEVER use bare \"Jestem dość\" for \"I am enough\" (ungrammatical). Use \"Jestem wystarczający\" or \"Jestem dość dobry\".',\n  '- PT/ES/IT: \"válido/valido\" works grammatically but sounds clinical. Prefer warmer \"Eu tenho valor\" / \"Yo valgo\" / \"Ho valore\" when slot allows.',\n  '',\n  'When translating \"I am ___\" affirmations, ask: would a meditation teacher say this in this language? If it sounds like a bureaucratic statement or grammar exercise, choose a warmer equivalent.',\n  '',\n  'NO preamble, NO markdown, NO commentary, NO ```json fences. Output ONLY the JSON object, starting with { and ending with }.',\n];\nif (tov) sysParts.push('\\n=== TONE OF VOICE ===\\n' + tov + '\\n=== END TONE OF VOICE ===');\nconst systemBlocks = [\n  { type: 'text', text: sysParts.join('\\n'), cache_control: { type: 'ephemeral' } },\n];\n\nconst batches = [];\nfor (let i = 0; i < segments.length; i += BATCH_SIZE) {\n  batches.push(segments.slice(i, i + BATCH_SIZE));\n}\n\nreturn batches.map((batch, bIdx) => {\n  const userMap = {};\n  const batchInfo = [];\n  for (const s of batch) {\n    const sid = s.json.segment_id;\n    const enText = (s.json.en_text || '').replace(/\"/g, \"'\");\n    const tone = toneMap[sid] || {};\n    userMap[sid] = { text: enText };\n    if (tone.segment_type) userMap[sid].type = tone.segment_type;\n    if (tone.key_concepts) userMap[sid].key_concepts = tone.key_concepts;\n    batchInfo.push({ segment_id: sid, en_text: s.json.en_text, en_duration_sec: s.json.en_duration_sec });\n  }\n  return {\n    json: {\n      batch_index: bIdx,\n      batch_size: batch.length,\n      batch_segments: batchInfo,\n      claude_body: {\n        model: 'claude-sonnet-4-5',\n        max_tokens: 8000,\n        system: systemBlocks,\n        messages: [{ role: 'user', content: JSON.stringify(userMap, null, 2) }],\n      },\n    },\n  };\n});"
+        "jsCode": "// Batched translation: groups segments into batches of BATCH_SIZE and emits one Claude request per batch.\n// This dramatically reduces Anthropic API request count (31 → 4 for a typical lesson) and stays under\n// the default tier's output-tokens-per-minute ceiling (8K), which 1-segment-per-call hits at ~14 segments.\nconst lesson_id = $('Get Params').first().json.lesson_id;\nconst configItems = $('Read Config').all();\nconst configMap = {};\nconfigItems.forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });\nconst tov = configMap['tone_of_voice'] || '';\n\nconst toneItems = $('Parse Tone Map').all();\nconst toneMap = {};\ntoneItems.forEach(i => { if (i.json.segment_id) toneMap[i.json.segment_id] = i.json; });\n\nconst BATCH_SIZE = 8;\n\nconst segments = $('Read Pending Segments').all()\n  .filter(i => i.json.segment_id && i.json.en_text)\n  .filter(i => !lesson_id || i.json.segment_id.startsWith(lesson_id + '_'));\n\nconst sysParts = [\n  'You are a translator for meditation/wellness audio scripts.',\n  'INPUT: a JSON object mapping segment_id → { text, type?, key_concepts? }. Each \"text\" value is the English text to translate. Even when the text is very short or sounds conversational (\"I am here.\", \"Yes.\", \"I am.\"), IT IS STILL TEXT TO TRANSLATE — never respond conversationally and never skip a segment.',\n  'OUTPUT: a single JSON object mapping every input segment_id to an object with EXACTLY these 7 keys: de, es, fr, pl, pt, it, tr. Each value = translation in that language.',\n  'EVERY input segment_id MUST appear in the output. If you skip any, the run fails downstream.',\n  'Informal address in all languages (du/tu/ty/sen, never formal).',\n  \"Preserve '...' and '—' as pause timing cues.\",\n  'NO preamble, NO markdown, NO commentary, NO ```json fences. Output ONLY the JSON object, starting with { and ending with }.',\n];\nif (tov) sysParts.push('\\n=== TONE OF VOICE ===\\n' + tov + '\\n=== END TONE OF VOICE ===');\nconst systemBlocks = [\n  { type: 'text', text: sysParts.join('\\n'), cache_control: { type: 'ephemeral' } },\n];\n\nconst batches = [];\nfor (let i = 0; i < segments.length; i += BATCH_SIZE) {\n  batches.push(segments.slice(i, i + BATCH_SIZE));\n}\n\nreturn batches.map((batch, bIdx) => {\n  const userMap = {};\n  const batchInfo = [];\n  for (const s of batch) {\n    const sid = s.json.segment_id;\n    const enText = (s.json.en_text || '').replace(/\"/g, \"'\");\n    const tone = toneMap[sid] || {};\n    userMap[sid] = { text: enText };\n    if (tone.segment_type) userMap[sid].type = tone.segment_type;\n    if (tone.key_concepts) userMap[sid].key_concepts = tone.key_concepts;\n    batchInfo.push({ segment_id: sid, en_text: s.json.en_text, en_duration_sec: s.json.en_duration_sec });\n  }\n  return {\n    json: {\n      batch_index: bIdx,\n      batch_size: batch.length,\n      batch_segments: batchInfo,\n      claude_body: {\n        model: 'claude-sonnet-4-5',\n        max_tokens: 8000,\n        system: systemBlocks,\n        messages: [{ role: 'user', content: JSON.stringify(userMap, null, 2) }],\n      },\n    },\n  };\n});"
       },
-      "id": "3d6dce75-08a9-47c5-8b33-3cea4c4886cd",
+      "id": "fcb07b13-df55-4408-b95f-f8ca65e5388d",
       "name": "Prepare and Expand",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -450,7 +450,7 @@
         416,
         272
       ],
-      "id": "9551337b-727f-41ac-85ce-28e33fbc66ce",
+      "id": "a05f3913-e098-410e-a214-558b0d3a9a42",
       "name": "Wait",
       "webhookId": "3fe3dde2-e6b6-45fd-bcce-422e713834fa"
     },
@@ -474,7 +474,7 @@
         "jsonBody": "={{ JSON.stringify($json.claude_body) }}",
         "options": {}
       },
-      "id": "f173f521-dee3-41be-a4c0-2e043975c137",
+      "id": "f59ddc4b-99fd-4f1c-b46e-300fe9152d0d",
       "name": "Claude Translate",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
@@ -483,22 +483,22 @@
         272
       ],
       "executeOnce": false,
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 5000,
       "credentials": {
         "anthropicApi": {
           "id": "OX04ALIGnl0azgXe",
           "name": "Anthropic account 2"
         }
       },
-      "retryOnFail": true,
-      "maxTries": 4,
-      "waitBetweenTries": 5000,
       "onError": "continueRegularOutput"
     },
     {
       "parameters": {
         "jsCode": "// Parses batched Claude response → emits one item per segment.\n// Each batch's Claude reply is a JSON object: { segment_id: { de, es, fr, pl, pt, it, tr }, ... }.\nconst REQUIRED_LANGS = ['de', 'es', 'fr', 'pl', 'pt', 'it', 'tr'];\nconst preparedItems = $('Prepare and Expand').all();\nconst claudeItems = $input.all();\nconst results = [];\n\nfor (let i = 0; i < claudeItems.length; i++) {\n  const claudeResp = claudeItems[i].json;\n  const batchSegments = preparedItems[i]?.json?.batch_segments || [];\n  const batchIdx = preparedItems[i]?.json?.batch_index ?? i;\n\n  let batchTranslations = {};\n  try {\n    let text = claudeResp.content?.[0]?.text?.trim() || '{}';\n    text = text.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n    const match = text.match(/\\{[\\s\\S]*\\}/);\n    if (match) batchTranslations = JSON.parse(match[0]);\n  } catch(e) {\n    console.error(`Extract Translations: parse error on batch ${batchIdx}: ${e.message}`);\n  }\n\n  for (const seg of batchSegments) {\n    const translations = batchTranslations[seg.segment_id] || {};\n    const filled = REQUIRED_LANGS.filter(l => translations[l] && translations[l].trim());\n    if (filled.length === 0) {\n      console.error(`Extract Translations: skip ${seg.segment_id} — empty/missing in batch ${batchIdx}. Sheet row preserved.`);\n      continue;\n    }\n    if (filled.length < REQUIRED_LANGS.length) {\n      const missing = REQUIRED_LANGS.filter(l => !filled.includes(l));\n      console.warn(`Extract Translations: ${seg.segment_id} missing langs: ${missing.join(',')}`);\n    }\n    results.push({ json: {\n      segment_id:      seg.segment_id,\n      en_text:         seg.en_text || '',\n      en_duration_sec: seg.en_duration_sec || 0,\n      de_text: translations.de || '',\n      es_text: translations.es || '',\n      fr_text: translations.fr || '',\n      pl_text: translations.pl || '',\n      pt_text: translations.pt || '',\n      it_text: translations.it || '',\n      tr_text: translations.tr || '',\n    }});\n  }\n}\nreturn results;"
       },
-      "id": "807c2327-37ea-4a40-993a-f3c66442dde5",
+      "id": "16f67f6b-f6f3-41fa-bf70-93a46e9dd537",
       "name": "Extract Translations",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -734,7 +734,7 @@
         },
         "options": {}
       },
-      "id": "ff49a74c-870c-4c80-83e3-355a158d1b88",
+      "id": "09d764e3-5c26-47ab-b1bb-962683a8166c",
       "name": "Update Sheet",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
@@ -751,22 +751,9 @@
     },
     {
       "parameters": {
-        "jsCode": "// Verify Translations — QA pass on Sonnet's initial output.\n// Batches segments (8 at a time), sends to Claude with anti-pattern rules.\n// Applies corrections when Claude returns a different value; pass-through otherwise.\nconst QA_BATCH_SIZE = 8;\nconst LANGS = ['de', 'es', 'fr', 'pl', 'pt', 'it', 'tr'];\n\nconst configMap = {};\n$('Read Config').all().forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });\nconst apiKey = configMap.anthropic_api_key || '';\nif (!apiKey) throw new Error('anthropic_api_key missing from config sheet');\n\nconst QA_SYSTEM = `You are a quality reviewer for meditation/wellness translations.\n\nINPUT: a JSON object mapping segment_id → { en, de, es, fr, pl, pt, it, tr }. Each segment has the English source plus 7 translations.\n\nYOUR JOB: detect and fix LITERAL-DICTIONARY mistranslations that lose the therapeutic/affirmative meaning. The English texts are SELF-ACCEPTANCE AFFIRMATIONS (meditation context), not bureaucratic statements.\n\nFORBIDDEN literal translations — replace if found:\n- DE: \"gültig\" for \"valid\" (means \"valid ticket\"). Use \"Ich bin wertvoll.\" or \"Ich bin richtig, so wie ich bin.\"\n- FR: \"suffisant\" for \"enough\" when about a person (means \"arrogant, conceited\"). Use \"Je suis assez.\" or \"Je me suffis.\"\n- FR: \"valide\" for \"valid\" when about a person (means \"able-bodied\"). Use \"Je suis légitime.\" or \"J'ai ma place.\"\n- TR: \"geçerli/geçerliyim\" for \"valid\" (means \"valid as a rule/password\"). Use \"Değerliyim.\" or \"Ben yeterliyim.\"\n- PL: bare \"Jestem dość.\" for \"I am enough\" (ungrammatical). Use \"Jestem wystarczający.\" or \"Jestem dość dobry.\"\n- ANY obvious typos (double letters where there shouldn't be, etc.)\n\nFor clean translations, RETURN THEM UNCHANGED.\n\nOUTPUT: JSON object mapping segment_id → { de, es, fr, pl, pt, it, tr } with same 7 langs. No \"en\" in output. No commentary. NO markdown fences. Only the JSON.\n\nLENGTH CONSTRAINT: keep corrections within ±25% of original character count (for TTS timing budget).`;\n\nasync function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }\nasync function callQA(body) {\n  const MAX_TRIES = 4;\n  for (let attempt = 0; attempt < MAX_TRIES; attempt++) {\n    try {\n      const resp = await this.helpers.httpRequest({\n        method: 'POST',\n        url: 'https://api.anthropic.com/v1/messages',\n        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },\n        body, json: true,\n      });\n      return resp.content?.[0]?.text?.trim() || '';\n    } catch (e) {\n      if (attempt === MAX_TRIES - 1) { console.error('Verify Translations QA failed after retries:', e.message); return ''; }\n      await sleep(2000 * Math.pow(2, attempt));\n    }\n  }\n  return '';\n}\n\nconst items = $input.all();\nconst batches = [];\nfor (let i = 0; i < items.length; i += QA_BATCH_SIZE) batches.push(items.slice(i, i + QA_BATCH_SIZE));\n\nconst corrections = {};\nfor (const batch of batches) {\n  const userMap = {};\n  for (const it of batch) {\n    const j = it.json;\n    userMap[j.segment_id] = {\n      en: j.en_text || '',\n      de: j.de_text || '', es: j.es_text || '', fr: j.fr_text || '',\n      pl: j.pl_text || '', pt: j.pt_text || '', it: j.it_text || '', tr: j.tr_text || '',\n    };\n  }\n  const body = {\n    model: 'claude-sonnet-4-5',\n    max_tokens: 8000,\n    system: [{ type: 'text', text: QA_SYSTEM, cache_control: { type: 'ephemeral' } }],\n    messages: [{ role: 'user', content: JSON.stringify(userMap, null, 2) }],\n  };\n  const raw = await callQA.call(this, body);\n  try {\n    const cleaned = raw.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n    const match = cleaned.match(/\\{[\\s\\S]*\\}/);\n    if (match) Object.assign(corrections, JSON.parse(match[0]));\n  } catch (e) { console.error('Verify Translations parse error:', e.message); }\n}\n\n// Apply corrections: if QA returned a value for a lang, use it; else keep original.\nreturn items.map(it => {\n  const sid = it.json.segment_id;\n  const corr = corrections[sid] || {};\n  const out = { ...it.json };\n  for (const lang of LANGS) {\n    const key = `${lang}_text`;\n    if (corr[lang] && corr[lang].trim()) out[key] = corr[lang].trim();\n  }\n  return { json: out };\n});\n"
+        "jsCode": "const LANG_CPS = { de: 12, es: 15, fr: 15, pl: 14, pt: 16, it: 14, tr: 14 };\nconst LANGS = ['de', 'es', 'fr', 'pl', 'pt', 'it', 'tr'];\nconst BUDGET_FACTOR = 1.05;\nconst MAX_ATTEMPTS = 3;\nconst MIN_RETAIN = 0.60;  // never accept shortening below 60% of input\nconst ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';\n\nconst configItems = $('Read Config').all();\nconst configMap = {};\nconfigItems.forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });\nconst apiKey = configMap['anthropic_api_key'] || '';\nif (!apiKey) throw new Error('anthropic_api_key missing from config sheet');\n\n// Per-language CPS — defaults tuned against real ElevenLabs output; overridable via\n// config keys cps_estimate_de, cps_estimate_es, …, cps_estimate_tr. Computed below.\nconst CPS_DEFAULTS = { de: 12, es: 15, fr: 15, pl: 14, pt: 16, it: 14, tr: 14 };\n\nconst SYSTEM_PROMPT = `You are a localization editor for meditation/wellness audio. Your job is to shorten a translated text so it fits within a strict time budget for audio dubbing.\n\nCRITICAL RULES — these override the shortening request:\n- Every distinct concept in the English source MUST remain in the translation\n- Preserve negations exactly: \"no\", \"not\", \"without\", \"never\"\n- Preserve contrasts: \"A, not B\" / \"A but B\" / \"A instead of B\" patterns\n- Preserve specific nouns, named techniques, numbers and proper names\n- Keep the language, tone, and informal address (du/tu/ty/sen) unchanged\n- Preserve '...' and '—' as pause timing cues\n- Do NOT translate or switch languages — edit only the given translation\n- Only remove genuinely redundant filler words (e.g., \"really\", \"very\", \"just\", \"actually\")\n- Return ONLY the shortened text. No explanation, no quotes, no preamble.\n- DO NOT include character counts, \"(N characters)\", or any meta-commentary.\n- DO NOT include reasoning words (\"Wait\", \"Let me\", \"Actually\", \"Note:\", \"Hmm\").\n- DO NOT use markdown formatting (**, __, backticks).\n- DO NOT include multiple drafts — pick ONE and output only it.\n- DO NOT include blank lines.`;\n\nconst ATTEMPT_PROMPTS = [\n  (lang, budget, est, en, trans, minChars) =>\n    `Shorten this ${lang} translation slightly (~5-15%) to fit within ${budget}s (currently ~${est}s).\nRemove only filler words and minor redundancies. Preserve sentence structure and all key concepts.\nMinimum allowed length: ${minChars} characters.\n\nOriginal English (preserve all concepts): ${en}\nCurrent translation: ${trans}`,\n  (lang, budget, est, en, trans, minChars) =>\n    `Shorten this ${lang} translation more (~15-25%) to fit within ${budget}s (currently ~${est}s).\nRephrase for compactness, but every concept from the English source must remain.\nMinimum allowed length: ${minChars} characters.\n\nOriginal English (preserve all concepts): ${en}\nCurrent translation: ${trans}`,\n  (lang, budget, est, en, trans, minChars) =>\n    `Shorten this ${lang} translation as much as possible to fit within ${budget}s (currently ~${est}s).\nPreserve every distinct concept, negation, contrast, and proper noun from the English. Cut only filler and stylistic flourishes.\nMinimum allowed length: ${minChars} characters.\n\nOriginal English (preserve all concepts): ${en}\nCurrent translation: ${trans}`,\n];\n\n\n// Strip Claude meta-commentary.\n// Meditation translations are always single-line, so cut at the FIRST newline —\n// anything after is meta-commentary like \"(Already at N characters; cannot shorten further)\"\n// which Claude (esp. Sonnet) sometimes appends on a single newline (not \\n\\n).\nfunction sanitizeClaudeOutput(rawText) {\n  if (!rawText) return '';\n  let t = rawText.trim();\n  const nlIdx = t.indexOf('\\n');\n  if (nlIdx >= 0) t = t.substring(0, nlIdx).trim();\n  t = t.replace(/^[\\*_]+|[\\*_]+$/g, '').trim();\n  t = t.replace(/^[\"'`]+|[\"'`]+$/g, '').trim();\n  // Strip trailing parenthesized meta even on same line (\"text (12 chars)\")\n  t = t.replace(/\\s*\\([^)]*(character|char|cannot|already|maximally|minimal)[^)]*\\)\\s*$/i, '').trim();\n  return t;\n}\n\nfunction estimateDuration(text, lang) {\n  return text.length / (LANG_CPS[lang] || 15);\n}\n\nasync function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }\nasync function callClaude(userContent) {\n  const MAX_TRIES = 4;\n  for (let attempt = 0; attempt < MAX_TRIES; attempt++) {\n    try {\n      const resp = await this.helpers.httpRequest({\n        method: 'POST',\n        url: ANTHROPIC_URL,\n        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },\n        body: { model: 'claude-sonnet-4-5', max_tokens: 500, system: SYSTEM_PROMPT, messages: [{ role: 'user', content: userContent }] },\n        json: true,\n      });\n      return sanitizeClaudeOutput(resp.content?.[0]?.text || '');\n    } catch (e) {\n      const isLast = attempt === MAX_TRIES - 1;\n      if (isLast) { console.error('Adapt callClaude failed after retries:', e.message); return ''; }\n      // Exponential backoff: 2s, 4s, 8s.\n      await sleep(2000 * Math.pow(2, attempt));\n    }\n  }\n  return '';\n}\n\nconst results = [];\nfor (const item of $input.all()) {\n  const { segment_id, en_text, en_duration_sec } = item.json;\n  const budget = parseFloat(en_duration_sec) || 0;\n  const out = { segment_id, en_text, en_duration_sec: budget };\n  let maxAttempts = 0;\n\n  for (const lang of LANGS) {\n    let text = item.json[`${lang}_text`] || '';\n    let attempts = 0;\n    if (text && budget) {\n      for (let a = 0; a < MAX_ATTEMPTS; a++) {\n        const est = estimateDuration(text, lang);\n        if (est <= budget * BUDGET_FACTOR) break;\n        const minChars = Math.floor(text.length * MIN_RETAIN);\n        const shortened = await callClaude.call(this, ATTEMPT_PROMPTS[a](lang, budget.toFixed(1), est.toFixed(1), en_text, text, minChars));\n        // Length floor: reject Claude output that went below 60% of input length\n        if (shortened && shortened.length >= minChars) {\n          text = shortened;\n        }\n        attempts = a + 1;\n      }\n    }\n    out[`${lang}_text`] = text;\n    out[`${lang}_adaptation_attempts`] = attempts;\n    if (attempts > maxAttempts) maxAttempts = attempts;\n  }\n  out.adaptation_attempts = maxAttempts;\n  results.push({ json: out });\n}\nreturn results;"
       },
-      "id": "b2c3d4e5-f6a7-8901-bcde-verifytransla1",
-      "name": "Verify Translations",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        900,
-        272
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "const LANG_CPS = { de: 12, es: 15, fr: 15, pl: 14, pt: 16, it: 14, tr: 14 };\nconst LANGS = ['de', 'es', 'fr', 'pl', 'pt', 'it', 'tr'];\nconst BUDGET_FACTOR = 1.05;\nconst MAX_ATTEMPTS = 3;\nconst MIN_RETAIN = 0.60;  // never accept shortening below 60% of input\nconst ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';\n\nconst configItems = $('Read Config').all();\nconst configMap = {};\nconfigItems.forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });\nconst apiKey = configMap['anthropic_api_key'] || '';\nif (!apiKey) throw new Error('anthropic_api_key missing from config sheet');\n\n// Per-language CPS — defaults tuned against real ElevenLabs output; overridable via\n// config keys cps_estimate_de, cps_estimate_es, …, cps_estimate_tr. Computed below.\nconst CPS_DEFAULTS = { de: 12, es: 15, fr: 15, pl: 14, pt: 16, it: 14, tr: 14 };\n\nconst SYSTEM_PROMPT = `You are a localization editor for meditation/wellness audio. Your job is to shorten a translated text so it fits within a strict time budget for audio dubbing.\n\nCRITICAL RULES — these override the shortening request:\n- Every distinct concept in the English source MUST remain in the translation\n- Preserve negations exactly: \"no\", \"not\", \"without\", \"never\"\n- Preserve contrasts: \"A, not B\" / \"A but B\" / \"A instead of B\" patterns\n- Preserve specific nouns, named techniques, numbers and proper names\n- NEVER replace a meaning-preserving translation with a literal-bureaucratic one when shortening. Avoid these false-friend traps: DE \"gültig\" for \"valid\" (means \"valid ticket\"); FR \"suffisant\" for \"enough\" about a person (means \"arrogant\"); FR \"valide\" for \"valid\" about a person (means \"able-bodied\"); TR \"geçerli/geçerliyim\" for \"valid\" (means \"valid as a rule\"); PL bare \"Jestem dość\" for \"I am enough\" (ungrammatical). These are THERAPEUTIC affirmations, not document validations.\n- Keep the language, tone, and informal address (du/tu/ty/sen) unchanged\n- Preserve '...' and '—' as pause timing cues\n- Do NOT translate or switch languages — edit only the given translation\n- Only remove genuinely redundant filler words (e.g., \"really\", \"very\", \"just\", \"actually\")\n- Return ONLY the shortened text. No explanation, no quotes, no preamble.\n- DO NOT include character counts, \"(N characters)\", or any meta-commentary.\n- DO NOT include reasoning words (\"Wait\", \"Let me\", \"Actually\", \"Note:\", \"Hmm\").\n- DO NOT use markdown formatting (**, __, backticks).\n- DO NOT include multiple drafts — pick ONE and output only it.\n- DO NOT include blank lines.`;\n\nconst ATTEMPT_PROMPTS = [\n  (lang, budget, est, en, trans, minChars) =>\n    `Shorten this ${lang} translation slightly (~5-15%) to fit within ${budget}s (currently ~${est}s).\nRemove only filler words and minor redundancies. Preserve sentence structure and all key concepts.\nMinimum allowed length: ${minChars} characters.\n\nOriginal English (preserve all concepts): ${en}\nCurrent translation: ${trans}`,\n  (lang, budget, est, en, trans, minChars) =>\n    `Shorten this ${lang} translation more (~15-25%) to fit within ${budget}s (currently ~${est}s).\nRephrase for compactness, but every concept from the English source must remain.\nMinimum allowed length: ${minChars} characters.\n\nOriginal English (preserve all concepts): ${en}\nCurrent translation: ${trans}`,\n  (lang, budget, est, en, trans, minChars) =>\n    `Shorten this ${lang} translation as much as possible to fit within ${budget}s (currently ~${est}s).\nPreserve every distinct concept, negation, contrast, and proper noun from the English. Cut only filler and stylistic flourishes.\nMinimum allowed length: ${minChars} characters.\n\nOriginal English (preserve all concepts): ${en}\nCurrent translation: ${trans}`,\n];\n\n\n// Strip Claude meta-commentary.\n// Meditation translations are always single-line, so cut at the FIRST newline —\n// anything after is meta-commentary like \"(Already at N characters; cannot shorten further)\"\n// which Claude (esp. Sonnet) sometimes appends on a single newline (not \\n\\n).\nfunction sanitizeClaudeOutput(rawText) {\n  if (!rawText) return '';\n  let t = rawText.trim();\n  const nlIdx = t.indexOf('\\n');\n  if (nlIdx >= 0) t = t.substring(0, nlIdx).trim();\n  t = t.replace(/^[\\*_]+|[\\*_]+$/g, '').trim();\n  t = t.replace(/^[\"'`]+|[\"'`]+$/g, '').trim();\n  // Strip trailing parenthesized meta even on same line (\"text (12 chars)\")\n  t = t.replace(/\\s*\\([^)]*(character|char|cannot|already|maximally|minimal)[^)]*\\)\\s*$/i, '').trim();\n  return t;\n}\n\nfunction estimateDuration(text, lang) {\n  return text.length / (LANG_CPS[lang] || 15);\n}\n\nasync function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }\nasync function callClaude(userContent) {\n  const MAX_TRIES = 4;\n  for (let attempt = 0; attempt < MAX_TRIES; attempt++) {\n    try {\n      const resp = await this.helpers.httpRequest({\n        method: 'POST',\n        url: ANTHROPIC_URL,\n        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },\n        body: { model: 'claude-sonnet-4-5', max_tokens: 500, system: SYSTEM_PROMPT, messages: [{ role: 'user', content: userContent }] },\n        json: true,\n      });\n      return sanitizeClaudeOutput(resp.content?.[0]?.text || '');\n    } catch (e) {\n      const isLast = attempt === MAX_TRIES - 1;\n      if (isLast) { console.error('Adapt callClaude failed after retries:', e.message); return ''; }\n      // Exponential backoff: 2s, 4s, 8s.\n      await sleep(2000 * Math.pow(2, attempt));\n    }\n  }\n  return '';\n}\n\nconst results = [];\nfor (const item of $input.all()) {\n  const { segment_id, en_text, en_duration_sec } = item.json;\n  const budget = parseFloat(en_duration_sec) || 0;\n  const out = { segment_id, en_text, en_duration_sec: budget };\n  let maxAttempts = 0;\n\n  for (const lang of LANGS) {\n    let text = item.json[`${lang}_text`] || '';\n    let attempts = 0;\n    if (text && budget) {\n      for (let a = 0; a < MAX_ATTEMPTS; a++) {\n        const est = estimateDuration(text, lang);\n        if (est <= budget * BUDGET_FACTOR) break;\n        const minChars = Math.floor(text.length * MIN_RETAIN);\n        const shortened = await callClaude.call(this, ATTEMPT_PROMPTS[a](lang, budget.toFixed(1), est.toFixed(1), en_text, text, minChars));\n        // Length floor: reject Claude output that went below 60% of input length\n        if (shortened && shortened.length >= minChars) {\n          text = shortened;\n        }\n        attempts = a + 1;\n      }\n    }\n    out[`${lang}_text`] = text;\n    out[`${lang}_adaptation_attempts`] = attempts;\n    if (attempts > maxAttempts) maxAttempts = attempts;\n  }\n  out.adaptation_attempts = maxAttempts;\n  results.push({ json: out });\n}\nreturn results;"
-      },
-      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "id": "8bfc96f3-7a22-46bd-9a1b-20cb67dbfc12",
       "name": "Adapt Translations",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -914,7 +901,7 @@
       "main": [
         [
           {
-            "node": "Verify Translations",
+            "node": "Adapt Translations",
             "type": "main",
             "index": 0
           }
@@ -931,27 +918,16 @@
           }
         ]
       ]
-    },
-    "Verify Translations": {
-      "main": [
-        [
-          {
-            "node": "Adapt Translations",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
     }
   },
   "active": false,
   "settings": {
     "executionOrder": "v1"
   },
-  "versionId": "d5525234-0b22-45c6-b0d1-961eae61aa7b",
+  "versionId": "c2c4bedd-725d-4d27-8743-10d1adb16634",
   "meta": {
     "instanceId": "c12dc3211079879af783deee1a944ea9622a2040afb6e429392b5bbe95dd7037"
   },
-  "id": "NdbDWVCWZmDfurSg",
+  "id": "9LqXZB7SRtYpnMEL",
   "tags": []
 }

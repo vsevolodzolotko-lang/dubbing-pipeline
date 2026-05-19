@@ -13,19 +13,19 @@
         "triggerOn": "specificFolder",
         "folderToWatch": {
           "__rl": true,
-          "value": "REPLACE_WITH_DRIVE_INPUT_FOLDER_ID",
+          "value": "1pucg6dxUB2h_gSyTc655uahPRWidkbA0",
           "mode": "id"
         },
         "event": "fileCreated",
         "options": {}
       },
-      "id": "01a2b3c4-d5e6-7890-1234-aaaaaaaaaaaa",
+      "id": "48854dab-921d-4e17-ae97-3ac2616e4e77",
       "name": "Drive Trigger (input/)",
       "type": "n8n-nodes-base.googleDriveTrigger",
       "typeVersion": 1,
       "position": [
-        -400,
-        0
+        1728,
+        432
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -36,24 +36,25 @@
     },
     {
       "parameters": {
-        "jsCode": "// Parse each Drive trigger payload → extract { file_id, lesson_id, filename, mime_type }.\n// Iterates over ALL input items so multi-file drops produce one output item per file.\n// lesson_id is derived from filename (e.g., 'sleep_002.mp3' → 'sleep_002').\nconst out = [];\nfor (const i of $input.all()) {\n  const item = i.json || {};\n  const filename = item.name || '';\n  const file_id = item.id;\n  const mime_type = item.mimeType || '';\n\n  if (!file_id || !filename) {\n    console.warn('Drive trigger payload missing id/name — skipping:', JSON.stringify(item));\n    continue;\n  }\n\n  // Strip extension and sanitize for use as a sheet/file key.\n  const baseName = filename.replace(/\\.[^./\\\\]+$/, '');\n  const lesson_id = baseName.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '');\n  if (!lesson_id) {\n    console.warn('Could not derive lesson_id from filename — skipping:', filename);\n    continue;\n  }\n\n  // Sanity: skip non-audio files (Drive trigger may fire on any file dropped in the folder).\n  const looksAudio = /^audio\\//.test(mime_type) || /\\.(mp3|wav|m4a|aac|flac|ogg|opus)$/i.test(filename);\n  if (!looksAudio) {\n    console.warn('Skipping non-audio file:', filename, mime_type);\n    continue;\n  }\n\n  out.push({ json: { file_id, lesson_id, filename, mime_type } });\n}\nreturn out;"
+        "jsCode": "// Parse each Drive trigger payload — extract { file_id, lesson_id, filename, mime_type }.\n// Iterates over ALL input items so multi-file drops produce one output item per file.\n// lesson_id is derived from filename (e.g., 'sleep_002.mp3' → 'sleep_002').\nconst out = [];\nfor (const i of $input.all()) {\n  const item = i.json || {};\n  const filename = item.name || '';\n  const file_id = item.id;\n  const mime_type = item.mimeType || '';\n\n  if (!file_id || !filename) {\n    console.warn('Drive trigger payload missing id/name — skipping:', JSON.stringify(item));\n    continue;\n  }\n\n  // Strip extension and sanitize for use as a sheet/file key.\n  const baseName = filename.replace(/\\.[^./\\\\]+$/, '');\n  const lesson_id = baseName.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '');\n  if (!lesson_id) {\n    console.warn('Could not derive lesson_id from filename — skipping:', filename);\n    continue;\n  }\n\n  // Sanity: skip non-audio files (Drive trigger may fire on any file dropped in the folder).\n  const looksAudio = /^audio\\//.test(mime_type) || /\\.(mp3|wav|m4a|aac|flac|ogg|opus)$/i.test(filename);\n  if (!looksAudio) {\n    console.warn('Skipping non-audio file:', filename, mime_type);\n    continue;\n  }\n\n  out.push({ json: { file_id, lesson_id, filename, mime_type } });\n}\nreturn out;"
       },
-      "id": "02a2b3c4-d5e6-7890-1234-bbbbbbbbbbbb",
+      "id": "15b4040b-b582-4cac-bd24-f78fdee8724a",
       "name": "Parse Filename",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -176,
-        0
+        1952,
+        432
       ]
     },
     {
       "parameters": {
-        "source": "database",
         "workflowId": {
           "__rl": true,
-          "value": "wb3JGXcIgU4iI1Hb",
-          "mode": "id"
+          "value": "WBsnWAyagEkenM6U",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/WBsnWAyagEkenM6U",
+          "cachedResultName": "W1 - STT_and_Segment"
         },
         "workflowInputs": {
           "mappingMode": "defineBelow",
@@ -71,26 +72,26 @@
           "waitForSubWorkflow": true
         }
       },
-      "id": "03a2b3c4-d5e6-7890-1234-cccccccccccc",
+      "id": "9ba636fd-93ad-424f-af0c-97ce55ebab55",
       "name": "Execute W1 (STT)",
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.2,
       "position": [
-        48,
-        0
+        2176,
+        432
       ],
       "retryOnFail": true,
       "maxTries": 2,
-      "waitBetweenTries": 5000,
-      "onError": "stopWorkflow"
+      "waitBetweenTries": 5000
     },
     {
       "parameters": {
-        "source": "database",
         "workflowId": {
           "__rl": true,
-          "value": "NdbDWVCWZmDfurSg",
-          "mode": "id"
+          "value": "9LqXZB7SRtYpnMEL",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/9LqXZB7SRtYpnMEL",
+          "cachedResultName": "W2 - Translate v2"
         },
         "workflowInputs": {
           "mappingMode": "defineBelow",
@@ -107,26 +108,26 @@
           "waitForSubWorkflow": true
         }
       },
-      "id": "04a2b3c4-d5e6-7890-1234-dddddddddddd",
+      "id": "8c56a669-126b-4b94-8ff5-56c204fba389",
       "name": "Execute W2 (Translate)",
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.2,
       "position": [
-        272,
-        0
+        2400,
+        432
       ],
       "retryOnFail": true,
       "maxTries": 2,
-      "waitBetweenTries": 5000,
-      "onError": "stopWorkflow"
+      "waitBetweenTries": 5000
     },
     {
       "parameters": {
-        "source": "database",
         "workflowId": {
           "__rl": true,
-          "value": "REPLACE_WITH_W3_WORKFLOW_ID",
-          "mode": "id"
+          "value": "MOZzjHF8ATMGkyjl",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/MOZzjHF8ATMGkyjl",
+          "cachedResultName": "W3 - Synthesize v2"
         },
         "workflowInputs": {
           "mappingMode": "defineBelow",
@@ -143,125 +144,53 @@
           "waitForSubWorkflow": true
         }
       },
-      "id": "05a2b3c4-d5e6-7890-1234-eeeeeeeeeeee",
+      "id": "ade1c420-c27e-406c-b3eb-c4ed657818ce",
       "name": "Execute W3 (Synthesize)",
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.2,
       "position": [
-        496,
-        0
-      ],
-      "onError": "stopWorkflow"
-    },
-    {
-      "parameters": {
-        "documentId": {
-          "__rl": true,
-          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
-          "mode": "id"
-        },
-        "sheetName": {
-          "__rl": true,
-          "value": "config",
-          "mode": "name"
-        },
-        "options": {}
-      },
-      "id": "06a2b3c4-d5e6-7890-1234-ffffffffffff",
-      "name": "Read Config",
-      "type": "n8n-nodes-base.googleSheets",
-      "typeVersion": 4,
-      "position": [
-        720,
-        0
-      ],
-      "credentials": {
-        "googleSheetsOAuth2Api": {
-          "id": "VPkRwpwr0BlVtmZ2",
-          "name": "Google Sheets account"
-        }
-      }
-    },
-    {
-      "parameters": {
-        "jsCode": "// Build one Slack message per Parse Filename item (one per source audio file).\n// Read Config (upstream) provides slack_channel, output folder, active_langs — same for all messages.\nconst configRows = $input.all().map(i => i.json);\nconst cfg = {};\nfor (const row of configRows) {\n  if (row && row.key) cfg[row.key] = row.value;\n}\n\nconst fullFolder = cfg.drive_output_full_folder_id || cfg.drive_output_folder_id;\nconst channel = cfg.slack_channel;\nif (!channel) throw new Error('slack_channel missing from config sheet (set to channel ID like C01234ABCDE or channel name like #dubbing)');\n\nconst folderUrl = fullFolder ? `https://drive.google.com/drive/folders/${fullFolder}` : null;\nconst activeLangs = (cfg.active_langs || 'de,es,fr,it,pl,pt,tr').split(',').map(s => s.trim()).filter(Boolean);\n\n// Iterate all Parse Filename items so multi-file drops produce one message per file.\n// Slack mrkdwn: *bold*, _italic_, <url|text> for links, :emoji_name:\nconst parsed = $('Parse Filename').all();\nreturn parsed.map(p => {\n  const lesson_id = p.json.lesson_id;\n  const filename = p.json.filename;\n  const folderLink = folderUrl ? `<${folderUrl}|Open in Drive>` : '_(output folder id not configured)_';\n  const text = [\n    ':white_check_mark: *Dubbing complete*',\n    '',\n    `*Lesson:* ${lesson_id}`,\n    `*Source file:* ${filename}`,\n    `*Languages:* ${activeLangs.length} (${activeLangs.join(', ')})`,\n    '',\n    `*Output:* ${folderLink}`,\n  ].join('\\n');\n  return { json: { channel, text } };\n});"
-      },
-      "id": "07a2b3c4-d5e6-7890-1234-aaaabbbbcccc",
-      "name": "Build Slack Message",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        944,
-        0
+        2624,
+        432
       ]
     },
     {
       "parameters": {
         "jsCode": "// Collapse downstream item stream back to one item per source lesson.\n// Execute Workflow with mode=each emits aggregated sub-workflow output, which\n// would multiply downstream item count and make the next Execute Workflow node\n// call the sub-workflow far more times than intended. Re-emit Parse Filename items\n// so the count is stable at N (= number of dropped files).\nreturn $('Parse Filename').all().map(i => ({ json: i.json }));"
       },
-      "id": "09a2b3c4-d5e6-7890-1234-pass1passpass",
+      "id": "de243484-5475-41e7-9e22-3510457b4d85",
       "name": "Pass Lessons (after W1)",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        160,
-        160
+        2288,
+        592
       ]
     },
     {
       "parameters": {
         "jsCode": "return $('Parse Filename').all().map(i => ({ json: i.json }));"
       },
-      "id": "0aa2b3c4-d5e6-7890-1234-pass2passpass",
+      "id": "9c1b0dca-d336-4493-830b-a8bdc0554243",
       "name": "Pass Lessons (after W2)",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        384,
-        160
+        2512,
+        592
       ]
     },
     {
       "parameters": {
         "jsCode": "return $('Parse Filename').all().map(i => ({ json: i.json }));"
       },
-      "id": "0ba2b3c4-d5e6-7890-1234-pass3passpass",
+      "id": "58ea0973-bad7-43c8-a86e-3ae79c09cfee",
       "name": "Pass Lessons (after W3)",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        608,
-        160
+        2736,
+        592
       ]
-    },
-    {
-      "parameters": {
-        "resource": "message",
-        "select": "channel",
-        "channelId": {
-          "__rl": true,
-          "value": "={{ $json.channel }}",
-          "mode": "id"
-        },
-        "text": "={{ $json.text }}",
-        "otherOptions": {
-          "mrkdwn": true
-        }
-      },
-      "id": "08a2b3c4-d5e6-7890-1234-ddddeeeeffff",
-      "name": "Slack Notify",
-      "type": "n8n-nodes-base.slack",
-      "typeVersion": 2.2,
-      "position": [
-        1168,
-        0
-      ],
-      "credentials": {
-        "slackApi": {
-          "id": "REPLACE_WITH_SLACK_CREDENTIAL_ID",
-          "name": "Slack account"
-        }
-      }
     }
   ],
   "pinData": {},
@@ -345,35 +274,7 @@
     },
     "Pass Lessons (after W3)": {
       "main": [
-        [
-          {
-            "node": "Read Config",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Read Config": {
-      "main": [
-        [
-          {
-            "node": "Build Slack Message",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Build Slack Message": {
-      "main": [
-        [
-          {
-            "node": "Slack Notify",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        []
       ]
     }
   },
@@ -381,11 +282,11 @@
   "settings": {
     "executionOrder": "v1"
   },
-  "versionId": "11111111-2222-3333-4444-555555555555",
+  "versionId": "d0097226-4fc5-4c64-90a8-eab4d8e94ece",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "c12dc3211079879af783deee1a944ea9622a2040afb6e429392b5bbe95dd7037"
   },
-  "id": "MasterDubbingOrch01",
+  "id": "Y3GWKEi15Lh9njXx",
   "tags": []
 }

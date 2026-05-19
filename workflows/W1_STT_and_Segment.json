@@ -3,37 +3,37 @@
   "nodes": [
     {
       "parameters": {},
-      "id": "8e83975b-a2bc-4131-b5ad-37bae01c0143",
+      "id": "164d086c-1851-4026-bb43-4ccc32b5f8d8",
       "name": "Manual Trigger",
       "type": "n8n-nodes-base.manualTrigger",
       "typeVersion": 1,
       "position": [
-        -208,
-        -80
+        0,
+        0
       ]
     },
     {
       "parameters": {},
-      "id": "f1d72a4e-7c10-4d2b-9b8e-d3f4a5b6c7d8",
+      "id": "7c3cf856-856e-48d3-8036-ab527b50881a",
       "name": "Execute Workflow Trigger",
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1,
       "position": [
-        -208,
-        80
+        0,
+        160
       ]
     },
     {
       "parameters": {
         "jsCode": "// Accept params from either Execute Workflow Trigger (parent passes {file_id, lesson_id})\n// or Manual Trigger (fall back to hardcoded test defaults).\nconst incoming = $input.first()?.json || {};\nconst file_id = incoming.file_id || '1gDRuwWEtfeHcQwEjEMbg4cQOHZQC_nYR';\nconst lesson_id = incoming.lesson_id || 'sleep_001';\nif (!file_id) throw new Error('Missing file_id');\nif (!lesson_id) throw new Error('Missing lesson_id');\nreturn [{ json: { file_id, lesson_id } }];"
       },
-      "id": "2a3b4c5d-6e7f-8901-2345-6789abcdef01",
+      "id": "6f6bbf51-b7cf-4bdc-b47e-7393d646dd9a",
       "name": "Get Params",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        0,
-        0
+        208,
+        80
       ]
     },
     {
@@ -46,13 +46,13 @@
         },
         "options": {}
       },
-      "id": "5ea01ac4-7c03-4e99-9b7f-0de20e584330",
+      "id": "20f784ce-17f6-4a30-a9a3-01f84daca11e",
       "name": "Download Audio",
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
       "position": [
-        208,
-        0
+        416,
+        80
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -72,17 +72,17 @@
         "inputDataFieldName": "data",
         "options": {}
       },
-      "id": "0d6983b5-91ea-4c19-a859-40c7d4116101",
+      "id": "139ecde9-c26e-491c-acf7-dcd913078947",
       "name": "Deepgram STT",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        400,
-        0
+        608,
+        80
       ],
       "credentials": {
         "httpHeaderAuth": {
-          "id": "REPLACE_WITH_DEEPGRAM_CREDENTIAL_ID",
+          "id": "pkPNMab5kHBstRKT",
           "name": "Deepgram account"
         }
       }
@@ -91,13 +91,13 @@
       "parameters": {
         "jsCode": "const data = $input.first().json;\nconst lesson_id = $('Get Params').first().json.lesson_id;\nconst MAX_CHARS            = 150;\nconst MAX_GAP_FOR_GROUPING = 1.0;\n\nconst alt           = data.results?.channels?.[0]?.alternatives?.[0];\nconst paragraphs    = alt?.paragraphs?.paragraphs || [];\nconst audioDuration = parseFloat(data.metadata?.duration) || null;\nconst segments      = [];\nlet current         = null;\n\nfunction flush() { if (current) { segments.push(current); current = null; } }\n\nfor (const para of paragraphs) {\n  flush();\n  for (const s of (para.sentences || [])) {\n    if (current === null) {\n      current = { text: s.text, start: s.start, end: s.end };\n      continue;\n    }\n    const combined = current.text + ' ' + s.text;\n    const gap      = s.start - current.end;\n    if (combined.length <= MAX_CHARS && gap <= MAX_GAP_FOR_GROUPING) {\n      current.text = combined;\n      current.end  = s.end;\n    } else {\n      flush();\n      current = { text: s.text, start: s.start, end: s.end };\n    }\n  }\n}\nflush();\n\n// Fallback if paragraphs missing\nif (!segments.length) {\n  const utts = data.results?.utterances || [];\n  if (!utts.length) throw new Error('No sentences/utterances returned from Deepgram');\n  for (const u of utts) segments.push({ text: u.transcript, start: u.start, end: u.end });\n}\n\n// Extend last segment to full audio duration so concatenated slot sum = EN total.\n// Deepgram's last word.end stops at the last spoken word; audio may have trailing silence.\nif (audioDuration && segments.length > 0) {\n  const last = segments[segments.length - 1];\n  if (audioDuration > last.end) {\n    last.end = audioDuration;\n  }\n}\n\nreturn segments.map((seg, i) => ({\n  json: {\n    segment_id: lesson_id + '_seg_' + String(i + 1).padStart(3, '0'),\n    lesson_id,\n    en_text: seg.text,\n    en_start_sec: parseFloat(seg.start.toFixed(3)),\n    en_end_sec: parseFloat(seg.end.toFixed(3)),\n    en_duration_sec: parseFloat((seg.end - seg.start).toFixed(3)),\n    de_text: '',\n    es_text: '',\n    fr_text: '',\n    pl_text: '',\n    pt_text: '',\n    it_text: '',\n    tr_text: '',\n    status: 'pending',\n    notes: '',\n  }\n}));"
       },
-      "id": "6b5c97ce-a22f-4319-8039-863b8146373b",
+      "id": "0e8dda14-3cb2-4433-b231-b615025354b8",
       "name": "Segment Transcript",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        608,
-        0
+        816,
+        80
       ]
     },
     {
@@ -308,13 +308,13 @@
         },
         "options": {}
       },
-      "id": "a3e280c7-9ef7-457b-a16c-c52849d2c1d1",
+      "id": "2d912d70-2358-493b-a0e3-ae133a166265",
       "name": "Write to Sheet",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        800,
-        0
+        1008,
+        80
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -397,11 +397,10 @@
   "settings": {
     "executionOrder": "v1"
   },
-  "versionId": "7c00b4fb-b803-4662-a6d1-7f08503548e6",
+  "versionId": "13c1c245-f43f-488d-adb2-561ef563c2a2",
   "meta": {
-    "templateCredsSetupCompleted": true,
     "instanceId": "c12dc3211079879af783deee1a944ea9622a2040afb6e429392b5bbe95dd7037"
   },
-  "id": "wb3JGXcIgU4iI1Hb",
+  "id": "WBsnWAyagEkenM6U",
   "tags": []
 }
