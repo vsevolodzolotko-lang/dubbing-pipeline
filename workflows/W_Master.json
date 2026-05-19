@@ -151,9 +151,6 @@
         496,
         0
       ],
-      "retryOnFail": true,
-      "maxTries": 2,
-      "waitBetweenTries": 5000,
       "onError": "stopWorkflow"
     },
     {

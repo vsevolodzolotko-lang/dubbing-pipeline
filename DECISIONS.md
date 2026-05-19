@@ -1051,3 +1051,54 @@ Lessons learned:
 1. **OOM kill = DB corruption** на SQLite. Memory monitoring + Postgres важливі для production.
 2. **n8n holds binary in JS heap by default** — це нетривіально, varto документувати у setup checklists.
 3. **Pre-grouping items by some key** доцільно тільки якщо потім всі групи треба тримати одночасно. Для sequential обробки — lazy filter дешевший.
+
+---
+
+### 2026-05-19 — W3_NO_FULL_RETRY_ON_PARTIAL_FAILURE
+
+Context: на the_anchor.mp3 W3 пройшов до `seg_013_it`, fail-нув на `seg_013_tr` (ймовірно ElevenLabs 429 чи timeout після всіх 4 retry-спроб у `tts()` функції), і W_Master запустив **retry усієї W3 з нуля** через `retryOnFail=true, maxTries=2` на Execute W3. Друга атака почала перестворювати TTS-файли від `seg_001_de` заново — це означає:
+
+- 5+ хвилин уже зробленої роботи **викидаються** і повторюються
+- Кожна re-TTS — це нові Drive uploads (дублікати в `output/`)
+- Localizations rows перезаписуються (upsert по `row_key`), але старі Drive-файли стають orphans
+- ElevenLabs cost множиться ×2 (а на retry-storm-сценарії — ×N)
+- Якщо причина fail була стійка (e.g., Anthropic Tier 1 quota exhausted), retry знову fail на тому ж місці → інфініт re-try до maxTries.
+
+Decision: **дві захисні зміни** щоб partial failure не призводив до full-workflow retry.
+
+**1. W_Master: disable retry на Execute W3**
+
+`workflows/W_Master.json` — на ноді Execute W3 (Synthesize) видалено `retryOnFail`, `maxTries`, `waitBetweenTries`. Залишено лише `onError: stopWorkflow` — W_Master зупиняється на failure без повторення.
+
+W1 і W2 retry **залишений** (`retryOnFail=true, maxTries=2`) — ці workflows короткі (секунди до хвилини), idempotent, retry дешевий. Тільки W3 — довгий (~25 хв на 4.5-хв лекцію) і non-idempotent у частині Drive uploads, тому retry на ньому особливо дорогий.
+
+**2. W3 Check Timing + Pad: tts() soft-fail замість throw**
+
+`workflows/W3_Synthesize_v2.json` — `tts()` тепер повертає `null` після всіх 4 спроб (раніше throw). Усі 3 call-sites (shorten retry, speed retry, expand loop) додали null-guards:
+
+- Shorten retry: при `tts→null` → залишити попередній text/pcm, mark `needsAttention=true`, break loop.
+- Speed retry: те ж саме — keep previous, mark, break.
+- Expand loop: при null break (no expansion improvement).
+
+Також додано **silent-WAV fallback** на початку основної логіки: якщо initial ElevenLabs TTS HTTP-нода не повернула binary (ми поставили `onError: continueRegularOutput, retryOnFail=true, maxTries=4` на самій нодi), Check Timing + Pad емітить **тихий WAV довжиною `en_duration_sec`** з `needs_attention=true` і `warning='ElevenLabs TTS failed after retries — silent placeholder WAV'`. Downstream nodes (Save to Drive, Update Localizations, Build Full Audio Per Lang, Save Full to Drive) продовжують працювати.
+
+Rationale:
+- **Failure radius — один сегмент-lang**, а не вся W3. 216 з 217 готових сегментів зберігаються; failed segment маркується для ручного review.
+- **No silent re-explosion of cost** — Drive не отримує дублікатів, localizations sheet не перезаписується.
+- **W_Master Slack notification все одно спрацьовує** з фінальним статусом — користувач бачить що pipeline закінчився.
+- **Observability**: `needs_attention=TRUE` і `warning` field у localizations — фільтрувати у sheet щоб бачити failed segments.
+
+Tradeoffs:
+- **Без full-W3 retry**: якщо transient API issue (network blip) — failed segment лишається failed. Альтернатива — додати **per-segment retry** всередині W3 (наступний Phase, не зараз).
+- **Silent placeholder WAV** замість real audio — у final full WAV буде секунда-чи-більше тиші замість missing slot. Краще ніж crash, але треба усвідомлювати при QA.
+
+Files changed:
+- `workflows/W_Master.json` — Execute W3 retryOnFail block removed.
+- `workflows/W3_Synthesize_v2.json` — tts() returns null, 3 null-guards у call-sites, silent-WAV fallback на початку, ElevenLabs TTS HTTP-нода тепер з `onError: continueRegularOutput, retryOnFail=true, maxTries=4, waitBetweenTries=5000`.
+
+Conflict with prior decisions: відкочує частину `W_MASTER_DRIVE_TRIGGER_ORCHESTRATOR` (retry semantics на Execute W3). W1/W2 retry залишається в силі.
+
+Future work (Phase 2 для resumable W3):
+- **Skip-existing у Expand TTS Jobs**: перед генерацією JOBs читати existing `localizations` і пропускати ті, що уже мають `audio_drive_file_id`. Тоді failed-then-rerun не дублює готову роботу — починає з failed-сегмента. Більший redesign.
+- **Per-segment retry-with-backoff** всередині W3 loop: на failure окремого сегмента — try few times, but not whole workflow.
+- **Postgres** замість SQLite (operational).
