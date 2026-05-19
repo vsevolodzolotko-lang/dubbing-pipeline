@@ -62,7 +62,8 @@ The Drive trigger watches *file-created* events only — moving an existing file
 | Prepare and Expand (Code) | Builds **batched** Claude translate requests (default 8 segments per batch). System prompt cached via `cache_control: ephemeral`; user content is a JSON map `{segment_id: {text, type?, key_concepts?}}`. Filters by `lesson_id` prefix. |
 | Wait + Claude Translate | Rate-limit-safe per-batch translation. Retries up to 4× with 5s backoff on HTTP errors. |
 | Extract Translations (Code) | Parses batched JSON response (`{segment_id: {de, es, fr, pl, pt, it, tr}}`), emits one item per segment. Defensive skip on empty/missing segment in batch. |
-| Adapt Translations (Code) | CPS-based estimation + up to 3-tier Claude shorten loop per (segment × lang) when text won't fit |
+| Verify Translations (Code) | QA pass on Sonnet's initial output. Batches segments (8 at a time), sends to Claude with anti-pattern rules (DE `gültig`, FR `suffisant`, TR `geçerli`, PL bare `Jestem dość`, etc). Applies corrections; pass-through for clean translations. Retries 4× with backoff on failure. Cost ~$0.04 per lesson. |
+| Adapt Translations (Code) | CPS-based estimation + up to 3-tier Claude shorten loop per (segment × lang) when text won't fit. Anti-pattern rules in SYSTEM_PROMPT prevent shortening from regressing good translations back to literal-bureaucratic equivalents. |
 | Update Sheet | Append/update `{lang}_text` + `{lang}_adaptation_attempts` columns |
 
 ## W3_Synthesize_v2.json — TTS + timing + per-segment + per-lang concat

@@ -1156,3 +1156,49 @@ Files changed:
 Future work (якщо drift буде помітним):
 - **Two-pass cross-lang aware borrow**: всі langs у segment отримують однаковий extension = max needed across langs. Зберігає sync, потребує rework loop architecture (collect → align → resize). Більше складно.
 - **Per-language threshold** (наприклад `short_seg_threshold_de=2.5`, інші `2.0`). Тривіально додати, але треба data щоб обґрунтувати.
+
+---
+
+### 2026-05-19 — TRANSLATION_QA_AND_ANTIPATTERN_RULES
+
+Context: Зовнішня review (Gemini) знайшла **семантичні помилки** у Sonnet-перекладах на коротких медитативних афірмаціях:
+- `seg_018 "I am valid."`: DE `Ich bin gültig.` (= "дійсний квиток"), FR `Je suis valide.` (= "працездатний"), TR `Ben geçerliyim.` (= "як чинне правило")
+- `seg_019 "I am enough."`: FR `Je suis suffisant.` (= **"зарозумілий зазнайка"**), PL `Jestem dość.` (граматично невалідне)
+- `seg_014`: TR `limmanımım` (typo з подвійним `mm`)
+
+Корінь: Sonnet 4.5 на 3-словних афірмаціях втрачає терапевтичний контекст і обирає **найперше словникове значення** (бюрократичне/legalese). На довших сегментах якість залишається високою.
+
+Decision: Три targeted-зміни у `workflows/W2_Translate_v2.json` без архітектурного refactor і без model-switch:
+
+**1. Prepare and Expand sysParts** — додано `=== MEANING PRESERVATION ===` блок з конкретними FORBIDDEN translations і RIGHT alternatives для DE/FR/TR/PL/PT/ES/IT. Кейс kicks-in для будь-якого "I am ___" — Sonnet тепер знає що НЕ можна "gültig", "suffisant", "valide" (про людину), "geçerli", і знає WARMER альтернативи.
+
+**2. NEW `Verify Translations` Code-нода** між `Extract Translations` і `Adapt Translations`. Якісний "linter" пост-перекладу:
+- Батчить по 8 сегментів × 7 langs у один Claude-call (Sonnet 4.5, prompt-caching на SYSTEM)
+- Sends JSON `{segment_id: {en, de, ..., tr}}` і просить **повернути JSON корекцій** (або unchanged-translations якщо чисто)
+- Apply corrections per-lang якщо QA повернув non-empty, інакше pass-through
+- Retry 4× з exponential backoff на API failure; defensive parse через try/catch
+- Cost: ~4 Claude calls per 31-segment lesson ≈ **$0.04**. Latency ~30 секунд
+
+**3. Adapt Translations SYSTEM_PROMPT** — додано anti-pattern guard у CRITICAL RULES блок щоб Adapt-shorten НЕ регресував добрі переклади ("Ich bin richtig" → "Ich bin gültig" заради char-budget). Same list of false-friend traps.
+
+Rationale:
+- **Three-layer defense**: prevention (sysParts), QA (Verify), preservation (Adapt). Catches the literal-translation pattern at three different points у потоці.
+- **Why before Adapt, not after**: якщо QA fix відбувається ДО shorten — Adapt працює з корректним текстом і скорочує його коректно. Якщо AFTER — Adapt могла регресувати, QA фіксить, але потенційно треба rerun shorten. One-pass cleaner.
+- **No model switch**: Sonnet 4.5 уже capable on long-context translation. Issue = prompt guidance, не модель. DeepSeek-V3 (suggested by Gemini) — не warranted: ризик і додатковий cost без guarantees.
+- **Cost trivial**: ~$0.04 на лекцію (~1% від $4-5 повної pipeline cost). Латентність +30с прийнятна.
+
+Tradeoffs:
+- **Verify Translations може over-correct** на чистих перекладах (perfectly fine "Ich bin wertvoll" → "Ich bin würdig" arbitrary tweaks). Mitigation: prompt explicitly каже "For clean translations, RETURN THEM UNCHANGED". Якщо побачимо drift — додати length-floor exception.
+- **Prompt-rules можуть стати stale** як знайдемо нові патерни. Це prompt-text у jsCode — легко доповнити при потребі.
+- **Cross-lesson contention**: anti-pattern rules фокусуються на афірмаціях. Якщо колись будемо дублювати не-афірмаційні скрипти — треба буде розширити список або зробити conditional.
+
+Files changed:
+- `workflows/W2_Translate_v2.json` — три targeted edits (Prepare and Expand sysParts, NEW Verify Translations node + connections rewire, Adapt Translations SYSTEM_PROMPT).
+- `workflows/README.md` — додано рядок Verify Translations у W2 node table.
+
+Conflict with prior decisions: жодних. Доповнює існуючу архітектуру без рефакторингу решти ланцюга.
+
+Lessons learned:
+1. **Sonnet first-pass на коротких phrases** не завжди семантично коректна — context-poor. Anti-examples в prompt значно ефективніші ніж "будь обережним".
+2. **External LLM review** (Gemini) — гарний sanity check на якість перекладів. Дешевий feedback loop: експортуй segments.csv → попроси review → інтегруй знайдені patterns у prompt.
+3. **Three-layer defense** (prevention/QA/preservation) — pattern варто використовувати і для майбутніх translation quality issues.
