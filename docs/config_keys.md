@@ -29,6 +29,7 @@ Every row has two columns: `key`, `value`. Missing keys fall back to the default
 | `silence_lead_ratio` | `0.2` | W3 Check Timing + Pad (Synthesize v3) | Fraction of padding silence placed BEFORE TTS audio (lead), with `1 − ratio` placed AFTER (tail). Only applied when natural EN lead gap = 0; otherwise full natural gap goes to lead and all padding goes to tail. The final lead is `min(padding × ratio, silence_lead_max_sec)`. |
 | `silence_lead_max_sec` | `0.05` | W3 Check Timing + Pad | Hard cap (seconds) on the breath-lead silence placed before TTS when natural EN gap = 0. Prevents word misalignment for short-content-long-tail segments (e.g. "I am here." with 5s of EN silence after). Default 0.05 ≈ half a syllable of breath; set to 0 for strict EN alignment, higher for more breath. |
 | `max_speed` | `1.15` | W3 Check Timing + Pad | Hard ceiling on TTS speed adjustment. Speed retries go 1.10 → 1.15 (capped here). Higher values sound artificial for meditation content. |
+| `short_seg_threshold_sec` | `2.0` | W3 Check Timing + Pad | Below this `en_duration_sec`, the segment is treated as "short" and may borrow into the trailing silence (`gap_after_sec - min_inter_segment_gap_sec`, capped at `max_borrow_per_segment_sec`) instead of being hard-truncated. Set to `0` to fully disable borrow (revert to strict alignment everywhere). |
 
 ## API keys & external services
 

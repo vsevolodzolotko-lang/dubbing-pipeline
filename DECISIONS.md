@@ -1102,3 +1102,57 @@ Future work (Phase 2 для resumable W3):
 - **Skip-existing у Expand TTS Jobs**: перед генерацією JOBs читати existing `localizations` і пропускати ті, що уже мають `audio_drive_file_id`. Тоді failed-then-rerun не дублює готову роботу — починає з failed-сегмента. Більший redesign.
 - **Per-segment retry-with-backoff** всередині W3 loop: на failure окремого сегмента — try few times, but not whole workflow.
 - **Postgres** замість SQLite (operational).
+
+---
+
+### 2026-05-19 — CONDITIONAL_BREATH_BORROW_FOR_SHORT_SEGMENTS
+
+Context: На прогоні the_anchor.mp3 (4.5хв, 31 сегментів) 12 з 217 рядків у localizations отримали `needs_attention=TRUE`. Усі 12 — це ультра-короткі афірмації:
+
+- seg_018 "I am valid." (0.96с): truncated у de, fr, pl, it, tr
+- seg_019 "I am enough." (1.28с): truncated у de, tr
+- seg_025 "I am grounded." (1.12с): truncated у de, es, pl, pt
+- seg_001 "Find a position..." (6.64с): truncated у de (cps_estimate_de tuning issue, окрема задача)
+
+Усі affected сегменти прошли 3 Claude-shorten attempts + speed bump 1.10/1.15 без успіху → hard-truncate до en_duration. На слух — обрізаний останній склад слова. У всіх цих case-ах **наступний сегмент далеко** (gap_after = 5-7с тиші), тобто було куди розширюватись.
+
+Decision: enable **conditional breath-borrow** — дозволити TTS-аудіо вийти за межі `en_duration_sec` ТІЛЬКИ для коротких сегментів (`en_duration_sec < short_seg_threshold_sec`, default 2.0с) і ТІЛЬКИ якщо `effective_slot_sec > en_duration_sec` (тобто є trailing silence). Normal-length segments (≥ 2.0с) залишаються strict-aligned.
+
+**Реалізація** (workflows/W3_Synthesize_v2.json, `Check Timing + Pad` Code-нодa):
+
+1. Замість `const maxAllowed = enDur;` тепер:
+   ```js
+   const SHORT_SEG_THRESHOLD = parseFloat(configMap.short_seg_threshold_sec) || 2.0;
+   const isShortSeg          = enDur > 0 && enDur < SHORT_SEG_THRESHOLD && slot > enDur;
+   const maxAllowed          = isShortSeg ? slot : enDur;
+   ```
+   Де `slot = effective_slot_sec` уже обчислюється в Expand TTS Jobs як `tts_budget + max_borrowable` з config-ключами `min_inter_segment_gap_sec` і `max_borrow_per_segment_sec`.
+
+2. Post-TTS file-build:
+   - `realDur <= enDur` → стандартний padding (lead + tts + tail = en_duration).
+   - `enDur < realDur <= maxAllowed` → **нова borrow branch**: `borrowedSec = realDur - enDur`, `leadSec = naturalLead`, `tailSec = 0`. **Не** флагається `needs_attention` — це intentional.
+   - `realDur > maxAllowed` → defensive: truncate (вже відбувся раніше) + flag attention.
+
+3. Config-key `short_seg_threshold_sec` (default 2.0). Set to 0 для повного revert до strict alignment.
+
+Rationale:
+- **Усуває truncation для short-affirmation case** — найпоширеніший failure mode у meditation content. Affected рядків у the_anchor: ~11 з 12 мають отримати borrow (seg_001_de — окрема CPS-калібрування проблема).
+- **Зберігає strict alignment для normal segments** (≥ 2.0с) де cross-lang sync критичний для довгих наративних блоків.
+- **Не потребує rework** — використовує існуюче `effective_slot_sec` обчислення в Expand TTS Jobs (механіка вже там, просто була disabled).
+- **Bounded extension** через `max_borrow_per_segment_sec=2.0` і доступний `gap_after_sec`.
+
+Tradeoffs:
+- **Cross-lang drift у borrowed-сегментах**: DE з real_dur=1.4с і ES з real_dur=0.93с у тому ж slot-і дають різні file durations → subsequent сегменти у full WAV для різних мов offset на суму borrows. Drift кумулятивний у фінальному WAV. Для **single-lang listening** (типовий use case meditation) не помітно. Для **cross-lang A/B QA** — drift треба тримати в межах bounded.
+- **Threshold вибір**: 2.0с — компроміс. Affected: всі seg_018/019/025-патерни ("I am ___"). Не affected: seg_005 (6.5с), seg_017 (4.5с) etc. Якщо потрібно тонше — config-key регулюється без code change.
+- **Без per-lang threshold**: DE/PL мають довші мінімальні слова, можливо потребуватимуть вищого порогу. Поки global 2.0с — якщо побачимо residual truncation в DE/PL — можна знизити cps_estimate_* (root cause fix) або підняти SHORT_SEG_THRESHOLD до 2.5/3.0.
+
+Conflict with prior decisions: **частково пом'якшує** STRICT_ALIGNMENT_DISABLE_BREATH_BORROW (2026-05-17). Strict alignment залишається для нормальних сегментів. Тільки short-segment fallback дозволяє borrow. Існуючі `effective_slot_sec`, `maxBorrowable`, `borrowed_sec` поля у localizations sheet тепер фактично використовуються (раніше були dead-через-strict).
+
+Files changed:
+- `workflows/W3_Synthesize_v2.json` — `Check Timing + Pad` jsCode (3 точкові правки: видалення старого maxAllowed, додавання SHORT_SEG_THRESHOLD блоку, нова borrow branch у post-TTS).
+- `docs/config_keys.md` — додано `short_seg_threshold_sec`.
+- `docs/sheets_schema.md` — оновлено опис `borrowed_sec` (більше не "always 0").
+
+Future work (якщо drift буде помітним):
+- **Two-pass cross-lang aware borrow**: всі langs у segment отримують однаковий extension = max needed across langs. Зберігає sync, потребує rework loop architecture (collect → align → resize). Більше складно.
+- **Per-language threshold** (наприклад `short_seg_threshold_de=2.5`, інші `2.0`). Тривіально додати, але треба data щоб обґрунтувати.
