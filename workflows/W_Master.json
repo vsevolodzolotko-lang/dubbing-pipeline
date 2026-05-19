@@ -191,6 +191,76 @@
         2736,
         592
       ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "config",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-e5f6-7890-1234-readconfig001",
+      "name": "Read Config",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        2960,
+        432
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build one Slack message per Parse Filename item (one per source audio file).\n// Read Config (upstream) provides slack_channel, output folder, active_langs — same for all messages.\nconst configRows = $input.all().map(i => i.json);\nconst cfg = {};\nfor (const row of configRows) {\n  if (row && row.key) cfg[row.key] = row.value;\n}\n\nconst fullFolder = cfg.drive_output_full_folder_id || cfg.drive_output_folder_id;\nconst channel = cfg.slack_channel;\nif (!channel) throw new Error('slack_channel missing from config sheet (set to channel ID like C01234ABCDE)');\n\nconst folderUrl = fullFolder ? `https://drive.google.com/drive/folders/${fullFolder}` : null;\nconst activeLangs = (cfg.active_langs || 'de,es,fr,it,pl,pt,tr').split(',').map(s => s.trim()).filter(Boolean);\n\n// Iterate all Parse Filename items so multi-file drops produce one message per file.\n// Slack mrkdwn: *bold*, _italic_, <url|text> for links, :emoji_name:\nconst parsed = $('Parse Filename').all();\nreturn parsed.map(p => {\n  const lesson_id = p.json.lesson_id;\n  const filename = p.json.filename;\n  const folderLink = folderUrl ? `<${folderUrl}|Open in Drive>` : '_(output folder id not configured)_';\n  const text = [\n    ':white_check_mark: *Dubbing complete*',\n    '',\n    `*Lesson:* ${lesson_id}`,\n    `*Source file:* ${filename}`,\n    `*Languages:* ${activeLangs.length} (${activeLangs.join(', ')})`,\n    '',\n    `*Output:* ${folderLink}`,\n  ].join('\\n');\n  return { json: { channel, text } };\n});"
+      },
+      "id": "b2c3d4e5-f6a7-8901-2345-buildslack001",
+      "name": "Build Slack Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3184,
+        432
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $json.channel }}",
+          "mode": "id"
+        },
+        "text": "={{ $json.text }}",
+        "otherOptions": {
+          "mrkdwn": true
+        }
+      },
+      "id": "c3d4e5f6-a7b8-9012-3456-slacknotify01",
+      "name": "Slack Notify",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        3408,
+        432
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "REPLACE_WITH_SLACK_CREDENTIAL_ID",
+          "name": "Slack account"
+        }
+      }
     }
   ],
   "pinData": {},
@@ -274,7 +344,35 @@
     },
     "Pass Lessons (after W3)": {
       "main": [
-        []
+        [
+          {
+            "node": "Read Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Config": {
+      "main": [
+        [
+          {
+            "node": "Build Slack Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Slack Message": {
+      "main": [
+        [
+          {
+            "node": "Slack Notify",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     }
   },

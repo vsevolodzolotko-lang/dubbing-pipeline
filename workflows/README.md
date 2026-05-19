@@ -14,17 +14,20 @@ Four workflows: **W_Master** (Drive folder trigger, optional) chains **W1 → W2
 | Execute W1 (STT) | Calls W1 with `{file_id, lesson_id}`. Retry: 1 attempt on fail, then stop |
 | Execute W2 (Translate) | Calls W2 with `{lesson_id}`. Retry: 1 attempt on fail, then stop |
 | Execute W3 (Synthesize) | Calls W3 with `{lesson_id}`. Retry: 1 attempt on fail, then stop |
-| (Slack notification stage not yet wired — pending workspace app approval) | Build Slack Message + Slack Notify nodes will append here once OAuth scopes are granted. |
+| Read Config | Pulls `drive_output_full_folder_id`, `slack_channel`, `active_langs` for the Slack message |
+| Build Slack Message (Code) | Composes one Slack message per Parse Filename item using mrkdwn (`*bold*`, `:emoji:`, `<url|text>` for the Drive folder link). Reads `slack_channel` from config; throws if missing. |
+| Slack Notify | Posts the message via Slack API (Bot User OAuth Token). |
 
 **Setup checklist** (after importing):
-1. Drive Trigger → set `folderToWatch` to your `input/` folder ID.
+1. Drive Trigger → confirm `folderToWatch` is your `input/` folder ID.
 2. Execute W1 / W2 / W3 → re-bind to the workflow IDs assigned by your n8n instance after import.
-3. (Optional, pending Slack workspace approval) Once the Slack app is installed, add Build Slack Message Code node + Slack Notify node after Pass Lessons (after W3). Bind a Slack credential (`xoxb-...` Bot User OAuth Token) and add `slack_channel` to the `config` sheet.
-4. Set `active = true` on the workflow only after manual smoke-test (otherwise polling starts immediately).
+3. Slack Notify → bind your Slack credential (Bot User OAuth Token `xoxb-...`). The credential ID in the JSON is a placeholder.
+4. `config` sheet → add `slack_channel` = your channel ID (e.g. `C01234ABCDE`). The bot must be a member of that channel unless its scopes include `chat:write.public`.
+5. Set `active = true` on the workflow only after manual smoke-test (otherwise polling starts immediately).
 
 The Drive trigger watches *file-created* events only — moving an existing file into the folder also counts. Modifying an already-processed file does not retrigger.
 
-**Retry semantics**: Execute W1 and Execute W2 retry once with 5s backoff. Execute W3 is NOT retried (it's long + has Drive side effects — retrying duplicates work). On any sub-workflow failure W_Master stops; open the n8n execution log to see which sub-workflow failed.
+**Retry semantics**: Execute W1 and Execute W2 retry once with 5s backoff. Execute W3 is NOT retried (it's long + has Drive side effects — retrying duplicates work). On any sub-workflow failure W_Master stops without sending Slack; open the n8n execution log to see which sub-workflow failed.
 
 ## W1_STT_and_Segment.json — Speech-to-text + segmentation
 
