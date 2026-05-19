@@ -187,10 +187,10 @@
     },
     {
       "parameters": {
-        "jsCode": "// Build one Telegram message per Parse Filename item (one per source audio file).\n// Read Config (upstream) provides chat_id, output folder, active_langs — same for all messages.\nconst configRows = $input.all().map(i => i.json);\nconst cfg = {};\nfor (const row of configRows) {\n  if (row && row.key) cfg[row.key] = row.value;\n}\n\nconst fullFolder = cfg.drive_output_full_folder_id || cfg.drive_output_folder_id;\nconst chat_id = cfg.telegram_chat_id;\nif (!chat_id) throw new Error('telegram_chat_id missing from config sheet');\n\nconst folderUrl = fullFolder ? `https://drive.google.com/drive/folders/${fullFolder}` : '(output folder id not configured)';\nconst activeLangs = (cfg.active_langs || 'de,es,fr,it,pl,pt,tr').split(',').map(s => s.trim()).filter(Boolean);\n\n// Iterate all Parse Filename items so multi-file drops produce one message per file.\nconst parsed = $('Parse Filename').all();\nreturn parsed.map(p => {\n  const lesson_id = p.json.lesson_id;\n  const filename = p.json.filename;\n  const text = [\n    '✅ Dubbing complete',\n    '',\n    `Lesson: ${lesson_id}`,\n    `Source file: ${filename}`,\n    `Languages: ${activeLangs.length} (${activeLangs.join(', ')})`,\n    '',\n    `Output: ${folderUrl}`,\n  ].join('\\n');\n  return { json: { chat_id, text } };\n});"
+        "jsCode": "// Build one Slack message per Parse Filename item (one per source audio file).\n// Read Config (upstream) provides slack_channel, output folder, active_langs — same for all messages.\nconst configRows = $input.all().map(i => i.json);\nconst cfg = {};\nfor (const row of configRows) {\n  if (row && row.key) cfg[row.key] = row.value;\n}\n\nconst fullFolder = cfg.drive_output_full_folder_id || cfg.drive_output_folder_id;\nconst channel = cfg.slack_channel;\nif (!channel) throw new Error('slack_channel missing from config sheet (set to channel ID like C01234ABCDE or channel name like #dubbing)');\n\nconst folderUrl = fullFolder ? `https://drive.google.com/drive/folders/${fullFolder}` : null;\nconst activeLangs = (cfg.active_langs || 'de,es,fr,it,pl,pt,tr').split(',').map(s => s.trim()).filter(Boolean);\n\n// Iterate all Parse Filename items so multi-file drops produce one message per file.\n// Slack mrkdwn: *bold*, _italic_, <url|text> for links, :emoji_name:\nconst parsed = $('Parse Filename').all();\nreturn parsed.map(p => {\n  const lesson_id = p.json.lesson_id;\n  const filename = p.json.filename;\n  const folderLink = folderUrl ? `<${folderUrl}|Open in Drive>` : '_(output folder id not configured)_';\n  const text = [\n    ':white_check_mark: *Dubbing complete*',\n    '',\n    `*Lesson:* ${lesson_id}`,\n    `*Source file:* ${filename}`,\n    `*Languages:* ${activeLangs.length} (${activeLangs.join(', ')})`,\n    '',\n    `*Output:* ${folderLink}`,\n  ].join('\\n');\n  return { json: { channel, text } };\n});"
       },
       "id": "07a2b3c4-d5e6-7890-1234-aaaabbbbcccc",
-      "name": "Build Telegram Message",
+      "name": "Build Slack Message",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
@@ -239,24 +239,30 @@
     },
     {
       "parameters": {
-        "chatId": "={{ $json.chat_id }}",
+        "resource": "message",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $json.channel }}",
+          "mode": "id"
+        },
         "text": "={{ $json.text }}",
-        "additionalFields": {
-          "parse_mode": "HTML"
+        "otherOptions": {
+          "mrkdwn": true
         }
       },
       "id": "08a2b3c4-d5e6-7890-1234-ddddeeeeffff",
-      "name": "Telegram Notify",
-      "type": "n8n-nodes-base.telegram",
-      "typeVersion": 1.2,
+      "name": "Slack Notify",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
       "position": [
         1168,
         0
       ],
       "credentials": {
-        "telegramApi": {
-          "id": "REPLACE_WITH_TELEGRAM_CREDENTIAL_ID",
-          "name": "Telegram account"
+        "slackApi": {
+          "id": "REPLACE_WITH_SLACK_CREDENTIAL_ID",
+          "name": "Slack account"
         }
       }
     }
@@ -355,18 +361,18 @@
       "main": [
         [
           {
-            "node": "Build Telegram Message",
+            "node": "Build Slack Message",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Build Telegram Message": {
+    "Build Slack Message": {
       "main": [
         [
           {
-            "node": "Telegram Notify",
+            "node": "Slack Notify",
             "type": "main",
             "index": 0
           }

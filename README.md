@@ -4,7 +4,7 @@ Automated dubbing for wellness/meditation video courses. English audio in → 7 
 
 ## Status
 
-**Production-ready** for the segment-level dub flow. End-to-end run (≈60-second lesson) takes ~2 minutes and costs ~$0.10–0.15 per language. Drop a file into a Drive `input/` folder and W_Master chains W1 → W2 → W3 automatically, then pings Telegram on completion.
+**Production-ready** for the segment-level dub flow. End-to-end run (≈60-second lesson) takes ~2 minutes and costs ~$0.10–0.15 per language. Drop a file into a Drive `input/` folder and W_Master chains W1 → W2 → W3 automatically, then pings Slack on completion.
 
 ## Stack
 
@@ -21,7 +21,7 @@ Automated dubbing for wellness/meditation video courses. English audio in → 7 
 ## Pipeline at a glance
 
 ```
-[W_Master]  Drive Trigger (input/) → Parse Filename → Execute W1 → W2 → W3 → Telegram
+[W_Master]  Drive Trigger (input/) → Parse Filename → Execute W1 → W2 → W3 → Slack
                                                               │
                                                               ▼  (file_id, lesson_id passed in)
 EN audio (Drive)
@@ -54,13 +54,13 @@ Output in Drive:
 
 ## Quick start
 
-1. **Google Sheet** — create a sheet with 4 tabs: `config`, `segments`, `voices`, `localizations`. Schema details in [`docs/sheets_schema.md`](docs/sheets_schema.md). Required config keys: `anthropic_api_key`, `elevenlabs_api_key`, `tone_of_voice`, `drive_output_folder_id`, `drive_output_full_folder_id`. Optional (for W_Master): `drive_input_folder_id`, `telegram_chat_id`. See [`docs/config_keys.md`](docs/config_keys.md) for the full list.
+1. **Google Sheet** — create a sheet with 4 tabs: `config`, `segments`, `voices`, `localizations`. Schema details in [`docs/sheets_schema.md`](docs/sheets_schema.md). Required config keys: `anthropic_api_key`, `elevenlabs_api_key`, `tone_of_voice`, `drive_output_folder_id`, `drive_output_full_folder_id`. Optional (for W_Master): `drive_input_folder_id`, `slack_channel`. See [`docs/config_keys.md`](docs/config_keys.md) for the full list.
 2. **n8n credentials** — bind:
     - Google Sheets account (for all Sheets nodes)
     - Google Drive account (for all Drive nodes, including W_Master's Drive Trigger)
     - Deepgram Header Auth (`Authorization: Token <key>`) — for W1 STT
     - ElevenLabs Header Auth (`xi-api-key: <key>`) — for W3 TTS
-    - Telegram account (HTTP Bot Token) — for W_Master completion notification
+    - Slack account (Bot User OAuth Token `xoxb-...`) — for W_Master completion notification
 3. **Drive folders** — create `input/`, `output/`, and `output/full/` folders, copy their IDs into config.
 4. **Voices tab** — fill in voice IDs from ElevenLabs Studio for the 7 langs.
 5. **Import workflows** — `workflows/W1_STT_and_Segment.json`, `workflows/W2_Translate_v2.json`, `workflows/W3_Synthesize_v2.json`, then `workflows/W_Master.json` into n8n. Re-bind credentials on each node after import. In W_Master: re-bind the three Execute Workflow nodes to the IDs n8n assigned to W1/W2/W3.
@@ -143,7 +143,7 @@ Full schema (every column explained): [`docs/sheets_schema.md#sheet-localization
 ├── PLAN.md                              # 2-week MVP roadmap (Week 1 done, Week 2 pending)
 ├── DECISIONS.md                         # architecture decisions log
 ├── workflows/                           # n8n workflow exports
-│   ├── W_Master.json                    # Drive folder trigger → W1 → W2 → W3 → Telegram
+│   ├── W_Master.json                    # Drive folder trigger → W1 → W2 → W3 → Slack
 │   ├── W1_STT_and_Segment.json          # Deepgram STT → segments sheet
 │   ├── W2_Translate_v2.json             # Tone + Translate + Adapt → segments sheet
 │   └── W3_Synthesize_v2.json            # TTS + Timing + Concat → Drive + localizations

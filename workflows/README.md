@@ -5,7 +5,7 @@ Four workflows: **W_Master** (Drive folder trigger, optional) chains **W1 → W2
 ## W_Master.json — Drive folder trigger orchestrator
 
 **Input**: any audio file dropped into the Drive `input/` folder (configured by `drive_input_folder_id`).
-**Output**: triggers W1 → W2 → W3 in sequence, then posts a Telegram notification with the link to the per-lang `full/` output folder.
+**Output**: triggers W1 → W2 → W3 in sequence, then posts a Slack notification with the link to the per-lang `full/` output folder.
 
 | Node | Purpose |
 |---|---|
@@ -14,20 +14,20 @@ Four workflows: **W_Master** (Drive folder trigger, optional) chains **W1 → W2
 | Execute W1 (STT) | Calls W1 with `{file_id, lesson_id}`. Retry: 1 attempt on fail, then stop |
 | Execute W2 (Translate) | Calls W2 with `{lesson_id}`. Retry: 1 attempt on fail, then stop |
 | Execute W3 (Synthesize) | Calls W3 with `{lesson_id}`. Retry: 1 attempt on fail, then stop |
-| Read Config | Pulls `drive_output_full_folder_id`, `telegram_chat_id`, `active_langs` |
-| Build Telegram Message (Code) | Composes the completion message |
-| Telegram Notify | Sends the message via Telegram bot credential |
+| Read Config | Pulls `drive_output_full_folder_id`, `slack_channel`, `active_langs` |
+| Build Slack Message (Code) | Composes the completion message with Slack mrkdwn formatting |
+| Slack Notify | Sends the message via Slack bot credential |
 
 **Setup checklist** (after importing):
 1. Drive Trigger → set `folderToWatch` to your `input/` folder ID (or leave the placeholder and set via expression to read from config).
 2. Execute W1 / W2 / W3 → re-bind to the workflow IDs assigned by your n8n instance after import.
-3. Telegram credential → create one in n8n (HTTP Bot Token), then bind it to `Telegram Notify`.
-4. Add `telegram_chat_id` to the `config` sheet (numeric chat ID — your DM or a group; use [@userinfobot](https://t.me/userinfobot) to find your own).
+3. Slack credential → create one in n8n (Bot User OAuth Token, `xoxb-...`), then bind it to `Slack Notify`.
+4. Add `slack_channel` to the `config` sheet (channel ID like `C01234ABCDE`). Invite your bot to the channel via `/invite @YourBotName` unless its scopes include `chat:write.public`.
 5. Set `active = true` on the workflow only after manual smoke-test (otherwise polling starts immediately).
 
 The Drive trigger watches *file-created* events only — moving an existing file into the folder also counts. Modifying an already-processed file does not retrigger.
 
-**Retry semantics**: each Execute Workflow node retries once with 5s backoff. If still failing → the master workflow stops (no Telegram). Open the n8n execution log to see which sub-workflow failed.
+**Retry semantics**: each Execute Workflow node retries once with 5s backoff. If still failing → the master workflow stops (no Slack notification). Open the n8n execution log to see which sub-workflow failed.
 
 ## W1_STT_and_Segment.json — Speech-to-text + segmentation
 
@@ -95,7 +95,7 @@ The Drive trigger watches *file-created* events only — moving an existing file
 
 After cloning this repo or pulling new workflow JSON:
 1. n8n → Workflows → ⋯ → Import from file (import W1, W2, W3 first, then W_Master)
-2. Re-bind credentials on each node (Google Sheets account, Google Drive account, Deepgram Header Auth, ElevenLabs Header Auth, Telegram account if using W_Master)
+2. Re-bind credentials on each node (Google Sheets account, Google Drive account, Deepgram Header Auth, ElevenLabs Header Auth, Slack account if using W_Master)
 3. In `W_Master.json`: re-bind the three Execute Workflow nodes to the IDs n8n assigned to W1/W2/W3 after import
 4. Re-verify sheet IDs and Drive folder IDs in the config sheet
 
