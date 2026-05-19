@@ -1202,3 +1202,57 @@ Lessons learned:
 1. **Sonnet first-pass на коротких phrases** не завжди семантично коректна — context-poor. Anti-examples в prompt значно ефективніші ніж "будь обережним".
 2. **External LLM review** (Gemini) — гарний sanity check на якість перекладів. Дешевий feedback loop: експортуй segments.csv → попроси review → інтегруй знайдені patterns у prompt.
 3. **Three-layer defense** (prevention/QA/preservation) — pattern варто використовувати і для майбутніх translation quality issues.
+
+---
+
+### 2026-05-19 — BORROW_DRIFT_FIX_AT_CONCAT_TIME
+
+Context: Запропоноване в [CONDITIONAL_BREATH_BORROW_FOR_SHORT_SEGMENTS] передбачення збулось. На прогоні `the_anchor.mp3` короткі афірмації (seg_006, seg_007, seg_018, seg_019, seg_025…) активували breath-borrow, кожна на 0.1–0.7с. Per-segment WAV-файли стають довшими за свій slot (`final_duration_sec > en_end - prev_en_end`), а наступний сегмент у concat не знав про overshoot — його `lead_silence_sec` обраховано як `en_start[N+1] - en_end[N]` (від EN, не від реальної позиції в concat). Накопичений drift по `the_anchor` для DE ≈ 1.78с до останнього сегмента. Положення перекладених сегментів роз'їзджались з EN таймлайном — те, що strict alignment мав гарантувати.
+
+Decision: компенсувати borrow на етапі **concat-у в `Build Full Audio Per Lang`**, а не в Check Timing + Pad. Для кожного сегмента N+1 при склеюванні відрізати `min(borrowed_sec[N], lead_silence_sec[N+1])` секунд з ПОЧАТКУ його PCM. Це з'їдає рівно ту тишу, яку seg N запозичив, і ставить seg N+1 у концерт на правильну EN-позицію.
+
+**Реалізація** (workflows/W3_Synthesize_v2.json + code_nodes/build_full_audio_per_lang.js, нода `Build Full Audio Per Lang`):
+
+```js
+let prevBorrow = 0, trimmedLeadSum = 0;
+for (const e of entries) {
+  let pcm = wavBuf.subarray(44);
+  if (prevBorrow > 0) {
+    const leadSec   = parseFloat(e.json.lead_silence_sec) || 0;
+    const trimSec   = Math.min(prevBorrow, leadSec);
+    const trimBytes = Math.round(trimSec * SAMPLE_RATE) * BPS;
+    if (trimBytes > 0 && trimBytes < pcm.length) {
+      pcm = pcm.subarray(trimBytes);
+      trimmedLeadSum += trimSec;
+    }
+  }
+  pcmChunks.push(pcm);
+  prevBorrow = parseFloat(e.json.borrowed_sec) || 0;
+}
+```
+
+Додано `trimmed_lead_total_sec` в output JSON для observability (має дорівнювати сумі `borrowed_sec` коли всі lead silences достатні).
+
+Rationale:
+- **Single-step compensation**: borrow seg N компенсується ТІЛЬКИ в seg N+1, не накопичується. Кожен сегмент після фіксу опиняється у своїй правильній EN-позиції незалежно від попередніх borrows.
+- **Structurally safe**: `max_borrowable[N] ≤ gap_after[N] - MIN_GAP`, а `lead_silence_sec[N+1] = gap_after[N]`. Тож `trimSec ≤ lead_silence[N+1] - MIN_GAP < lead_silence[N+1]` — у TTS-аудіо ніколи не різатимемо. `Math.min(prevBorrow, leadSec)` clamp — belt-and-braces проти Sheet round-trip rounding (3 знаки).
+- **Per-segment WAVs у Drive залишаються "як були"** (overshoot en_end на borrowed_sec). Вони — проміжні артефакти для QA, ніхто не накладає їх поодинці на EN таймлайн. Фікс тільки на concat-стадії, де це має значення.
+- **Алгоритмічно простіше за альтернативи**: cross-lang aware borrow (collect → align → resize) потребував би рефакторингу loop architecture; reduce lead у Check Timing + Pad — не вийде, бо segments processed in parallel batches і не мають lookahead.
+
+Tradeoffs:
+- **Per-segment files стають семантично "розкаліброваними"** — якщо хтось зробить ручний concat без trim-логіки, drift повернеться. Mitigation: задокументовано в `docs/sheets_schema.md`; стандартний шлях — через `Build Full Audio Per Lang`.
+- **Cross-lang drift у full WAV — все одно існує**, але обмежений: різні мови мають різні `borrowed_sec`, тож для DE/ES/FR концерти однакової тривалості ≈ EN duration, але внутрішні позиції сегментів ідентичні EN. Cross-lang A/B при listening-по-сегментно тепер працює.
+- **Verification**: новий скрипт `scripts/verify_borrow_compensation.js` симулює concat з/без фіксу на експортованому CSV — sanity check без перезапуску W3.
+
+Conflict with prior decisions: **доводить до кінця** CONDITIONAL_BREATH_BORROW_FOR_SHORT_SEGMENTS — це той самий "Tradeoffs → cumulative drift" пункт, що тепер закритий. Альтернатива (set `short_seg_threshold_sec=0`) досі доступна як escape hatch якщо фікс несподівано регресує.
+
+Files changed:
+- `workflows/W3_Synthesize_v2.json` — `Build Full Audio Per Lang` jsCode (concat-loop переписаний з prevBorrow/trim, +`trimmed_lead_total_sec` в output).
+- `code_nodes/build_full_audio_per_lang.js` — повний rewrite під актуальну JSON-версію + борров-компенсація. Раніше був out-of-sync (без lesson_id filter, без memory-conscious lang loop).
+- `docs/sheets_schema.md` — оновлено опис `borrowed_sec` і `final_duration_sec` щоб пояснити що per-file overshoot НЕ дорівнює full WAV overshoot.
+- `scripts/verify_borrow_compensation.js` — новий offline simulator.
+
+Lessons learned:
+1. **Predicted tradeoffs варто перевіряти на реальних прогонах** — попередня decision явно зазначила "cumulative drift" як risk, але без real-run data ризик виглядав "не критичним". Реальний прогон показав 1.78с drift на 4.5-хв уроці — це чути.
+2. **Concat-time compensation > per-file pre-compensation**. Якщо потрібно скоригувати взаємні позиції — робити на стадії композиції, а не модифікувати окремі артефакти. Per-segment files лишаються "природними".
+3. **Sample-rate-aware trim** (`Math.round(trimSec * SAMPLE_RATE) * BPS`) — обов'язковий для precision. Просто `trimSec * SAMPLE_RATE * BPS` дав би накопичення sub-sample помилок між сегментами.

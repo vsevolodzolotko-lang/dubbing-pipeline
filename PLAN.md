@@ -54,7 +54,7 @@
 - [x] TTS at speed 1.0, виміряти `real_duration_sec` з PCM bytes
 - [x] Branch на основі `real_duration` vs slot:
   - **`real ≤ tts_budget`** → padding 20/80 (lead/tail), DONE
-  - **`tts_budget < real ≤ effective_slot`** → BREATH BORROW: accept TTS як є, без padding/trim, записати `borrowed_sec = real − en_duration`
+  - **`tts_budget < real ≤ effective_slot`** → BREATH BORROW: accept TTS як є, без padding/trim, записати `borrowed_sec = real − en_duration`. **Concat-time compensation**: `Build Full Audio Per Lang` тримить `borrowed_sec[N]` з голови lead silence сегмента N+1, тож full WAV лишається aligned з EN (per-file overshoot не накопичується).
   - **`real > effective_slot`** → Adapt shorten loop (single-segment Claude call):
     - Attempt 1 (light): прибрати filler/redundancies
     - Attempt 2 (medium): rephrase коротше зі збереженням concepts

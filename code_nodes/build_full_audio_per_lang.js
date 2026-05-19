@@ -1,53 +1,76 @@
 // W3 final stage — concatenates per-segment WAVs into one full-lesson file per lang.
-//
 // Receives N items (one per localization row), each with:
-//   item.json    — row data: segment_id, lang, audio_drive_file_id, etc.
-//   item.binary.data — the per-segment WAV binary (downloaded by upstream
-//                       "Download Segment WAV" Google Drive node)
+//   item.json   — row data: segment_id, lang, lead_silence_sec, borrowed_sec, ...
+//   item.binary — per-segment WAV downloaded by upstream "Download Segment WAV".
 //
-// For each lang:
-//   1. Sort items by segment_id (zero-padded → lexicographic order works).
-//   2. Strip 44-byte WAV header from each segment, accumulate raw PCM.
-//   3. Wrap with fresh WAV header (22050Hz mono 16-bit — same format as segments).
-//   4. Emit one item with the full WAV as binary, named `{lesson_id}_full_{lang}.wav`.
+// Memory-conscious: iterates active_langs sequentially with a lazy per-lang filter,
+// explicit ref cleanup after each lang. Pairs with N8N_BINARY_DATA_MODE=filesystem
+// for further heap savings.
+//
+// BORROW COMPENSATION (drift fix):
+// When segment N has borrowed_sec > 0, its WAV extends past en_end[N] by that amount
+// (breath-borrow path in Check Timing + Pad). To keep the concatenated lesson aligned
+// with the EN timeline we trim that many seconds from the START of seg N+1's PCM —
+// eating into its lead silence, never into TTS audio. The borrow budget in Expand
+// TTS Jobs (max_borrowable ≤ gap_after − MIN_GAP, and lead_silence[N+1] == gap_after[N])
+// guarantees trimSec ≤ lead_silence[N+1]; the Math.min(prevBorrow, leadSec) clamp is
+// belt-and-braces in case Sheet round-trip introduces rounding.
 //
 // Why pre-download via n8n Drive node instead of fetching via httpRequest here:
-//   `this.getCredentials` is NOT available in Code nodes, so we can't get the
-//   OAuth token directly. The upstream Drive Download node handles auth and
-//   exposes binaries on each item.
+// `this.getCredentials` is NOT available in Code nodes, so we can't get the OAuth
+// token directly. The upstream Drive Download node handles auth and exposes binaries
+// on each item.
 
 const SAMPLE_RATE = 22050;
 const BPS         = 2;
 
+const lesson_id = $('Get Params').first().json.lesson_id;
+
+const configMap = {};
+$('Read Config').all().forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });
+const activeLangs = (configMap.active_langs || 'de,es,fr,it,pl,pt,tr')
+  .split(',').map(s => s.trim()).filter(Boolean).sort();
+
 const items = $input.all();
 if (!items.length) throw new Error('No items — Download Segment WAV must run first');
 
-const byLang = {};
-for (const item of items) {
-  const row = item.json || {};
-  if (!row.lang) continue;
-  if (!byLang[row.lang]) byLang[row.lang] = [];
-  byLang[row.lang].push({ row, binary: item.binary });
-}
-
 const results = [];
-for (const lang of Object.keys(byLang).sort()) {
-  const entries = byLang[lang].sort((a, b) =>
-    String(a.row.segment_id).localeCompare(String(b.row.segment_id))
-  );
+for (const lang of activeLangs) {
+  // Lazy filter for current lang only (no pre-grouping → no doubled refs).
+  const entries = items
+    .filter(i => i.json && i.json.lang === lang)
+    .filter(i => !lesson_id || (i.json.segment_id || '').startsWith(lesson_id + '_'))
+    .sort((a, b) => String(a.json.segment_id).localeCompare(String(b.json.segment_id)));
+
+  if (!entries.length) continue;
 
   const pcmChunks = [];
+  let prevBorrow     = 0;
+  let trimmedLeadSum = 0;
   for (const e of entries) {
     const binData = e.binary?.data;
     if (!binData?.data) continue;
     const wavBuf = Buffer.from(binData.data, 'base64');
     if (wavBuf.length <= 44) continue;
-    pcmChunks.push(wavBuf.subarray(44));
+    let pcm = wavBuf.subarray(44);
+    if (prevBorrow > 0) {
+      const leadSec   = parseFloat(e.json.lead_silence_sec) || 0;
+      const trimSec   = Math.min(prevBorrow, leadSec);
+      const trimBytes = Math.round(trimSec * SAMPLE_RATE) * BPS;
+      if (trimBytes > 0 && trimBytes < pcm.length) {
+        pcm = pcm.subarray(trimBytes);
+        trimmedLeadSum += trimSec;
+      }
+    }
+    pcmChunks.push(pcm);
+    prevBorrow = parseFloat(e.json.borrowed_sec) || 0;
   }
 
   const fullPcm = Buffer.concat(pcmChunks);
+  pcmChunks.length = 0;  // explicit ref clear — helps GC reclaim per-segment buffers
   const n = fullPcm.length;
 
+  // Build fresh WAV header (22050Hz mono 16-bit — matches segments)
   const h = Buffer.alloc(44);
   h.write('RIFF', 0);          h.writeUInt32LE(36 + n, 4);
   h.write('WAVE', 8);          h.write('fmt ', 12);
@@ -58,16 +81,17 @@ for (const lang of Object.keys(byLang).sort()) {
   h.write('data', 36);         h.writeUInt32LE(n, 40);
   const fullWav = Buffer.concat([h, fullPcm]);
 
-  const lessonId = String(entries[0].row.segment_id).split('_seg_')[0] || 'lesson';
+  const lessonId = String(entries[0].json.segment_id).split('_seg_')[0] || 'lesson';
   const fileName = `${lessonId}_full_${lang}.wav`;
 
   results.push({
     json: {
       lang,
-      lesson_id:         lessonId,
-      file_name:         fileName,
-      total_segments:    entries.length,
-      full_duration_sec: parseFloat((n / (SAMPLE_RATE * BPS)).toFixed(3)),
+      lesson_id:              lessonId,
+      file_name:              fileName,
+      total_segments:         entries.length,
+      full_duration_sec:      parseFloat((n / (SAMPLE_RATE * BPS)).toFixed(3)),
+      trimmed_lead_total_sec: parseFloat(trimmedLeadSum.toFixed(3)),
     },
     binary: {
       data: {
@@ -77,6 +101,8 @@ for (const lang of Object.keys(byLang).sort()) {
       },
     },
   });
+  // fullPcm + fullWav fall out of scope at next iteration — GC can reclaim.
 }
 
+if (!results.length) throw new Error('No localizations to concat' + (lesson_id ? ' for lesson_id=' + lesson_id : ''));
 return results;
