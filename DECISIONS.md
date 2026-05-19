@@ -992,3 +992,62 @@ Files changed:
 - `README.md` — згадки про Telegram замінено на Slack.
 
 Conflict with prior decisions: відкочує `W_MASTER_DRIVE_TRIGGER_ORCHESTRATOR` (Telegram-частина). Архітектура multi-file, Drive Trigger, lesson_id scoping — без змін.
+
+---
+
+### 2026-05-19 — MEMORY_REFACTOR_W3_BUILD_FULL_AFTER_OOM_KILL
+
+Context: 2026-05-18 n8n self-hosted сервер (1 GB RAM, SQLite) впав під час 40-хв виконання W3 на the_anchor.mp3 на стадії concat. Кернел убив n8n процес → SQLite write in progress → corruption → wipe-нуло workflows + credentials + executions. Це другий серйозний інцидент після W3_LOOP_BATCHING_REVERTED — і поки той був code bug, цей був operational/memory issue.
+
+Explore-агент підтвердив hotspot у `Build Full Audio Per Lang` Code-нодi (`workflows/W3_Synthesize_v2.json`):
+- `$input.all()` → 217 items × ~480 KB base64 = ~104 MB у JS heap одночасно
+- `byLang` pre-grouping дублює refs → ~72 MB після base64-декоду
+- `results` накопичує всі 7 готових full WAVs до return → ~76 MB
+- **Peak: ~250-300 MB** для 4.5-хв лекції. На 12-хв (560 items) — ~500-800 MB.
+- Жодного `N8N_BINARY_DATA_MODE` env var → бінарні дані в heap, не на диску.
+
+Decision: Two-phase memory mitigation.
+
+**Phase 1 — n8n env vars** (zero code change, не в git):
+```
+N8N_BINARY_DATA_MODE=filesystem
+EXECUTIONS_DATA_PRUNE=true
+EXECUTIONS_DATA_MAX_AGE=168
+EXECUTIONS_DATA_SAVE_ON_SUCCESS=none
+EXECUTIONS_DATA_SAVE_ON_ERROR=all
+EXECUTIONS_DATA_SAVE_DATA_ON_PROGRESS=false
+```
+Очікуваний ефект: peak 300 MB → 100 MB. Документовано у `workflows/README.md` в новій секції "n8n deployment env vars".
+
+**Phase 2 — refactor Build Full Audio Per Lang Code-нодi**:
+- Прибрано pre-grouping у `byLang` — items фільтруються per-iteration через `items.filter(i => i.json.lang === lang)`. Не тримаємо 7 копій refs одночасно.
+- Додано explicit `pcmChunks.length = 0` після `Buffer.concat` — звільняє refs на per-segment буфери для GC.
+- `activeLangs` тепер береться з `config.active_langs` (fixed list) замість dynamic discovery через `Object.keys(byLang)`. Стабільніше і не залежить від того, що було в input.
+- `fullPcm` і `fullWav` йдуть out of scope на кожній наступній iteration → GC може реклеймити.
+
+Peak memory у concat-стадії після refactor: ~140 MB (без env vars). З filesystem mode — ~50 MB.
+
+Rationale:
+- Phase 1 — найкращий ROI: один env var → ~70% reduction без коду. Operational config, не workflow change.
+- Phase 2 — defense in depth: навіть без filesystem mode, refactor сам по собі знижує peak на ~40%. Атомарний commit, легко rollback.
+- Обидві разом: 4.5-хв лекція з 300 MB → ~30-50 MB peak. Стійко на 4 GB сервері навіть для 30+ хв lessons.
+
+Tradeoffs:
+- Refactor читає `Read Config` зсередини Build Full Audio Per Lang — це нова залежність, але config уже читається в W3 раніше у Expand TTS Jobs, тому n8n кешує результати `$('Read Config').all()`. Overhead тривіальний.
+- `Object.keys(byLang).sort()` був dynamic — спрацював би для будь-яких langs у input. Тепер фіксований список з config — якщо хтось додасть `xx_text` у segments без `xx` у `active_langs`, ці сегменти не concat-нуться. Це фіча, не баг (active_langs — source of truth).
+
+Files changed:
+- `workflows/W3_Synthesize_v2.json` — тільки `Build Full Audio Per Lang` jsCode.
+- `workflows/README.md` — нова секція "n8n deployment env vars" + апдейт node-table.
+
+What is NOT in this fix (Phase 3, окремо):
+- **Per-lang Sub-Loop в n8n** через SplitInBatches → ще ~3× зниження memory. Для 30+ хв lessons. Більший redesign.
+- **Streaming concat via ffmpeg** — найрадикальніше, потребує ffmpeg на сервері + subprocess.spawn. Залишається у Phase 3.
+- **Postgres замість SQLite** — operational/ops, рекомендовано у docs але не блокуюче.
+
+Conflict with prior decisions: жодних. Доповнює існуючу архітектуру W3 без зміни data flow.
+
+Lessons learned:
+1. **OOM kill = DB corruption** на SQLite. Memory monitoring + Postgres важливі для production.
+2. **n8n holds binary in JS heap by default** — це нетривіально, varto документувати у setup checklists.
+3. **Pre-grouping items by some key** доцільно тільки якщо потім всі групи треба тримати одночасно. Для sequential обробки — lazy filter дешевший.

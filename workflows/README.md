@@ -88,8 +88,33 @@ The Drive trigger watches *file-created* events only — moving an existing file
 | ↳ Rate Limit Guard (Wait) | 0.5s between batched iterations (ElevenLabs Scale tier has plenty of RPM headroom) |
 | Loop done → Read Localizations Fresh | Get all rows for concat stage |
 | Download Segment WAV | Per-row Drive download, attaches binary |
-| Build Full Audio Per Lang (Code) | Group by lang, sort by `segment_id`, strip 44-byte WAV headers, concat raw PCM, wrap fresh WAV header. Filters localizations by `lesson_id` prefix so multi-lesson runs don't mix segments. |
+| Build Full Audio Per Lang (Code) | Iterates `active_langs` sequentially, lazy-filters items per lang (no pre-grouping), strips 44-byte WAV headers, concats raw PCM, wraps fresh WAV header. Filters by `lesson_id` prefix. Explicit `pcmChunks.length = 0` after concat to help GC reclaim per-segment buffers between langs. |
 | Save Full to Drive | Upload 7 full WAVs |
+
+## n8n deployment env vars (required for production)
+
+Set these on the n8n process to keep memory usage safe during long-form W3 runs (12+ min lessons). Without `N8N_BINARY_DATA_MODE=filesystem` the n8n process holds all per-segment PCM buffers in JS heap during the concat stage — a 12-min lesson can spike to 500-800 MB and OOM-kill on a 1 GB container (we hit this in production on 2026-05-18).
+
+```bash
+# Store binary data on disk, not in RAM/DB. Biggest single memory win.
+N8N_BINARY_DATA_MODE=filesystem
+
+# Auto-prune old executions so the DB doesn't grow unbounded.
+EXECUTIONS_DATA_PRUNE=true
+EXECUTIONS_DATA_MAX_AGE=168                      # hours (7 days)
+EXECUTIONS_DATA_PRUNE_TIMEOUT=3600
+
+# Don't store intermediate node-by-node data for successful runs (only errors).
+EXECUTIONS_DATA_SAVE_ON_SUCCESS=none
+EXECUTIONS_DATA_SAVE_ON_ERROR=all
+EXECUTIONS_DATA_SAVE_DATA_ON_PROGRESS=false
+```
+
+For Docker-based deployments add them under `environment:` in `docker-compose.yml`. Restart n8n after changes. Verify by opening any execution → binary outputs should show "filesystem reference" instead of base64 strings.
+
+Also recommended:
+- **Postgres instead of SQLite** for the n8n DB (`DB_TYPE=postgresdb`). Postgres is far more resilient to abrupt termination; SQLite corrupted during the 2026-05-18 OOM kill and wiped workflows/credentials.
+- **≥4 GB RAM** on the n8n host for 12-min lessons. ~8 GB if you plan to run multiple long lessons concurrently.
 
 ## Re-importing into n8n
 
