@@ -1294,3 +1294,41 @@ Verification:
 - Всі 4 Code-ноди парсяться: `node -e "for (const f of [...]) for (const n of require('./workflows/'+f).nodes) new Function('return (async function(){'+n.parameters.jsCode+'\\n})')()"`
 - QA_SYSTEM length перевірка: `node -e "console.log(require('./workflows/W2_Translate_v2.json').nodes.find(n=>n.name==='Verify Translations').parameters.jsCode.match(/QA_SYSTEM = \\\`([\\s\\S]*?)\\\`;/)[1].length)"` → 4469.
 - Post-deploy: re-import W2.json у n8n, прогнати лекцію з 16+ сегментами (форсує 2+ Verify батчі), глянути на console.log `resp.usage` — очікувано `cache_creation_input_tokens > 1000` на batch 1, `cache_read_input_tokens > 1000` на batch 2.
+
+---
+
+### 2026-05-20 — VTT_SUBTITLES_PER_LANG_IN_W3
+
+Context: Користувач попросив генерувати WebVTT субтитри під час повного прогону — окремий файл на кожну активну мову, у виділеній Drive-папці що задається в config. Дані вже всі є в `localizations` sheet: `text_translated` (фінальна версія після Verify + Adapt + W3 shorten), `en_start_sec`, `en_duration_sec`. Залишилось зібрати у формат VTT і завантажити.
+
+Decision: дві нові ноди в W3 у паралельній гілці після `Read Localizations Fresh` — поряд із `Download Segment WAV`. Ноди: `Build VTT Per Lang` (Code) → `Save VTT to Drive` (Google Drive upload). Гілка не блокує WAV-pipeline (обидві читають одну таблицю незалежно).
+
+**Cue model**: timings = `en_start_sec → en_end_sec`. Після borrow-compensation фіксу (61c9e75) кожен сегмент у full WAV стартує точно на `en_start_sec`, тож EN-aligned cues автоматично співпадають з дубльованим аудіо для ВСІХ мов. Cue text = `text_translated`. Cue нумерація — порядковий індекс (1, 2, 3...).
+
+**Файлові артефакти**: `{lesson_id}_full_{lang}.vtt` (відповідає шаблону `{lesson_id}_full_{lang}.wav`). MIME type `text/vtt`. UTF-8 encoding.
+
+**Config key**: `drive_output_vtt_folder_id` (новий, optional). Fallback chain: `drive_output_vtt_folder_id → drive_output_full_folder_id → drive_output_folder_id`. Не обов'язковий — без нього VTT-файли упадуть у full-папку поряд з WAV.
+
+**Файлові зміни**:
+- [workflows/W3_Synthesize_v2.json](workflows/W3_Synthesize_v2.json) — додано 2 ноди + fan-out з Read Localizations Fresh (одна головна гілка `main[0]` тепер веде до двох таргетів: Download Segment WAV + Build VTT Per Lang). 20 нод тепер замість 18.
+- [code_nodes/build_vtt_per_lang.js](code_nodes/build_vtt_per_lang.js) — нова mirror file.
+- [docs/config_keys.md](docs/config_keys.md) — нова строка про `drive_output_vtt_folder_id` з fallback chain.
+- [workflows/README.md](workflows/README.md) — оновлено node table з новими VTT-нодами (помічено як sibling-гілка до Download Segment WAV).
+
+Rationale:
+- **Reuse existing data**: вся інформація вже є у localizations row-ах, які зчитує Read Localizations Fresh. Не треба ні re-translation, ні re-timing — лише format conversion.
+- **EN-aligned cues universally work**: тому що borrow-fix компенсує overshoot, в full WAV кожна мова починає сегмент на тому самому місці що EN. Один cue-timing fits all langs (не треба генерувати окремий VTT з audio-aligned timings для кожної мови).
+- **Parallel branch, not serial**: VTT generation не залежить від WAV concat (читає тільки JSON). Виносити в окремий workflow було б over-engineering — два паралельних таргети з одного output port-у це native n8n pattern.
+- **Fallback chain для folder ID**: graceful degradation — користувач може не задавати новий ключ і VTT файли підуть у full-папку. Якщо й її нема — у per-segment папку.
+
+Tradeoffs:
+- **Cue визначається EN slot-ом, не реальною тривалістю TTS**: коли дубльоване аудіо коротше за slot (silence padding в tail), субтитр залишиться на екрані під час тиші. Альтернатива (end = en_start_sec + real_duration_sec) сховала б субтитр коли голос замовкає — але для meditation з повільним темпом це може виглядати дивно (читач думає що сегмент закінчився, потім чує ще). Поточний підхід проще і безпечніше. Якщо появляться скарги — можна переключити через config-key.
+- **Один VTT на мову, не cross-lang multi-track**: для YouTube/HTML5 player це означає 7 окремих файлів. Якщо знадобиться single SRT/VTT з мовними доріжками — це окрема фіча (не стандарт WebVTT, потребує WebVTT Regions або поза-стандартних тагів).
+- **VTT файли містять ту саму mojibake-небезпеку як і інший Code-node output**, але оскільки ми пишемо через `Buffer.from(vtt, 'utf8')` напряму — байти на диску правильні UTF-8. Якщо ElevenLabs/Sonnet/Adapt видали mojibake-токени в `text_translated` (вони цього не роблять, бо Sheets зберігає чистий UTF-8) — це проявиться у VTT.
+
+Conflict with prior decisions: жодних. Use-case-isolated nова фіча.
+
+Verification:
+- Smoke test з реальними DE рядками the_anchor: 4 cues, valid WebVTT format, точні таймінги.
+- Після re-import у n8n: один повний прогон → у Drive `vtt/` папці має з'явитись 7 файлів `the_anchor_full_*.vtt`.
+- Cross-check: cue timings у DE.vtt мають збігатись з ES.vtt (один і той самий EN timeline) — підтверджує що borrow compensation працює.

@@ -86,10 +86,12 @@ The Drive trigger watches *file-created* events only — moving an existing file
 | ↳ Save to Drive | Upload per-segment WAV |
 | ↳ Prepare Localization Row + Update Localizations | Write diagnostics row |
 | ↳ Rate Limit Guard (Wait) | 0.5s between batched iterations (ElevenLabs Scale tier has plenty of RPM headroom) |
-| Loop done → Read Localizations Fresh | Get all rows for concat stage |
-| Download Segment WAV | Per-row Drive download, attaches binary |
-| Build Full Audio Per Lang (Code) | Iterates `active_langs` sequentially, lazy-filters items per lang (no pre-grouping), strips 44-byte WAV headers, concats raw PCM, wraps fresh WAV header. Filters by `lesson_id` prefix. Explicit `pcmChunks.length = 0` after concat to help GC reclaim per-segment buffers between langs. |
-| Save Full to Drive | Upload 7 full WAVs |
+| Loop done → Read Localizations Fresh | Get all rows for concat + VTT stages (fan-out to two branches) |
+| ↳ Download Segment WAV | Per-row Drive download, attaches binary |
+| ↳ Build Full Audio Per Lang (Code) | Iterates `active_langs` sequentially, lazy-filters items per lang (no pre-grouping), strips 44-byte WAV headers, concats raw PCM, wraps fresh WAV header. Trims `borrowed_sec` from next segment's lead silence (drift-fix). Filters by `lesson_id` prefix. Explicit `pcmChunks.length = 0` after concat to help GC reclaim per-segment buffers between langs. |
+| ↳ Save Full to Drive | Upload N full WAVs (one per active_lang) |
+| ↳ Build VTT Per Lang (Code) | Parallel branch to Download Segment WAV. Generates one WebVTT file per active_lang. Cue text = `text_translated`; cue timings = `en_start_sec → en_end_sec` (EN-aligned, matches dubbed audio after borrow compensation). |
+| ↳ Save VTT to Drive | Upload N `.vtt` files into `drive_output_vtt_folder_id` (falls back to `drive_output_full_folder_id` then `drive_output_folder_id`). |
 
 ## n8n deployment env vars (required for production)
 

@@ -582,6 +582,50 @@
           "name": "Google Drive account"
         }
       }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build WebVTT subtitles per active language. One .vtt per lang, matching the\n// full-lesson WAV positions. Runs in parallel with Download Segment WAV (both read\n// the same Read Localizations Fresh output).\n//\n// Cue timings: en_start_sec → en_end_sec. After the borrow-compensation fix in\n// Build Full Audio Per Lang, each segment in the full WAV starts exactly at\n// en_start_sec — so EN-aligned cues match the dubbed audio for every language.\n// Cue text: text_translated (final version after Verify + Adapt + W3 shorten).\nconst lesson_id = $('Get Params').first().json.lesson_id;\n\nconst configMap = {};\n$('Read Config').all().forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });\nconst activeLangs = (configMap.active_langs || 'de,es,fr,it,pl,pt,tr')\n  .split(',').map(s => s.trim()).filter(Boolean);\n\nconst items = $input.all();\nif (!items.length) throw new Error('No items — Read Localizations Fresh must run first');\n\nfunction fmtTime(sec) {\n  // VTT timestamp: HH:MM:SS.mmm\n  const h = Math.floor(sec / 3600);\n  const m = Math.floor((sec % 3600) / 60);\n  const s = sec - h * 3600 - m * 60;\n  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${s.toFixed(3).padStart(6, '0')}`;\n}\n\nconst results = [];\nfor (const lang of activeLangs) {\n  const segs = items\n    .filter(i => i.json && i.json.lang === lang)\n    .filter(i => !lesson_id || (i.json.segment_id || '').startsWith(lesson_id + '_'))\n    .sort((a, b) => String(a.json.segment_id).localeCompare(String(b.json.segment_id)));\n  if (!segs.length) continue;\n\n  const lines = ['WEBVTT', ''];\n  let cueIdx = 0;\n  for (const e of segs) {\n    const s = e.json;\n    const start = parseFloat(s.en_start_sec) || 0;\n    const dur   = parseFloat(s.en_duration_sec) || 0;\n    const end   = start + dur;\n    const text  = (s.text_translated || '').toString().trim().replace(/\\r?\\n/g, ' ');\n    if (!text) continue;\n    cueIdx++;\n    lines.push(String(cueIdx));\n    lines.push(`${fmtTime(start)} --> ${fmtTime(end)}`);\n    lines.push(text);\n    lines.push('');\n  }\n  if (cueIdx === 0) continue;\n  const vtt = lines.join('\\n');\n\n  const lessonId = String(segs[0].json.segment_id).split('_seg_')[0] || 'lesson';\n  const fileName = `${lessonId}_full_${lang}.vtt`;\n  results.push({\n    json: {\n      lang,\n      lesson_id: lessonId,\n      file_name: fileName,\n      total_cues: cueIdx,\n      vtt_bytes:  Buffer.byteLength(vtt, 'utf8'),\n    },\n    binary: {\n      data: {\n        data: Buffer.from(vtt, 'utf8').toString('base64'),\n        mimeType: 'text/vtt',\n        fileName,\n      },\n    },\n  });\n}\n\nif (!results.length) throw new Error('No localizations for VTT' + (lesson_id ? ' for lesson_id=' + lesson_id : ''));\nreturn results;\n"
+      },
+      "id": "vtt00001-build-4abc-9def-perlangbuild",
+      "name": "Build VTT Per Lang",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5488,
+        1920
+      ]
+    },
+    {
+      "parameters": {
+        "name": "={{ $json.file_name }}",
+        "driveId": {
+          "__rl": true,
+          "value": "myDrive",
+          "mode": "list",
+          "cachedResultName": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "={{ $('Read Config').all().find(i => i.json.key === 'drive_output_vtt_folder_id')?.json.value || $('Read Config').all().find(i => i.json.key === 'drive_output_full_folder_id')?.json.value || $('Read Config').all().find(i => i.json.key === 'drive_output_folder_id')?.json.value }}",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "id": "vtt00002-save-4abc-9def-tovttdrivefld",
+      "name": "Save VTT to Drive",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        5680,
+        1920
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "MoWG4XRaoJGU18eu",
+          "name": "Google Drive account"
+        }
+      }
     }
   ],
   "pinData": {},
@@ -754,6 +798,11 @@
             "node": "Download Segment WAV",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "Build VTT Per Lang",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -774,6 +823,17 @@
         [
           {
             "node": "Build Full Audio Per Lang",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build VTT Per Lang": {
+      "main": [
+        [
+          {
+            "node": "Save VTT to Drive",
             "type": "main",
             "index": 0
           }
