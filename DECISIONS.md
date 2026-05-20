@@ -1440,3 +1440,73 @@ Verification:
 - Smoke-test mock-Claude (50-100ms latency): 7 calls completed in 95ms = 5.5x speedup over sequential 525ms estimate.
 - JS syntax of all W2 Code nodes parses cleanly.
 - Post-deploy: re-import W2.json у n8n, re-run failed lesson (`tc_practice_23_ph2-flow-the-ball`). Expected: Adapt стадія завершується за ~3-5 хв замість timeout. localizations sheet має ті ж 21 × 7 = 147 рядків з адаптованими перекладами.
+
+---
+
+### 2026-05-20 — W3_EMPTY_BUFFER_GUARD_AND_BUILD_FULL_DIAGNOSTICS
+
+Context: Прогон `tc_practice_23_ph2-flow-the-ball` (21 сегмент, движення-контент) дав full WAVs по 44 байти (порожні WAV header без data). При цьому per-segment WAVs у Drive нормального розміру (KB-MB silence-padded), `N8N_BINARY_DATA_MODE=filesystem` виставлений, W3 execution показав SUCCESS. localizations sheet містить 147 рядків де **~93% мають `real_duration_sec=0`** (тільки ~10 з 147 з реальним TTS-аудіо), але `needs_attention=FALSE` всюди — система проковтала помилки і не попередила.
+
+Root-cause-analysis:
+
+**Bug 1 (критичний): `if (!pcm)` guard у `Check Timing + Pad` не ловить empty Buffer.**
+
+Поточний код:
+```js
+const binaryData = $input.first().binary?.data;
+let pcm = binaryData ? Buffer.from(binaryData.data, 'base64') : null;
+// ...
+if (!pcm) { /* silent placeholder, sets needs_attention=true */ }
+```
+
+Коли ElevenLabs TTS HTTP-нода падає (rate limit / 5xx) з `onError: continueRegularOutput`, n8n МОЖЕ передати item з `binary.data = { data: '', ... }`. Тоді:
+- `binaryData` truthy (об'єкт існує)
+- `Buffer.from('', 'base64')` = 0-length Buffer
+- Empty Buffer **truthy в JS** → `if (!pcm)` НЕ спрацьовує
+- Silent-placeholder branch (який ставить `needs_attention=true` + `lead=0/tail=0`) пропускається
+- Normal pad-path виконується з порожнім pcm
+- `pcmDuration(pcm) = 0` → `realDur = 0`
+- Loops не fire (0 не > maxAllowed), expansion fires але claudeExpand/tts() теж падають → break без increment
+- Final: `lead=naturalLead`, `tail=enDur`, `real=0`, `needs_attention=FALSE` — БРЕХНЯ
+- Output WAV — silence з валідним header-ом. Per-segment файли у Drive KB-MB silence, фейково правильні
+
+Це найгірша варіація бага — pipeline здається успішним а реально продукує тишу.
+
+**Fix 1**: harden the guard в `Check Timing + Pad`:
+```js
+let pcm = binaryData?.data ? Buffer.from(binaryData.data, 'base64') : null;
+if (pcm && pcm.length === 0) pcm = null;  // treat empty Buffer as failure too
+```
+Тепер empty Buffer → null → silent-placeholder branch → `needs_attention=true`. Користувач бачить flag і знає що треба ре-тригерити.
+
+**Bug 2 (загадка, ще не з'ясовано): full WAVs = 44 байти попри коректні per-segment WAVs у Drive.**
+
+Per-segment WAVs у Drive нормального розміру (від KB до MB silence-padded). Build Full Audio Per Lang мав би їх скачати, обрізати header, склеїти, видати ~8MB на мову. Але отримуємо 44-байтний WAV header без PCM data.
+
+Можливі причини що залишилось перевірити на наступному прогоні (через нові діагностичні логи):
+1. Download Segment WAV інколи "тихо" повертає item без binary slot (Drive API throttle / quota)
+2. Filesystem-mode interaction робить `binData.data` недоступним як base64 у Code-ноді
+3. Build Full filter `wavBuf.length <= 44` непередбачено матчить per-segment файли через якісь n8n-internal перетворення
+
+**Fix 2**: додано діагностичні counters + warning logs у `Build Full Audio Per Lang`:
+- `skippedNoBinary` (item без binary) і `skippedEmptyWav` (WAV ≤44 bytes) per-lang counter
+- `console.warn` за кожен skip — видно у n8n executions log: `Build Full: de seg_005 skipped — WAV is 44 bytes (header-only or empty)`
+- Counters також у output JSON для post-hoc inspection
+
+Після наступного прогону подивитись n8n executions log для Build Full — буде ясно чи проблема в download-stage чи в filter-stage.
+
+**Files changed**:
+- `workflows/W3_Synthesize_v2.json` — Check Timing + Pad guard hardened (`if (pcm && pcm.length === 0) pcm = null;`); Build Full Audio Per Lang has new skip counters + per-skip warning logs
+- `code_nodes/check_timing_and_pad.js` — mirror sync
+- `code_nodes/build_full_audio_per_lang.js` — mirror sync
+
+**Не змінено в цьому коміті** (свідомо):
+- ElevenLabs TTS HTTP node `onError: continueRegularOutput` — залишено, бо зміна на `stopWorkflow` зломає всі majority-rate-limit-hit прогони хардкорно. Кращий шлях — bump tier на ElevenLabs АБО зменшити paralelism. Окреме рішення.
+- Ніяких parallelism-обмежень у W3 не додано — спершу хочемо побачити що покажуть нові логи на наступному прогоні
+
+**Verification** (next run):
+1. Re-import W3.json у n8n
+2. Прогнати `tc_practice_23_ph2-flow-the-ball` ще раз (або інший movement-урок)
+3. Якщо TTS знов падатиме: тепер у localizations sheet `needs_attention=TRUE` на проблемних рядках → можна frustration-free ре-тригерити по rows where TRUE
+4. Якщо повторно full WAV = 44 байти: глянути n8n execution log на Build Full Audio Per Lang — `console.warn` повідомлення скажуть точно чому всі items skipped
+5. `skipped_no_binary` / `skipped_empty_wav` counters у Save Full to Drive item JSON — також доступні через post-execution inspection

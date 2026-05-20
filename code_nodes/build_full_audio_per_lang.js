@@ -1,26 +1,7 @@
-// W3 final stage — concatenates per-segment WAVs into one full-lesson file per lang.
-// Receives N items (one per localization row), each with:
-//   item.json   — row data: segment_id, lang, lead_silence_sec, borrowed_sec, ...
-//   item.binary — per-segment WAV downloaded by upstream "Download Segment WAV".
-//
-// Memory-conscious: iterates active_langs sequentially with a lazy per-lang filter,
-// explicit ref cleanup after each lang. Pairs with N8N_BINARY_DATA_MODE=filesystem
+// Concat per-segment WAVs into one full WAV per language.
+// Memory-conscious: iterates active_langs sequentially, no pre-grouping of all items,
+// explicit reference cleanup after each lang. Pairs with N8N_BINARY_DATA_MODE=filesystem
 // for further heap savings.
-//
-// BORROW COMPENSATION (drift fix):
-// When segment N has borrowed_sec > 0, its WAV extends past en_end[N] by that amount
-// (breath-borrow path in Check Timing + Pad). To keep the concatenated lesson aligned
-// with the EN timeline we trim that many seconds from the START of seg N+1's PCM —
-// eating into its lead silence, never into TTS audio. The borrow budget in Expand
-// TTS Jobs (max_borrowable ≤ gap_after − MIN_GAP, and lead_silence[N+1] == gap_after[N])
-// guarantees trimSec ≤ lead_silence[N+1]; the Math.min(prevBorrow, leadSec) clamp is
-// belt-and-braces in case Sheet round-trip introduces rounding.
-//
-// Why pre-download via n8n Drive node instead of fetching via httpRequest here:
-// `this.getCredentials` is NOT available in Code nodes, so we can't get the OAuth
-// token directly. The upstream Drive Download node handles auth and exposes binaries
-// on each item.
-
 const SAMPLE_RATE = 22050;
 const BPS         = 2;
 
@@ -44,14 +25,35 @@ for (const lang of activeLangs) {
 
   if (!entries.length) continue;
 
+  // Strip 44-byte WAV header from each segment, accumulate raw PCM.
+  //
+  // BORROW COMPENSATION (drift fix):
+  // When segment N has borrowed_sec > 0, its WAV extends past en_end[N] by that amount
+  // (breath-borrow path in Check Timing + Pad). To keep the concatenated lesson aligned
+  // with the EN timeline we trim that many seconds from the START of seg N+1's PCM —
+  // eating into its lead silence, never into TTS audio. The borrow budget in Expand
+  // TTS Jobs (max_borrowable ≤ gap_after − MIN_GAP, and lead_silence[N+1] == gap_after[N])
+  // guarantees trimSec ≤ lead_silence[N+1], so the bound is structural; the
+  // Math.min(prevBorrow, leadSec) clamp is belt-and-braces in case Sheet round-trip
+  // introduces rounding.
   const pcmChunks = [];
-  let prevBorrow     = 0;
-  let trimmedLeadSum = 0;
+  let prevBorrow      = 0;
+  let trimmedLeadSum  = 0;
+  let skippedNoBinary = 0;
+  let skippedEmptyWav = 0;
   for (const e of entries) {
     const binData = e.binary?.data;
-    if (!binData?.data) continue;
+    if (!binData?.data) {
+      skippedNoBinary++;
+      console.warn(`Build Full: ${lang} ${e.json?.segment_id} skipped — no binary.data on item`);
+      continue;
+    }
     const wavBuf = Buffer.from(binData.data, 'base64');
-    if (wavBuf.length <= 44) continue;
+    if (wavBuf.length <= 44) {
+      skippedEmptyWav++;
+      console.warn(`Build Full: ${lang} ${e.json?.segment_id} skipped — WAV is ${wavBuf.length} bytes (header-only or empty)`);
+      continue;
+    }
     let pcm = wavBuf.subarray(44);
     if (prevBorrow > 0) {
       const leadSec   = parseFloat(e.json.lead_silence_sec) || 0;
@@ -84,12 +86,17 @@ for (const lang of activeLangs) {
   const lessonId = String(entries[0].json.segment_id).split('_seg_')[0] || 'lesson';
   const fileName = `${lessonId}_full_${lang}.wav`;
 
+  if (skippedNoBinary > 0 || skippedEmptyWav > 0) {
+    console.warn(`Build Full: ${lang} skipped ${skippedNoBinary} items (no binary) + ${skippedEmptyWav} items (empty WAV) out of ${entries.length}`);
+  }
   results.push({
     json: {
       lang,
       lesson_id:              lessonId,
       file_name:              fileName,
       total_segments:         entries.length,
+      skipped_no_binary:      skippedNoBinary,
+      skipped_empty_wav:      skippedEmptyWav,
       full_duration_sec:      parseFloat((n / (SAMPLE_RATE * BPS)).toFixed(3)),
       trimmed_lead_total_sec: parseFloat(trimmedLeadSum.toFixed(3)),
     },
