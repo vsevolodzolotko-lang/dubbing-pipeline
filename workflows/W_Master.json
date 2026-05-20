@@ -255,9 +255,10 @@
         3408,
         432
       ],
+      "webhookId": "36682c9e-8108-46b3-93b2-34f1fda90de1",
       "credentials": {
         "slackApi": {
-          "id": "REPLACE_WITH_SLACK_CREDENTIAL_ID",
+          "id": "ogtQ2NONkRrXj2kl",
           "name": "Slack account"
         }
       }
