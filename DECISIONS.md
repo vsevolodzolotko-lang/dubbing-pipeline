@@ -1256,3 +1256,41 @@ Lessons learned:
 1. **Predicted tradeoffs варто перевіряти на реальних прогонах** — попередня decision явно зазначила "cumulative drift" як risk, але без real-run data ризик виглядав "не критичним". Реальний прогон показав 1.78с drift на 4.5-хв уроці — це чути.
 2. **Concat-time compensation > per-file pre-compensation**. Якщо потрібно скоригувати взаємні позиції — робити на стадії композиції, а не модифікувати окремі артефакти. Per-segment files лишаються "природними".
 3. **Sample-rate-aware trim** (`Math.round(trimSec * SAMPLE_RATE) * BPS`) — обов'язковий для precision. Просто `trimSec * SAMPLE_RATE * BPS` дав би накопичення sub-sample помилок між сегментами.
+
+---
+
+### 2026-05-20 — QA_SYSTEM_EXPANSION_FOR_CACHE_AND_COVERAGE
+
+Context: `Verify Translations` нода в W2 (повернена після `eadc868` дропу — раніше додана `b4197b9`, але n8n state на момент chore-sync не мав її) використовує `cache_control: { type: 'ephemeral' }` на `QA_SYSTEM`. Виявилось що промпт був ~354 токени — НИЖЧЕ Sonnet 4.5 cache minimum (1024 токени). Anthropic мовчки ігнорує директиву і кожен з 4 батчів на typical-урок обходиться у full price (~$0.05/урок). Окремо: anti-pattern coverage обмежений DE/FR/TR/PL — ES/PT/IT мають свої false-friend traps (`válido`/`valido` для self-acceptance) які не ловились, плюс formality drift і ToV violations не перевірялись зовсім.
+
+Decision: розширити `QA_SYSTEM` до ~1117 токенів (4469 chars) з трьома класами реальних правил:
+1. **Class 1 — Literal-dictionary mistranslations (false friends)**: збережено DE/FR/TR/PL, додано ES/PT/IT `válido`/`valido` (clinical/legal feel для affirmations) + note про `suficiente`/`sufficiente` як flat для self-acceptance segments + загальний typo flag.
+2. **Class 2 — Formality drift**: explicit per-lang address rules (du/tú/tu/tu/ty/tu/sen) з конкретними anti-forms (Sie/usted/vous/Lei/Pan/você/siz) і EU vs BR PT verb forms (`tu fazes` not `você faz`).
+3. **Class 3 — ToV violations**: marketing/transformation vocab, promise/guarantee tone, bare imperative filler, clinical register, anglicism syntax, urgency words — взято з `docs/tone_of_voice.md`.
+4. Hard constraints збережено: ±25% length, preserve negations/contrasts/numbers/proper nouns/pause markers, return unchanged when clean.
+
+**Файлові зміни** ([workflows/W2_Translate_v2.json:Verify Translations](workflows/W2_Translate_v2.json)): додано ноду в `nodes` array між Extract Translations і Adapt Translations, переписано connections `Extract Translations → Verify Translations → Adapt Translations`. Скрипт-генератор у `/tmp/n8n_raw/insert_verify.js` (одноразовий, не в репо).
+
+Окрема правка ([workflows/W_Master.json](workflows/W_Master.json)): підставлено реальний Slack credential ID `ogtQ2NONkRrXj2kl` (замість placeholder `REPLACE_WITH_SLACK_CREDENTIAL_ID`) + auto-generated `webhookId` для node-а. Це довершує `feat(w_master): re-add Slack notification stage` (859fd45) — тепер JSON full-import-ready без ручного binding кредента в n8n UI.
+
+Rationale:
+- **Cache activation**: 1117 токенів безпечно перевищує 1024-токен Sonnet min. На typical-уроці 4 батчі Verify Translations → batch 1 cache_creation, batches 2-4 cache_read (90% знижка на cached input). Економія ~$0.02-0.03/урок, плюс ~30% швидше TTFT на cache hits.
+- **Real content, not padding**: всі 700+ нових токенів — це реальні anti-pattern правила що покращують QA якість. ES/PT/IT тепер покриті false-friend traps які раніше пропускались. Formality drift детектиться явно. ToV violations ловляться окремим class-ом.
+- **Backward compat**: на clean translations (як в останньому прогоні the_anchor) Verify повертає текст unchanged — `text_translated` колонка не повинна змінитись. Якщо побачимо unexpected правки на clean rows → over-correction issue.
+- **Source of truth = on-disk**: користувач підтвердив що re-import W2.json у n8n після правки. JSON тепер canonical, n8n re-imports на запит.
+
+Tradeoffs:
+- **Verify Translations тепер додає ~$0.04/урок (Sonnet input + output)** до повного pipeline cost. Cache знижує до ~$0.025 коли активний. Acceptable bottleneck — quality improvement > cost.
+- **Cache misses на нових сегментах**: якщо за 5 хвилин не приходить cache hit (TTL = 5 min ephemeral), оплачуємо knowledge-recreation. Для batched lesson processing — несуттєво (всі 4 батчі в одній сесії укладаються в 30-60 секунд).
+- **QA може over-correct**: розширений промпт явно каже "return unchanged when clean", але якщо побачимо arbitrary tweaks на добрих перекладах — варто додати length-floor exception або тоніше формулювання. Моніторити перші 3-5 прогонів.
+
+Conflict with prior decisions: complements `TRANSLATION_QA_AND_ANTIPATTERN_RULES` (2026-05-19) — це та сама three-layer defense, тільки тепер `Verify Translations` нода фактично в репо JSON-і, не тільки в n8n.
+
+Files changed:
+- `workflows/W2_Translate_v2.json` — додано Verify Translations ноду (1 нода, ~5KB jsCode), переписано connections.
+- `workflows/W_Master.json` — Slack credential ID + webhookId.
+
+Verification:
+- Всі 4 Code-ноди парсяться: `node -e "for (const f of [...]) for (const n of require('./workflows/'+f).nodes) new Function('return (async function(){'+n.parameters.jsCode+'\\n})')()"`
+- QA_SYSTEM length перевірка: `node -e "console.log(require('./workflows/W2_Translate_v2.json').nodes.find(n=>n.name==='Verify Translations').parameters.jsCode.match(/QA_SYSTEM = \\\`([\\s\\S]*?)\\\`;/)[1].length)"` → 4469.
+- Post-deploy: re-import W2.json у n8n, прогнати лекцію з 16+ сегментами (форсує 2+ Verify батчі), глянути на console.log `resp.usage` — очікувано `cache_creation_input_tokens > 1000` на batch 1, `cache_read_input_tokens > 1000` на batch 2.
