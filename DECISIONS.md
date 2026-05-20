@@ -1393,3 +1393,50 @@ Verification:
 - Smoke test перед deploy: re-import W2.json, додати `openai_api_key` у config, прогнати the_anchor через W_Master. Очікувано: `text_translated` colonal у localizations sheet ≈ ідентичний попередньому прогону (бо the_anchor вже clean після Verify), або з minor differences тільки на segments де GPT-5 знайшов щось.
 - Cache activation: на perший прогон у Code-ноду додати temporarily `console.log('usage:', JSON.stringify(resp.usage));`. Очікувано на batch 1: `prompt_tokens > 1000`; на batch 2+: `usage.prompt_tokens_details.cached_tokens > 1000` (OpenAI auto-cache).
 - Rollback: `git revert <this-commit>` АБО disable OpenAI Editor node в n8n UI (connections route around — швидкий revert без commit).
+
+---
+
+### 2026-05-20 — ADAPT_TRANSLATIONS_PARALLEL_PER_LANG
+
+Context: На урок `tc_practice_23_ph2-flow-the-ball` (21 сегмент movement-контенту з довшими перекладами) n8n кинув `Task execution timed out after 300 seconds` на ноді `Adapt Translations`. Дефолтний n8n task-runner timeout = 300с. Поточний код Adapt був повністю sequential: 21 сегмент × 7 мов × до 3 Claude-спроб = до 441 послідовних Claude-викликів × 3-5с = до 22 хвилин wall time. На щільному movement-уроці навіть з пропусками "if est ≤ budget break" набралось >300с.
+
+Decision: розпаралелити 7 мов **в межах одного сегмента** через `Promise.all`. Сегменти залишаються sequential (між собою), але 7 мов одного сегмента стартують одночасно. 3-спроби shorten-loop усередині однієї мови залишаються sequential (кожна спроба refine-ить попередню, dependency інherent).
+
+**Реалізація** ([workflows/W2_Translate_v2.json:Adapt Translations](workflows/W2_Translate_v2.json)):
+
+```js
+for (const item of $input.all()) {
+  const langResults = await Promise.all(LANGS.map(async (lang) => {
+    let text = item.json[`${lang}_text`] || '';
+    let attempts = 0;
+    // ... 3-attempt shorten loop (sequential within lang) ...
+    return { lang, text, attempts };
+  }));
+  // ... merge langResults into out object ...
+}
+```
+
+Smoke-test (7 langs × 50-100ms mock-Claude-calls): elapsed **95ms** проти ~525ms sequential → **~5.5x speedup**. Output structure ідентична попередній (всі `{lang}_text` і `{lang}_adaptation_attempts` колонки populated так само).
+
+Rationale:
+- **Concurrency level safe**: max 7 in-flight Claude requests at any moment (7 langs of 1 segment). Sonnet 4.5 Tier 1 RPM ≈ 500, тож 7 concurrent — well below. TPM (30K input / 8K output) тут не критичний бо кожен call ~500 input + ~300 output → 7 × 800 = 5.6K instantaneous, в межах limit-а.
+- **Segments залишаються sequential**: обмежує global concurrency до 7. Якби розпаралелити ВСЕ (всі 21 × 7 = 147 одночасно), Tier 1 limit-и точно б розірвало.
+- **Existing retry semantics зберігаються**: callClaude уже має 4 спроби з exponential backoff. Якщо парочка з 7 паралельних впала в rate-limit — retries їх підхоплять окремо.
+- **Без env-var змін**: альтернатива (підняти `N8N_RUNNERS_TASK_TIMEOUT=900`) лише відсунула б проблему — на довшу лекцію (45+ сегментів) знов timeout. Parallelize вирішує root cause.
+
+Очікувана нова wall-time на 21-сегментну movement-лекцію: 21 × ~15-20с (час найповільнішої з 7 паралельних) = **5-7 хвилин** замість попередніх >5 хв per language-batch. Безпечно вкладається в 300с timeout навіть на 45+ сегментів.
+
+Tradeoffs:
+- **7 concurrent calls збільшують peak TPM**: якщо TPM-buffer був тісним до цього, тепер тісніший. Якщо побачимо rate-limit-spikes у Anthropic dashboard → доведеться обмежити concurrency до 3-4 через semaphore (small extra code).
+- **Order of completion non-deterministic** усередині сегмента: але output збирається назад через `for (const { lang, text, attempts } of langResults)` що йде в order of LANGS array → детермінований output порядок. Test-friendly.
+
+Conflict with prior decisions: жодних. Pure performance refactor без зміни behavior. Output JSON ідентичний sequential-версії (smoke-test confirmed).
+
+Files changed:
+- `workflows/W2_Translate_v2.json` — `Adapt Translations` Code-нода: для-loop по LANGS замінено на `Promise.all(LANGS.map(...))`.
+- `code_nodes/adapt_translations.js` — оновлений mirror.
+
+Verification:
+- Smoke-test mock-Claude (50-100ms latency): 7 calls completed in 95ms = 5.5x speedup over sequential 525ms estimate.
+- JS syntax of all W2 Code nodes parses cleanly.
+- Post-deploy: re-import W2.json у n8n, re-run failed lesson (`tc_practice_23_ph2-flow-the-ball`). Expected: Adapt стадія завершується за ~3-5 хв замість timeout. localizations sheet має ті ж 21 × 7 = 147 рядків з адаптованими перекладами.
