@@ -62,6 +62,8 @@ The Drive trigger watches *file-created* events only — moving an existing file
 | Prepare and Expand (Code) | Builds **batched** Claude translate requests (default 8 segments per batch). System prompt cached via `cache_control: ephemeral`; user content is a JSON map `{segment_id: {text, type?, key_concepts?}}`. Filters by `lesson_id` prefix. |
 | Wait + Claude Translate | Rate-limit-safe per-batch translation. Retries up to 4× with 5s backoff on HTTP errors. |
 | Extract Translations (Code) | Parses batched JSON response (`{segment_id: {de, es, fr, pl, pt, it, tr}}`), emits one item per segment. Defensive skip on empty/missing segment in batch. |
+| Verify Translations (Code) | **Sonnet self-QA**: in-Code-node HTTP calls to Claude Sonnet 4.5 with anti-pattern rules (false friends, formality drift, ToV violations). QA_SYSTEM ≥1024 tokens with `cache_control: ephemeral` → batches 2-4 hit cache. Returns text unchanged when clean. Reads `anthropic_api_key` from config. |
+| OpenAI Editor (Code) | **GPT-5 cross-model second-pass**: in-Code-node HTTP calls to OpenAI `chat/completions` with same Class 1/2/3 rules as Verify. Strict editor (returns clean translations unchanged). EDITOR_SYSTEM ≥1024 tokens → OpenAI auto-cache. Reads `openai_api_key` from config; throws if missing. Disable in n8n UI to skip the stage without removing the node. |
 | Adapt Translations (Code) | CPS-based estimation + up to 3-tier Claude shorten loop per (segment × lang) when text won't fit. |
 | Update Sheet | Append/update `{lang}_text` + `{lang}_adaptation_attempts` columns |
 

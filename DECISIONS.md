@@ -1332,3 +1332,64 @@ Verification:
 - Smoke test з реальними DE рядками the_anchor: 4 cues, valid WebVTT format, точні таймінги.
 - Після re-import у n8n: один повний прогон → у Drive `vtt/` папці має з'явитись 7 файлів `the_anchor_full_*.vtt`.
 - Cross-check: cue timings у DE.vtt мають збігатись з ES.vtt (один і той самий EN timeline) — підтверджує що borrow compensation працює.
+
+---
+
+### 2026-05-20 — OPENAI_GPT5_CROSS_MODEL_EDITOR
+
+Context: W2 translation pipeline до цього моменту повністю на Claude Sonnet 4.5 — і переклад, і self-QA (`Verify Translations`). Це **same-family self-review** — Sonnet перевіряє свій же output, з однаковими training biases. Систематичні сліпі плями моделі за визначенням не виявляються її ж self-review. Класична відповідь на цю проблему — cross-model judge: другий редактор з іншої сімейки моделей (OpenAI) ловить що Sonnet QA пропустив.
+
+Decision: додано ноду `OpenAI Editor` (GPT-5) у W2, **між `Verify Translations` і `Adapt Translations`**. 4-шарова translation defense тепер виглядає так:
+
+```
+Extract Translations → Verify Translations (Sonnet self-QA)
+                    → OpenAI Editor (GPT-5 cross-model second-pass)
+                    → Adapt Translations (Sonnet CPS shorten)
+                    → Update Sheet
+```
+
+**Роль — strict editor**: prompt-rule #1 = "If a translation is already clean, RETURN IT UNCHANGED. Do not modify wording, rhythm, or word choice just because you would phrase it differently. Style is a matter of taste; only intervene on objective issues you can name." Це primary lever проти over-correction. Як Verify Translations, охоплює три класи: false friends (з ES/PT/IT additions), formality drift (per-lang explicit address rules), ToV violations.
+
+**Реалізація** ([workflows/W2_Translate_v2.json:OpenAI Editor](workflows/W2_Translate_v2.json)):
+- Code-нода батчить items по 8 (так само як Verify), POST до `api.openai.com/v1/chat/completions`
+- Model: `gpt-5`. `response_format: { type: 'json_object' }` структурно забезпечує JSON output.
+- Auth: `Authorization: Bearer ${openai_api_key}` (з config sheet)
+- EDITOR_SYSTEM = 4690 chars / ~1173 токени → вище 1024-token threshold для OpenAI auto-cache → batches 2-4 платять 50% за cached input
+- Retry: 4 спроби з exponential backoff (2s/4s/8s). На final failure → empty corrections → items pass through з Verify-clean текстом (no silent data loss)
+- Fail-fast: якщо `openai_api_key` відсутній у config → throws upfront, W2 зупиняється (no half-applied editorial)
+
+**Місце вставки чому так**:
+- AFTER Verify, BEFORE Adapt — Editor бачить QA-cleaned текст і не воює зі скороченнями Adapt
+- Якщо було б AFTER Adapt — Editor міг би "un-shorten" текст, ламаючи timing budget що ретельно витриманий Adapt-ом
+- Якщо було б BEFORE Verify — теряли б valuable Sonnet QA які OpenAI міг би випадково перетерти
+
+Rationale:
+- **Cross-model diversity**: різна тренувальна data, різні bias-патерни. Sonnet чудово ловить свої pattern-и в self-QA, але систематично пропускає те що відрізняється від його preferences. GPT-5 ловить інше.
+- **Premium model вибраний свідомо**: на короткі meditation affirmations нюанси (warmth, register, idiom) важать більше за raw accuracy. GPT-5 краще handle-ить це ніж 4o.
+- **Strict role не stylist**: рисик стиліста — переписує добрий Sonnet-переклад на свою альтернативну версію, не кращу, не гіршу, просто іншу. Це noise, не value. Strict-mode виключає це.
+- **Same anti-pattern rules across both models**: value не в різному rulebook-у, а в різному reviewer-і. Обидва enforce те саме (false friends, formality, ToV), а cross-model перевірка ловить gaps в self-coverage.
+
+**Cost expectation** (на typical 31-segment lesson):
+- 4 batches × ~6-8K input tokens × $10/MTok GPT-5 = ~$0.30 input (без cache)
+- З auto-cache на batches 2-4: ~$0.20 input
+- Output ~3K tokens × 4 batches × $40/MTok = ~$0.50 output (mostly empty corrections → much less)
+- Realistic: $0.10-0.20/lesson. Monitor після 3-5 lessons на platform.openai.com.
+
+**Файлові зміни**:
+- [workflows/W2_Translate_v2.json](workflows/W2_Translate_v2.json) — додано ноду `OpenAI Editor` (17 нод тепер замість 16), переписано connections `Verify Translations → OpenAI Editor → Adapt Translations` (раніше Verify → Adapt).
+- [code_nodes/openai_editor.js](code_nodes/openai_editor.js) — новий mirror.
+- [docs/config_keys.md](docs/config_keys.md) — додано `openai_api_key` row.
+- [workflows/README.md](workflows/README.md) — додано рядки про Verify Translations і OpenAI Editor у W2 node table (раніше Verify взагалі не був задокументований у README, тільки в DECISIONS).
+
+Tradeoffs:
+- **Disagreement risk**: якщо GPT-5 "fixes" речі які Sonnet правильно обрав → quality regression. PRIMARY RULE про "return unchanged" — perşt захист. Якщо побачу що GPT-5 змінює >30% cells → strict-mode недостатньо strict; tighten EDITOR_SYSTEM.
+- **Cost**: ~$0.10-0.20/lesson премія. На production load (5-10 lessons/day) — $30-60/month. Прийнятно за quality lift.
+- **Single-point-of-failure**: якщо OpenAI API down або API key revoked, W2 зупиняється (fail-fast). Trade-off за data integrity — краще fail clean ніж silently pass through unedited.
+- **Latency**: +5-15с до W2 wall time (4 sequential batches × ~3-5с per GPT-5 call). На повний pipeline це <5% addition.
+
+Conflict with prior decisions: **extends** `TRANSLATION_QA_AND_ANTIPATTERN_RULES` (2026-05-19) — це той самий three-layer defense pattern, тепер з cross-model variation. Не конфліктує з `QA_SYSTEM_EXPANSION_FOR_CACHE_AND_COVERAGE` (2026-05-20) — навпаки, both QA stages ділять однакову rulebook структуру, що зменшує cognitive load на майбутні правки prompts.
+
+Verification:
+- Smoke test перед deploy: re-import W2.json, додати `openai_api_key` у config, прогнати the_anchor через W_Master. Очікувано: `text_translated` colonal у localizations sheet ≈ ідентичний попередньому прогону (бо the_anchor вже clean після Verify), або з minor differences тільки на segments де GPT-5 знайшов щось.
+- Cache activation: на perший прогон у Code-ноду додати temporarily `console.log('usage:', JSON.stringify(resp.usage));`. Очікувано на batch 1: `prompt_tokens > 1000`; на batch 2+: `usage.prompt_tokens_details.cached_tokens > 1000` (OpenAI auto-cache).
+- Rollback: `git revert <this-commit>` АБО disable OpenAI Editor node в n8n UI (connections route around — швидкий revert без commit).
