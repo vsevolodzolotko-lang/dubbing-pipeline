@@ -1706,3 +1706,73 @@ Lessons learned:
 1. **Diagnostic-first debugging**: 3 дні chasing симптоми (empty pcm, empty WAVs, batchSize, rate limits) поки не дамповнули повну `binary.data` structure. Урок — при `binary` проблемах ВІДРАЗУ dump `Object.keys(binary.data)` and check for filesystem-mode markers (`id`, `fileSize`).
 2. **n8n filesystem mode docs gotcha**: документація n8n говорить про `getBinaryDataBuffer` але приховує що `binary.data.data` змінює semantics. Easy trap для Code-нод-розробників.
 3. **Cross-decision dependency**: enabling filesystem mode requires Code-нод-аудит. Якщо є nodes що читають `binary.data.data` directly — вони ламаються. Слід було ловити це ще під час 7090296 (memory refactor), але без e2e тесту не помітили.
+
+---
+
+### 2026-05-21 — W2_BOUNDED_CONCURRENT_BATCHES
+
+Context: Після стабілізації W3 (всі silent-audio bugs закриті у `9d2b299`), наступне вузьке місце — W2 latency на великих файлах. Користувач спостерігає:
+- 2-сегментна лекція: ~1m 4s wall time (переважно GPT-5 latency на one batch + Wait 4s + Sonnet calls)
+- Великі файли (~50+ сегментів) **впираються у n8n's 300s task-runner timeout** в одній з QA Code-нод
+
+Користувач НЕ хоче просто бампати `N8N_RUNNERS_TASK_TIMEOUT`. Це band-aid, не fix. Шукаємо elegant approach.
+
+Корінь проблеми: `Verify Translations` і `OpenAI Editor` обидва процесять батчі sequential через `for (const batch of batches) { await callAPI(...) }`. Для 50-сегментної лекції (≈7 батчів при QA_BATCH_SIZE=8):
+- Verify (Sonnet 4.5, ~12s/batch): 7 × 12 = ~84с sequential
+- OpenAI Editor (GPT-5, ~30s/batch — slow on JSON-mode batched output): 7 × 30 = **~210с sequential**
+
+GPT-5 sequential alone з'їдає majority of 300s budget. Плюс Translate, Adapt, sheet I/O — easy timeout.
+
+Decision: **bounded-concurrent batch processing** — обробляти CHUNK=3 батчі паралельно через Promise.all, sequential між chunk-ами. Existing retry/backoff в callQA/callEditor поглинає occasional 429s.
+
+**Реалізація** ([workflows/W2_Translate_v2.json](workflows/W2_Translate_v2.json), обидві Code-ноди):
+
+```js
+const CHUNK = 3;
+const corrections = {};
+async function runOneBatch(batch) {
+  // build userMap, body, call API, parse
+  return partialCorrections;
+}
+for (let i = 0; i < batches.length; i += CHUNK) {
+  const slice = batches.slice(i, i + CHUNK);
+  const partial = await Promise.all(slice.map(b => runOneBatch.call(this, b)));
+  for (const p of partial) Object.assign(corrections, p);
+}
+```
+
+**Math на 7-batch лекції**:
+- Verify: 84s → 36s (3 chunks × 12s)
+- OpenAI Editor: 210s → 90s (3 chunks × 30s)
+- Combined W2 wall time: easily fits in 300s
+
+Rationale:
+- **Cap=3 не unlimited Promise.all**: OpenAI Tier 1 = ~30K TPM на GPT-5. 7 паралельних × 6K input = 42K → 429. 3 паралельних × 6K = 18K — safe.
+- **Anthropic Sonnet 4.5 output 8K TPM** на Tier 1: 3 концурентних × ~3K output у тому самому 10s-вікні = 9K — borderline але retry-backoff (4 спроби, 2s/4s/8s) absorb-ить.
+- **Existing retry logic не змінюємо**: callQA/callEditor вже мають 4 спроби з exponential backoff. Параллельні запити при 429 retry-ять незалежно — natural rate-limit governor.
+- **Не парлелізуємо Adapt Translations**: вже має 7-lang parallel per segment (Promise.all всередині). Outer segment loop sequential → max 7 concurrent Claude calls на будь-який момент. Acceptable.
+- **Не парлелізуємо Claude Translate** (HTTP node): n8n item-iteration semantics різні від Code-node loops. Має own retry. Less obvious win, more invasive. Skip for now.
+
+Tradeoffs:
+- **Prompt cache hit rate drops**: Anthropic ephemeral cache і OpenAI auto-cache obидва relyю на sequential ordering для cache hits. Параллельні chunk-and 1-3 batches миссують cache бо all fire до того як first завершила створення. Estimated extra cost ~$0.05/big lesson. Acceptable trade.
+- **No effect on 2-segment 1m 4s case**: тільки 1 batch — Promise.all no-op. Якщо user пізніше захоче speed up small files, можемо розглянути gpt-5-mini для OpenAI Editor (3-5x faster, deg quality drop).
+- **OpenAI Tier 1 actual limits unknown**: my estimate 30K TPM може бути off. Якщо 3-concurrent тригерить 429 кожен прогон → drop CHUNK to 2 в follow-up.
+
+Conflict with prior decisions: complements `ADAPT_TRANSLATIONS_PARALLEL_PER_LANG` (2026-05-20) — той fix паралелізував within-segment (7 langs concurrent), цей паралелізує within-stage (3 batches concurrent). Узяті разом: для 50-seg лекції W2 проходить за ~3 хв замість timeout-у.
+
+Files changed:
+- `workflows/W2_Translate_v2.json` — Verify Translations і OpenAI Editor batch loops refactored to chunked Promise.all
+- `code_nodes/openai_editor.js` — mirror sync
+
+User-action:
+- Re-import W2.json у n8n
+- Verification: 2-seg lesson (test4) має пройти за ~same 1m 4s (1 batch, нема speedup, нема regression). 20+ seg lesson має пройти за 2-3хв замість timeout.
+
+Verification:
+- JS syntax of W2 Code nodes parses cleanly
+- Structural check: CHUNK=3 + Promise.all(slice.map(...)) present in both nodes ✓
+- На live test після re-import: cost dashboard має показати slightly менше cached-input savings (extra ~$0.05 на big lesson) — acceptable
+
+Future work:
+- gpt-5-mini для OpenAI Editor як спосіб прискорити single-batch latency (small files)
+- Якщо великі лекції (100+ segs) стануть нормальними — додати dynamic CHUNK sizing based on batch count і/або rate-limit-aware semaphore замість fixed cap

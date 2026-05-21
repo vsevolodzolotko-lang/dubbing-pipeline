@@ -90,8 +90,13 @@ const items = $input.all();
 const batches = [];
 for (let i = 0; i < items.length; i += QA_BATCH_SIZE) batches.push(items.slice(i, i + QA_BATCH_SIZE));
 
+// Bounded-concurrent batch processing: process CHUNK batches in parallel via
+// Promise.all, sequential between chunks. Avoids n8n's 300s task-runner timeout
+// on big lessons (GPT-5 is ~30s/batch, 7 batches sequential = 210s).
+// Cap=3 respects OpenAI Tier 1 (~30K TPM on GPT-5).
+const CHUNK = 3;
 const corrections = {};
-for (const batch of batches) {
+async function runOneEditorBatch(batch) {
   const userMap = {};
   for (const it of batch) {
     const j = it.json;
@@ -113,8 +118,14 @@ for (const batch of batches) {
   try {
     const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     const match = cleaned.match(/\{[\s\S]*\}/);
-    if (match) Object.assign(corrections, JSON.parse(match[0]));
+    if (match) return JSON.parse(match[0]);
   } catch (e) { console.error('OpenAI Editor parse error:', e.message); }
+  return {};
+}
+for (let i = 0; i < batches.length; i += CHUNK) {
+  const slice = batches.slice(i, i + CHUNK);
+  const partial = await Promise.all(slice.map(b => runOneEditorBatch.call(this, b)));
+  for (const p of partial) Object.assign(corrections, p);
 }
 
 // Apply corrections: if GPT-5 returned a value for a lang, use it; else keep original.
