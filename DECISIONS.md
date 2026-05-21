@@ -1558,3 +1558,63 @@ Verification:
 Future work (не зараз):
 - Resumable W3 (skip-if-real_duration>0) — відкладено за explicit user request. Корисно щоб не перепрогонувати весь лесон коли треба тільки fix 2-3 сегменти.
 - Параметризація batchSize через config sheet — якщо знайдемо безпечний higher batchSize-value, винесемо в config щоб тюнити без re-import.
+
+---
+
+### 2026-05-21 — W3_TIGHTEN_PCM_GUARD_FROM_ZERO_TO_100MS_THRESHOLD
+
+Context: Після `a60c7c2` (batchSize=1 + Wait 1.5s) і re-import-у в n8n, прогон знову дає `real_duration_sec=0` + `needs_attention=FALSE` на всіх рядках + audio-файли у Drive нормального розміру (438KB) але silence-only всередині. Тобто фікс batchSize не допоміг, і empty-buffer guard `de1ba8c` не спрацьовує.
+
+**Root cause** (нарешті точна): ElevenLabs повертає **HTTP 200 з мікроскопічним body** (~50-300 байтів) — найімовірніше JSON error blob, redirect, або partial response. n8n materializes це як binary з невеликим, але **не нульовим** payload. Тоді:
+
+- `binaryData?.data` truthy (string з base64)
+- `Buffer.from(base64, 'base64')` → Buffer з кількома сотнями байтів (декодуючи JSON-text як bytes)
+- `pcm.length === 0` → false → попередній guard не firing
+- `pcmDuration(pcm) = pcm.length / 44100 ≈ 0.005s` → `toFixed(3) = "0.005"` АБО для ще меншого buffer-а → "0.000" → parseFloat = 0
+- В sheet записується `real_duration_sec: 0`
+- Normal pad-path виконується: lead+empty+tail silence WAV
+- `needs_attention: FALSE` бо silent-placeholder branch не firing
+
+Виправлення:
+1. **Поріг 100ms PCM** (= 4410 байтів @ 22050Hz × 2BPS). Будь-який buffer менше за це треба вважати failure → pcm = null → silent-placeholder branch фірить → needs_attention=TRUE.
+2. **Diagnostic console.error** при дропі під поріг — preview перших 200 байтів decoded content. Дозволяє побачити що саме ElevenLabs повертає (JSON error blob? rate-limit msg? empty?). Видно у n8n executions log.
+3. **Окремий діагностичний `console.error`** коли `binaryData?.data === undefined` (HTTP node взагалі не attached binary, тобто `onError: continueRegularOutput` повністю проковтав запит). Розрізняє два failure modes.
+
+Code-change ([workflows/W3_Synthesize_v2.json](workflows/W3_Synthesize_v2.json) `Check Timing + Pad`):
+
+```js
+const MIN_VALID_PCM_BYTES = 4410;  // 0.1s × 22050 × 2
+if (pcm && pcm.length < MIN_VALID_PCM_BYTES) {
+  const preview = pcm.length > 0
+    ? Buffer.from(binaryData.data, 'base64').toString('utf8', 0, Math.min(200, pcm.length))
+    : '(empty)';
+  console.error(`TTS response too small for ${segment_id}_${lang}: ${pcm.length} bytes (< ${MIN_VALID_PCM_BYTES} threshold). Content preview: ${JSON.stringify(preview)}`);
+  pcm = null;
+}
+```
+
+Rationale:
+- **100ms threshold**: навіть найкоротший склад у TTS ~150ms, тож 100ms — безпечний floor. Меньше — точно error response, не аудіо.
+- **Чому diagnostic preview**: без нього ми досі guessing що ElevenLabs повертає. З prev-200-chars видно: `{"error":"rate_limit"}`, або `{"message":"quota exceeded"}`, або щось ще. Це дасть ROOT CAUSE upstream.
+- **Залишаємо guard навіть з batchSize=1**: bound concurrency допомагає АЛЕ якщо ElevenLabs має globally-bad day (quota issue), все одно треба правильно flag-ити невдачі.
+
+Tradeoffs:
+- **False positives**: якщо ElevenLabs реально повертає короткий валідний PCM (~50ms TTS), цей guard виставить needs_attention=TRUE даремно. На практиці — мінімальний risk; типовий segment ≥1s аудіо.
+- **Diagnostic spam**: на повному фейлі (всі 147 items broken) лог буде шумним. Прийнятно для діагностики; після з'ясування root cause можна зменшити verbosity.
+
+Conflict with prior decisions: доповнює `W3_EMPTY_BUFFER_GUARD_AND_BUILD_FULL_DIAGNOSTICS` (2026-05-20) і `W3_BATCHSIZE_GOTCHA_AND_RATE_LIMIT_HARDENING` (2026-05-21). Це третій layer захисту — структурно той самий fix-pattern (guard + log + needs_attention flag) але з реалістичнішим threshold.
+
+Files changed:
+- `workflows/W3_Synthesize_v2.json` — Check Timing + Pad guard tightened to 100ms threshold + diagnostic console.error
+- `code_nodes/check_timing_and_pad.js` — mirror sync
+
+User-action item (КРИТИЧНО):
+- Re-import W3.json у n8n ЩЕ РАЗ (вибач, попередній re-import з batchSize fix теж зробив, тепер потрібен другий — або просто видалити старий і імпортувати свіжий)
+- Прогнати ще раз → у localizations sheet тепер БУДЕ `needs_attention=TRUE` на проблемних рядках
+- У n8n executions log → дивитись на `console.error` повідомлення з ноди Check Timing + Pad — там буде `TTS response too small for X: N bytes. Content preview: "..."` — це покаже точну ElevenLabs відповідь
+- Поділитись цим preview — дасть точний root cause (quota? rate? key issue? API change?)
+
+Future work (після з'ясування ElevenLabs відповіді):
+- Якщо JSON error з конкретним кодом → handler у `tts()` retry-loop для exponential backoff на цьому коді
+- Якщо 200-with-empty-body → треба переключати ElevenLabs HTTP node на `onError: stopWorkflow` (приймемо швидкий fail замість мовчазного silence)
+- Якщо HTTP-level помилка проковтнута без binary → треба міняти `onError` на upstream node

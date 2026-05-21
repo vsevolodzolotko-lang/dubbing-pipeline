@@ -58,15 +58,28 @@ const maxAllowed          = isShortSeg ? slot : enDur;
 
 const binaryData = $input.first().binary?.data;
 let pcm  = binaryData?.data ? Buffer.from(binaryData.data, 'base64') : null;
-// Treat empty Buffer (length=0) the same as null — empty Buffer is JS-truthy but
-// represents the same failure mode (ElevenLabs returned no audio bytes). Without
-// this, the silent-placeholder branch below was bypassed, produced silence-only
-// WAVs, and silently set needs_attention=FALSE — pipeline appeared successful
-// while emitting empty content.
-if (pcm && pcm.length === 0) pcm = null;
+// Failure threshold: anything shorter than 100ms of PCM (4410 bytes at 22050Hz
+// mono 16-bit) is treated as a failed TTS response. ElevenLabs sometimes returns
+// HTTP 200 with a small error blob (JSON error message, redirect, partial
+// response) that n8n materializes as a non-empty Buffer. The PREVIOUS guard only
+// caught buffer.length === 0; tiny-but-nonzero buffers slipped through, got
+// pcmDuration ≈ 0.001s which rounds to 0 in toFixed(3), produced silence-padded
+// WAVs without setting needs_attention=true. Result: pipeline appeared successful
+// while emitting silence and the user had no signal that TTS failed.
+const MIN_VALID_PCM_BYTES = 4410;  // 0.1s × 22050 × 2
+if (pcm && pcm.length < MIN_VALID_PCM_BYTES) {
+  // Diagnostic: log what we actually got so we can identify upstream cause
+  // (JSON error blob, empty body, etc.). Truncate to first 200 chars to avoid
+  // log spam; only meaningful if response was small enough to be an error msg.
+  const preview = pcm.length > 0
+    ? Buffer.from(binaryData.data, 'base64').toString('utf8', 0, Math.min(200, pcm.length))
+    : '(empty)';
+  console.error(`TTS response too small for ${segment_id}_${lang}: ${pcm.length} bytes (< ${MIN_VALID_PCM_BYTES} threshold). Content preview: ${JSON.stringify(preview)}`);
+  pcm = null;
+}
 let text = job.text;
 let initialTtsFailed = !pcm;
-if (initialTtsFailed) console.error(`Initial ElevenLabs TTS produced no audio bytes for ${segment_id}_${lang} — will emit silent placeholder WAV (needs_attention=true)`);
+if (initialTtsFailed && !pcm && binaryData?.data === undefined) console.error(`Initial ElevenLabs TTS produced no binary at all for ${segment_id}_${lang} — likely HTTP error swallowed by onError. Emitting silent placeholder.`);
 
 function pcmDuration(buf) { return buf.length / (SAMPLE_RATE * BPS); }
 
