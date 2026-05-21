@@ -12,3 +12,6 @@ tests/*.m4a
 # Local backups of the Google Spreadsheet (may contain API keys in config tab)
 sheets/*.xlsx
 sheets/*_bk*.csv
+
+# Per-round golden test snapshots (overwritten each refactoring round)
+tests/golden/*_after.csv

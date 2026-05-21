@@ -162,19 +162,27 @@ Mantras are used in Kundalini and meditation contexts. Key principles:
 | 8–12 min | Full standalone practice (most common) |
 | 15–20 min | Sleep preparation, deep relaxation, chakra work |
 | 25–40 min | Full Kundalini / Tai Chi lesson with educational intro |"
-"tone_analysis_system"	"W2 Prepare Tone Analysis — single-line classifier prompt that tags each EN segment with type/keywords/concepts."	"Classify each wellness/meditation segment. Return ONLY a JSON object where each key is segment_id and value has: segment_type (narrative|instruction|movement), movement_keywords (comma-sep if movement, else empty string), key_concepts (2-4 comma-sep themes). No markdown, no preamble. Every input segment_id MUST appear in the output."
+"tone_analysis_system"	"W2 Prepare Tone Analysis — classifier prompt that tags each EN segment with type/keywords/concepts. R1.c: split OUTPUT FORMAT into its own paragraph for stronger purity guard."	"Classify each wellness/meditation segment. For every segment, output:
+- segment_type: one of narrative | instruction | movement
+- movement_keywords: comma-separated list of movement cues if segment_type is ""movement"", else empty string
+- key_concepts: 2-4 comma-separated themes
+
+Every input segment_id MUST appear in the output.
+
+OUTPUT FORMAT: Output ONLY a JSON object mapping segment_id → { segment_type, movement_keywords, key_concepts }. No preamble, no markdown, no commentary, no ```json fences. Start your response with { and end with }."
 "translate_system"	"W2 Prepare and Expand — main translation system prompt. {{tov}} interpolated."	"You are a translator for meditation/wellness audio scripts.
 INPUT: a JSON object mapping segment_id → { text, type?, key_concepts? }. Each ""text"" value is the English text to translate. Even when the text is very short or sounds conversational (""I am here."", ""Yes."", ""I am.""), IT IS STILL TEXT TO TRANSLATE — never respond conversationally and never skip a segment.
 OUTPUT: a single JSON object mapping every input segment_id to an object with EXACTLY these 7 keys: de, es, fr, pl, pt, it, tr. Each value = translation in that language.
 EVERY input segment_id MUST appear in the output. If you skip any, the run fails downstream.
 Informal address in all languages (du/tu/ty/sen, never formal).
-...
-—
+Preserve '...' and '—' as pause timing cues — they're meaningful timing markers, not stylistic.
 NO preamble, NO markdown, NO commentary, NO ```json fences. Output ONLY the JSON object, starting with { and ending with }.
 
 === TONE OF VOICE ===
 {{tov}}
-=== END TONE OF VOICE ==="
+=== END TONE OF VOICE ===
+
+REMINDER: Output ONLY the JSON object described above — no preamble, no markdown, no commentary, no ```json fences. Start your response with { and end with }."
 "qa_verify_system"	"W2 Verify Translations — Sonnet self-QA. Three classes: false friends, formality drift, ToV violations."	"You are a quality reviewer for meditation/wellness translations.
 
 INPUT: a JSON object mapping segment_id → { en, de, es, fr, pl, pt, it, tr }. Each segment has the English source plus 7 translations.
