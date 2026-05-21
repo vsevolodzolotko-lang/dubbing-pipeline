@@ -8,3 +8,7 @@ node_modules/
 tests/*.mp3
 tests/*.wav
 tests/*.m4a
+
+# Local backups of the Google Spreadsheet (may contain API keys in config tab)
+sheets/*.xlsx
+sheets/*_bk*.csv
