@@ -56,30 +56,48 @@ const SHORT_SEG_THRESHOLD = parseFloat(configMap.short_seg_threshold_sec) || 2.0
 const isShortSeg          = enDur > 0 && enDur < SHORT_SEG_THRESHOLD && slot > enDur;
 const maxAllowed          = isShortSeg ? slot : enDur;
 
-const binaryData = $input.first().binary?.data;
-let pcm  = binaryData?.data ? Buffer.from(binaryData.data, 'base64') : null;
+const inputItem = $input.first();
+const binaryData = inputItem.binary?.data;
+
+// Capture full diagnostic snapshot for the warning field — visible in n8n
+// Output panel without needing log-level visibility. Used only on TTS failure.
+const failureDiag = {
+  hasBinarySlot:     !!inputItem.binary,
+  hasBinaryDataObj:  !!binaryData,
+  binaryDataKeys:    binaryData ? Object.keys(binaryData) : [],
+  hasDataField:      !!binaryData?.data,
+  dataFieldType:     binaryData?.data === undefined ? 'undefined' : typeof binaryData.data,
+  dataFieldLen:      typeof binaryData?.data === 'string' ? binaryData.data.length : null,
+  binaryMimeType:    binaryData?.mimeType || null,
+  binaryFileName:    binaryData?.fileName || null,
+  pcmBytes:          0,
+  contentPreview:    null,
+};
+
+let pcm = binaryData?.data ? Buffer.from(binaryData.data, 'base64') : null;
+if (pcm) {
+  failureDiag.pcmBytes = pcm.length;
+  // Capture preview before we potentially null pcm out — useful for diagnosing
+  // error JSON blobs, redirect text, etc. Plain ASCII gets shown readably;
+  // binary PCM gets shown as escaped chars (still useful — at least we see
+  // it's binary).
+  failureDiag.contentPreview = pcm.length > 0
+    ? Buffer.from(binaryData.data, 'base64').toString('utf8', 0, Math.min(200, pcm.length))
+    : '(empty)';
+}
+
 // Failure threshold: anything shorter than 100ms of PCM (4410 bytes at 22050Hz
 // mono 16-bit) is treated as a failed TTS response. ElevenLabs sometimes returns
 // HTTP 200 with a small error blob (JSON error message, redirect, partial
-// response) that n8n materializes as a non-empty Buffer. The PREVIOUS guard only
-// caught buffer.length === 0; tiny-but-nonzero buffers slipped through, got
-// pcmDuration ≈ 0.001s which rounds to 0 in toFixed(3), produced silence-padded
-// WAVs without setting needs_attention=true. Result: pipeline appeared successful
-// while emitting silence and the user had no signal that TTS failed.
+// response) that n8n materializes as a non-empty Buffer.
 const MIN_VALID_PCM_BYTES = 4410;  // 0.1s × 22050 × 2
 if (pcm && pcm.length < MIN_VALID_PCM_BYTES) {
-  // Diagnostic: log what we actually got so we can identify upstream cause
-  // (JSON error blob, empty body, etc.). Truncate to first 200 chars to avoid
-  // log spam; only meaningful if response was small enough to be an error msg.
-  const preview = pcm.length > 0
-    ? Buffer.from(binaryData.data, 'base64').toString('utf8', 0, Math.min(200, pcm.length))
-    : '(empty)';
-  console.error(`TTS response too small for ${segment_id}_${lang}: ${pcm.length} bytes (< ${MIN_VALID_PCM_BYTES} threshold). Content preview: ${JSON.stringify(preview)}`);
+  console.error(`TTS response too small for ${segment_id}_${lang}: ${pcm.length} bytes. Preview: ${JSON.stringify(failureDiag.contentPreview)}`);
   pcm = null;
 }
 let text = job.text;
 let initialTtsFailed = !pcm;
-if (initialTtsFailed && !pcm && binaryData?.data === undefined) console.error(`Initial ElevenLabs TTS produced no binary at all for ${segment_id}_${lang} — likely HTTP error swallowed by onError. Emitting silent placeholder.`);
+if (initialTtsFailed && !pcm && binaryData?.data === undefined) console.error(`Initial ElevenLabs TTS produced no binary at all for ${segment_id}_${lang} — likely HTTP error swallowed by onError.`);
 
 function pcmDuration(buf) { return buf.length / (SAMPLE_RATE * BPS); }
 
@@ -313,7 +331,7 @@ if (!pcm) {
             final_speed:                   1.0,
             needs_attention:               true,
             file_name:                     fileName,
-            warning:                       'ElevenLabs TTS failed after retries — silent placeholder WAV' },
+            warning:                       'ElevenLabs TTS failed — diag: ' + JSON.stringify(failureDiag) },
     binary: { data: { data: wav.toString('base64'), mimeType: 'audio/wav', fileName } }
   }];
 }
