@@ -1776,3 +1776,64 @@ Verification:
 Future work:
 - gpt-5-mini для OpenAI Editor як спосіб прискорити single-batch latency (small files)
 - Якщо великі лекції (100+ segs) стануть нормальними — додати dynamic CHUNK sizing based on batch count і/або rate-limit-aware semaphore замість fixed cap
+
+---
+
+### 2026-05-21 — W2_GEMINI_EDITOR_REPLACES_OPENAI_AS_DEFAULT
+
+Context: GPT-5 на OpenAI Editor займав ~30с/batch — це primary bottleneck для W2 на великих файлах і вагомо вплинуло на 1m+ wall time навіть на 2-сегментних test4. Користувач спитав про альтернативи: Gemini Flash, DeepSeek. Підрахунок показав що для нашого use case (multilingual EU editorial QA на 7 мовах — DE/ES/FR/IT/PL/PT/TR):
+
+- **Gemini 3.5 Flash** (щойно вийшов): ~5-8с/batch, ~10× дешевша за GPT-5, native JSON mode, **EU multilingual — найсильніша сторона Google** (Translate roots).
+- **DeepSeek V3**: дешева, але EU multilingual слабша (тренована переважно EN/ZH). Не підходить.
+- **GPT-5** (current): premium quality, але повільна і дорога. Edge на edge cases малопомітний для strict-editor role.
+
+Decision: переключити default editor на **Gemini 3.5 Flash**, **залишивши OpenAI Editor ноду на canvas як orphan** для швидкого swap-back / A-B тесту якщо Gemini деінде поступиться у якості.
+
+**Архітектура canvas-у** ([workflows/W2_Translate_v2.json](workflows/W2_Translate_v2.json)):
+- `Verify Translations` → `Gemini Editor` → `Adapt Translations` — active chain
+- `OpenAI Editor` — сидить на canvas позицією [2592, 1200] (під Gemini Editor), без жодних з'єднань — preserved as easy swap-back option
+
+**Реалізація Gemini Editor**: near-clone OpenAI Editor через Google's **OpenAI-compatible endpoint**:
+- URL: `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`
+- Auth: `Authorization: Bearer ${gemini_api_key}` (Bearer-style як OpenAI)
+- Body: standard OpenAI Chat Completions format (model, messages, response_format)
+- Model: `gemini-3.5-flash`
+- Реіспользується ВЕСЬ existing OpenAI Editor код через невеликі sed-replacements: config-key name, URL, model, function names. EDITOR_SYSTEM (~1100 токенів anti-pattern rules) лишається ІДЕНТИЧНИМ — language-agnostic.
+
+**Cross-model diversity preserved**: Sonnet (Anthropic) → Gemini (Google) — все ще два різних family bias. Architectural equivalence з попередньою Sonnet+OpenAI конструкцією.
+
+**Параллельність зберігається**: 9abaad8 chunked-concurrent (CHUNK=3) pattern inherited повністю. Жодних змін у параллельній логіці.
+
+Rationale:
+- **Multilingual edge для нашого use case**: Google Gemini Flash тренована на масивах перекладів — конкретно PL/TR/PT nuance ≥ GPT-5.
+- **5-10× swift wall-time** на batch (GPT-5 ~30с → Gemini ~5-8с). Для 7-batch лекції OpenAI Editor stage йшов 90с після parallelization, Gemini buде ~15-25с.
+- **10× cheaper** на input + output. Cost W2 stage drop з ~$0.10-0.20/lesson → ~$0.01-0.02.
+- **JSON mode reliable**: Gemini native `response_format: json_object` через OpenAI-compat endpoint.
+- **Easy revert**: OpenAI Editor нікуди не дівся — re-wire у n8n UI без коду.
+
+Tradeoffs:
+- **Якість на edge cases**: GPT-5 інколи краще ловить дуже субтильні false friends. Для strict-editor role ("return unchanged if clean") різниця мінімальна, але varies. Якщо помітимо regression на конкретних паттернах — re-wire OpenAI back.
+- **Gemini може бути "creative-вольний"**: Flash моделі схильні до style edits навіть коли не просили. Поточний EDITOR_SYSTEM має explicit "return UNCHANGED" rule як primary defense. Monitor.
+- **Prompt cache на Gemini**: implicit cache threshold у Gemini ~32K токенів, наш EDITOR_SYSTEM ~1100 — cache miss завжди. Але pricing уже такий низький що irrelevant.
+- **Один новий API key**: `gemini_api_key` у config (free tier на aistudio.google.com стільки що hardly use). Easy onboarding.
+
+Conflict with prior decisions: пом'якшує `OPENAI_GPT5_CROSS_MODEL_EDITOR` (2026-05-20) — той decision ввів cross-model editor але вибрав premium GPT-5. Тепер вибираємо Gemini Flash для same architectural goal з кращою economics. Сама cross-model судина (Sonnet + non-Anthropic editor) зберігається.
+
+Files changed:
+- `workflows/W2_Translate_v2.json` — додано Gemini Editor (active), орфановано OpenAI Editor (preserved on canvas)
+- `code_nodes/gemini_editor.js` — новий mirror
+- `docs/config_keys.md` — додано `gemini_api_key` (active) + reclassified `openai_api_key` (optional alternative)
+- `workflows/README.md` — W2 node table updated
+
+User-action:
+1. Отримати API key з [aistudio.google.com](https://aistudio.google.com/) → Get API key (free tier)
+2. Додати `gemini_api_key` рядок у config sheet
+3. Re-import W2.json у n8n
+4. Перший прогон — переконатись що Gemini не over-correct (порівняти `text_translated` з попереднім run)
+
+A-B revert path:
+- В n8n UI у W2 редакторі: видалити wire Verify → Gemini, додати Verify → OpenAI Editor, OpenAI Editor → Adapt. Зворотний swap без re-import.
+
+Future work:
+- Якщо A-B покаже Gemini уступає на конкретних мовах → залишити OpenAI Editor для тих мов через config-toggle на per-lang basis
+- Або: `editor_model` config-ключ для quick swap між `gemini-3.5-flash` / `gemini-3-pro` / `gpt-5` / `gpt-5-mini` без переписування connections
