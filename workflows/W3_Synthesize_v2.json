@@ -142,6 +142,7 @@
     },
     {
       "parameters": {
+        "batchSize": 1,
         "options": {}
       },
       "id": "ad2810af-d75f-43af-bf8d-7c3b5bf37715",
@@ -473,7 +474,7 @@
     },
     {
       "parameters": {
-        "amount": 0.5
+        "amount": 1.5
       },
       "id": "00fb688f-c80f-4e94-910a-4250e8bce424",
       "name": "Rate Limit Guard",

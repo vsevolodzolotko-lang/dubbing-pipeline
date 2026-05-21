@@ -1510,3 +1510,51 @@ Per-segment WAVs у Drive нормального розміру (від KB до 
 3. Якщо TTS знов падатиме: тепер у localizations sheet `needs_attention=TRUE` на проблемних рядках → можна frustration-free ре-тригерити по rows where TRUE
 4. Якщо повторно full WAV = 44 байти: глянути n8n execution log на Build Full Audio Per Lang — `console.warn` повідомлення скажуть точно чому всі items skipped
 5. `skipped_no_binary` / `skipped_empty_wav` counters у Save Full to Drive item JSON — також доступні через post-execution inspection
+
+---
+
+### 2026-05-21 — W3_BATCHSIZE_GOTCHA_AND_RATE_LIMIT_HARDENING
+
+Context: Прогон `tc_practice_23_ph2-flow-the-ball` (21 сегмент movement-контенту) видав audio файли з тишею у Drive output папці. Користувач зупинив pipeline побачивши порожні WAV. CSV localizations показав ~97% рядків з `real_duration_sec=0` + `needs_attention=FALSE` всюди. Користувач здогадався: "схоже, через паралелізацію запитів в елевенлабс стаються такі проблеми".
+
+**Root cause знайдено**: нода `Loop Over Items` (splitInBatches v3) у W3 мала `parameters: { options: {} }` — без explicit batchSize. n8n splitInBatches v3 **default batchSize=10**. Це означає що ВСІ 10 items у кожному батчі проходять через downstream ElevenLabs TTS HTTP-ноду **одночасно**. Реальна паралельність 10× прихована у дефолті, ніде не явна. Користувач мав рацію.
+
+Компаундні фактори:
+- Check Timing + Pad може стріляти до 8 TTS-викликів на (segment × lang) item (1 initial + 3 shorten + 2 speed + 2 expand). На batchSize=10 в піку до 80 in-flight ElevenLabs запитів.
+- ElevenLabs `onError: continueRegularOutput` ковтає 429-відповіді тихо.
+- Вчорашній empty-buffer guard fix (`de1ba8c`) **не був re-import-нутий у n8n** (користувач підтвердив). Тому стара версія W3 без `if (pcm && pcm.length === 0) pcm = null` досі жила у n8n і не флагала фейли.
+
+User є на **ElevenLabs Scale tier** (15+ concurrent nominal). 97% failure rate при batchSize=10 на Scale tier означає або стрикіший per-endpoint ліміт (TTS endpoint MAY мати нижчий threshold ніж base API), або account-level throttle, або quota issue. Незалежно від точного ElevenLabs ліміту, **жодна meditation-лекція не потребує більше 1-2 in-flight TTS запитів** — bounding concurrency до 1 структурно усуває цей failure mode.
+
+Decision:
+
+1. **Explicit `batchSize: 1`** у `Loop Over Items` ([workflows/W3_Synthesize_v2.json](workflows/W3_Synthesize_v2.json) `Loop Over Items.parameters.batchSize`). Гарантує serial обробку через TTS-path. Wall-time росте до ~25-35min для 147-item лекції — прийнятно.
+
+2. **Rate Limit Guard wait 0.5s → 1.5s** ([workflows/W3_Synthesize_v2.json](workflows/W3_Synthesize_v2.json) `Rate Limit Guard.parameters.amount`). Cushion для ElevenLabs RPM ceiling коли Check Timing fire-ить retries послідовно. Додає +1s × 147 = ~2.5min до wall time.
+
+Rationale:
+- **Корекція дефолту проти throughput**: на reliably-failing pipeline тribute throughput не варто. Краще пройти повільніше і повністю, ніж зразу.
+- **Чому batchSize=1 а не 3-5**: даже на Scale tier 10× concurrent ламається. Не знаємо точну межу. batchSize=1 гарантовано працює і дає clear signal якщо problem зберігається (тоді concurrency — НЕ root cause; вірогідно quota/key).
+- **Wait 1.5s — не 0.5s, не 3s**: 0.5 виявився замало (run з'їв usage spike), 3 — overkill для Scale tier. 1.5 — emergency-conservative defaultsidered.
+- **Жодних code-змін у Code-нодах**: вчорашній empty-buffer guard + Build Full diagnostics уже на диску, чекають re-import. Не дублюємо роботу.
+
+Tradeoffs:
+- **Wall time growth**: 25-35min на лекцію (vs 20m раніше). Якщо стане незручно — повертаємо batchSize=2-3 в окремому commit після підтвердження що concurrency справді була проблемою.
+- **n8n UI behavior**: коли user відкриває Loop Over Items у редакторі тепер бачить batchSize=1 explicitly. Це і виховальна користь — gotcha видно явно, не дефолтом.
+- **Inner-loop parallelism лишається**: Check Timing шорт/expand retries послідовні per item, але кожен item-обробка все одно 8 TTS calls в гіршому випадку. На batchSize=1 це 8 sequential calls per (segment × lang) → ще одна минута per problem segment. Acceptable.
+
+Conflict with prior decisions: жодних. Доповнює `MEMORY_REFACTOR_W3_BUILD_FULL_AFTER_OOM_KILL` (2026-05-19) і `W3_EMPTY_BUFFER_GUARD_AND_BUILD_FULL_DIAGNOSTICS` (2026-05-20). Кожен з них шар захисту, тепер додався concurrency bound.
+
+Files changed:
+- `workflows/W3_Synthesize_v2.json` — `Loop Over Items.parameters.batchSize=1`, `Rate Limit Guard.parameters.amount=1.5`. Дві мікроправки.
+
+Critical user-action item (одноразово):
+- **Re-import W3.json у n8n.** Без цього і `batchSize=1` фікс, і вчорашній empty-buffer guard, і Build Full diagnostics просто лежать на диску і не впливають на n8n state. Поточний прогон ламається саме через це — n8n досі тримає версію до `de1ba8c`.
+
+Verification:
+- Re-import W3.json → re-run tc_practice_23_ph2-flow-the-ball → у localizations sheet `real_duration_sec > 0` на ~всіх рядках; якщо десь зберігається 0 → `needs_attention=TRUE` (нарешті flag спрацював); файли у Drive output мають голос.
+- Якщо ≥50% рядків досі real=0 при batchSize=1 → concurrency НЕ корінь; перевіряти ElevenLabs dashboard на quota / API key status (план кроку 5 у Verification).
+
+Future work (не зараз):
+- Resumable W3 (skip-if-real_duration>0) — відкладено за explicit user request. Корисно щоб не перепрогонувати весь лесон коли треба тільки fix 2-3 сегменти.
+- Параметризація batchSize через config sheet — якщо знайдемо безпечний higher batchSize-value, винесемо в config щоб тюнити без re-import.
