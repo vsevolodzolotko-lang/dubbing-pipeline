@@ -95,7 +95,6 @@ See [`config_keys.md`](config_keys.md) for the full reference (defaults, owners,
 
 | key | value | Notes |
 |-----|-------|-------|
-| tone_of_voice | *(full ToV text)* | Injected into translation prompts |
 | active_langs | `de,es,fr,it,pl,pt,tr` | Comma-separated list processed by Synthesize |
 | max_adaptation_attempts | `3` | W2 adaptation loop upper bound |
 | max_speed | `1.15` | Speed ceiling before flagging needs_attention |
@@ -109,3 +108,43 @@ See [`config_keys.md`](config_keys.md) for the full reference (defaults, owners,
 | deepgram_api_key | *(token)* | Used by W1 Deepgram STT via n8n Header Auth credential. Replaced ElevenLabs Scribe to fix long-silence timestamp drift. |
 | drive_output_folder_id | *(folder ID)* | Where W3 uploads per-segment `.wav` files |
 | drive_output_full_folder_id | *(folder ID, optional)* | Where W3 uploads concatenated full-lesson WAVs. Falls back to drive_output_folder_id if missing. |
+
+---
+
+## Sheet: prompts
+
+Editable text for all system prompts and the brand Tone of Voice. Edit any `value` cell to change what the LLMs see on the next workflow run — no n8n re-import needed.
+
+Schema:
+
+| Column | Type | Description |
+|---|---|---|
+| `key` | text | Stable identifier referenced from Code nodes via `loadPrompt(key, vars)`. Don't rename — code lookups will fail. |
+| `description` | text | Human note about what this prompt does + which node uses it. Code ignores this column; it's there so future-you knows what each row is for. |
+| `value` | text (multiline) | The actual prompt text. May contain `{{var}}` placeholders that are substituted at load time. Sheets cells hold up to 50K chars; the largest current prompt is ~6.5K. |
+
+**Required keys** (each must have a non-empty `value` cell — code throws `Missing prompt "X" in prompts sheet` if any is empty/missing):
+
+| key | placeholders | Read by |
+|---|---|---|
+| `tone_of_voice` | — | W2 Prepare and Expand, W3 Check Timing (interpolated as `{{tov}}`) |
+| `tone_analysis_system` | — | W2 Prepare Tone Analysis |
+| `translate_system` | `{{tov}}` | W2 Prepare and Expand |
+| `qa_verify_system` | — | W2 Verify Translations |
+| `editor_system` | — | W2 Gemini Editor (active), W2 OpenAI Editor (orphan/swap-back) |
+| `adapt_shorten_system` | — | W2 Adapt Translations (system prompt) |
+| `adapt_attempt_light` | `{{lang}}` `{{budget}}` `{{est}}` `{{en}}` `{{trans}}` `{{min_chars}}` | W2 Adapt Translations attempt 1 (user message template) |
+| `adapt_attempt_medium` | same as `adapt_attempt_light` | Attempt 2 |
+| `adapt_attempt_max` | same as `adapt_attempt_light` | Attempt 3 |
+| `w3_shorten_system` | `{{tov}}` | W3 Check Timing + Pad (single-segment shorten) |
+| `w3_expand_system` | `{{tov}}` | W3 Check Timing + Pad (single-segment expand) |
+
+**Placeholder convention**: `{{name}}` — double curly braces, no spaces. If you accidentally write `{name}` or `{{ name }}`, substitution silently fails and the literal string appears in the rendered prompt. Always check via the `description` column which placeholders a row accepts.
+
+**Editing flow**:
+1. Edit any `value` cell directly in the sheet
+2. Save (Sheets auto-saves)
+3. Next W2/W3 run picks up the new value
+4. If you need to revert, see `sheets/prompts.tsv` in the repo — it's the seed snapshot committed alongside this schema
+
+**Adding a new prompt** (advanced): if you need a new prompt referenced from code, (1) add a row in the sheet with a new `key`, (2) add a `loadPrompt('your_key')` call in the relevant Code node, (3) re-import that workflow into n8n. The first two steps alone won't activate it — the code has to actually request the key by name.

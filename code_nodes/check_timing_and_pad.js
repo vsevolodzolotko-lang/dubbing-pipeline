@@ -33,7 +33,20 @@ const configMap = {};
 $('Read Config').all().forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });
 const EL_KEY  = configMap.elevenlabs_api_key  || '';
 const ANT_KEY = configMap.anthropic_api_key   || '';
-const TOV     = configMap.tone_of_voice       || '';
+// Externalized-prompts loader. Reads from the "prompts" Google Sheets tab via
+// upstream Read Prompts node. Throws if a required key is missing (fail-fast).
+// Placeholders use {{var}} syntax; vars object replaces them at load time.
+const promptMap = {};
+$('Read Prompts').all().forEach(i => { if (i.json.key) promptMap[i.json.key] = i.json.value; });
+function loadPrompt(key, vars = {}) {
+  const raw = promptMap[key];
+  if (!raw) throw new Error(`Missing prompt "${key}" in prompts sheet — add a row with this key`);
+  return Object.entries(vars).reduce(
+    (s, [k, v]) => s.replace(new RegExp(`\\{\\{${k}\\}\\}`, 'g'), String(v ?? '')),
+    raw
+  );
+}
+const TOV     = loadPrompt('tone_of_voice');
 
 // Resolve per-language CPS from config (defaults from CPS_DEFAULTS above).
 const LANG_CPS = {
@@ -190,35 +203,7 @@ async function callClaude(systemBlocks, userText) {
   return '';
 }
 
-const SHORTEN_STATIC = `You are shortening a translated meditation/wellness script segment to fit a tight audio time slot.
-
-The current translation produced TTS audio that exceeds the available slot by a small margin. Your job: shorten the translation just enough to fit, while preserving meaning and tone.
-
-TONE OF VOICE:
-${TOV}
-
-RULES:
-1. Stay within ±10% of target length. Do NOT undershoot — removing too much breaks the meditation rhythm.
-2. Maintain ToV warmth and rhythm.
-3. Preserve any ellipsis (...) or em-dash (—) timing markers.
-4. Never add new filler ("really", "very", etc.) — those break tone.
-5. Use natural language structures for the target language.
-6. Preserve negations ("no", "not", "without", "never") and contrasts ("A, not B") exactly.
-7. Preserve specific nouns, named techniques, numbers, proper names.
-
-ATTEMPT LEVEL DESCRIPTIONS:
-- Level light:  Remove filler words, contractions, redundancies. Keep all meaning.
-- Level medium: Rephrase for compactness. May drop redundant qualifiers but keep all content.
-- Level max:    Compress to essential meaning only. May drop secondary context but preserve core message.
-
-OUTPUT FORMAT (strict — any violation will cause your reply to be rejected and re-tried):
-- Reply with ONLY the new translated text, as a single block of text in the target language.
-- DO NOT include character counts, "(N characters)", or any meta-commentary.
-- DO NOT include reasoning words like "Wait", "Let me", "Actually", "Note:", "Hmm".
-- DO NOT use markdown formatting (**, __, backticks).
-- DO NOT include multiple drafts or alternatives — pick ONE and output only it.
-- DO NOT include surrounding quotes.
-- DO NOT include any blank lines.`;
+const SHORTEN_STATIC = loadPrompt('w3_shorten_system', { tov: TOV });
 
 async function claudeShorten(currentText, realSec, level) {
   const minChars       = Math.floor(currentText.length * MIN_RETAIN);
@@ -244,31 +229,7 @@ ATTEMPT LEVEL: ${level}`;
   return result;
 }
 
-const EXPAND_STATIC = `You are expanding a previously-shortened translation to fit a longer audio slot.
-
-The current translation was shortened earlier, but TTS output is now too short — creating awkward silence in the dubbed audio. Your job: restore meaningful content while keeping the brand tone intact.
-
-TONE OF VOICE:
-${TOV}
-
-RULES:
-1. Restore meaningful content that was likely cut, especially context-setting phrases or qualifiers.
-2. Do NOT add filler ("really", "very", "kind of") — those break meditative tone.
-3. Do NOT artificially repeat or rephrase the same idea.
-4. Stay close to target length (within ±10%).
-5. Preserve ToV: warm, knowing-friend tone.
-6. Natural language structures for the target language.
-7. Preserve negations and contrasts from the English source.
-8. Preserve specific nouns, named techniques, numbers, proper names.
-
-OUTPUT FORMAT (strict — any violation will cause your reply to be rejected and re-tried):
-- Reply with ONLY the new translated text, as a single block of text in the target language.
-- DO NOT include character counts, "(N characters)", or any meta-commentary.
-- DO NOT include reasoning words like "Wait", "Let me", "Actually", "Note:", "Hmm".
-- DO NOT use markdown formatting (**, __, backticks).
-- DO NOT include multiple drafts or alternatives — pick ONE and output only it.
-- DO NOT include surrounding quotes.
-- DO NOT include any blank lines.`;
+const EXPAND_STATIC = loadPrompt('w3_expand_system', { tov: TOV });
 
 async function claudeExpand(currentText, realSec) {
   const targetChars = Math.floor(enDur * (LANG_CPS[lang] || 15));

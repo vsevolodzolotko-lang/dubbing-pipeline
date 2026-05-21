@@ -10,7 +10,7 @@ Every row has two columns: `key`, `value`. Missing keys fall back to the default
 
 | Key | Default | Read by | Purpose |
 |---|---|---|---|
-| `tone_of_voice` | *(required, no default)* | W2 Prepare and Expand (Translate) | Full Brand ToV text. Injected into translation system prompt and into adaptation prompts. Plain text, multiple paragraphs allowed. |
+| ~~`tone_of_voice`~~ | **MOVED** | — | No longer in `config` tab. Now lives in the new `prompts` tab as the `tone_of_voice` key. See [`sheets_schema.md`](sheets_schema.md#sheet-prompts). |
 | `active_langs` | `de,es,fr,it,pl,pt,tr` | W3 Expand TTS Jobs | Comma-separated lang codes that Synthesize will process. Translation always runs for all 7; this gates which langs get TTS'd and uploaded. |
 
 ## Adaptation behavior

@@ -1837,3 +1837,74 @@ A-B revert path:
 Future work:
 - Якщо A-B покаже Gemini уступає на конкретних мовах → залишити OpenAI Editor для тих мов через config-toggle на per-lang basis
 - Або: `editor_model` config-ключ для quick swap між `gemini-3.5-flash` / `gemini-3-pro` / `gpt-5` / `gpt-5-mini` без переписування connections
+
+---
+
+### 2026-05-21 — PROMPTS_EXTERNALIZED_TO_SHEETS_TAB
+
+Context: Усі system-промпти (translation, QA, editor, adapt, shorten/expand) і brand Tone of Voice жили захардкоженими у Code-нодах W2 і W3. Щоб тюнити wording — треба було лізти в n8n, знаходити правильну ноду, редагувати багаторядковий template literal у JSON-полі, і робити re-import. Дискомфортно для daily prompt-iteration.
+
+Decision: винести **усі 10 промптів + ToV** у новий Google Sheets tab `prompts` з ключами і значеннями. Code-ноди читають його при кожному запуску і substitute placeholders.
+
+**Архітектура**:
+- Новий tab `prompts` у тому ж Sheet (columns: `key | description | value`)
+- Дві нові sheet-read ноди: `Read Prompts` у W2 (між Read Config і Read Pending Segments), `Read Prompts` у W3 (між Read Config і Read Voices)
+- Inline `loadPrompt(key, vars)` helper в кожній patched Code-ноді: будує `promptMap` з $('Read Prompts').all(), substitute-ить `{{var}}` placeholders, **кидає `Missing prompt "X"`** якщо key відсутній (fail-fast, no baked-in fallbacks per user choice)
+- Placeholder convention: `{{var}}` (double curly braces без пробілів)
+
+**Externalized keys** (11 total):
+- `tone_of_voice` — brand voice spec (moved from `config` tab)
+- `tone_analysis_system` — W2 Prepare Tone Analysis
+- `translate_system` — W2 Prepare and Expand (`{{tov}}` placeholder)
+- `qa_verify_system` — W2 Verify Translations
+- `editor_system` — W2 Gemini Editor + OpenAI Editor (shared)
+- `adapt_shorten_system` — W2 Adapt Translations
+- `adapt_attempt_light/medium/max` — W2 Adapt 3-tier shorten templates with `{{lang}} {{budget}} {{est}} {{en}} {{trans}} {{min_chars}}` placeholders
+- `w3_shorten_system` — W3 Check Timing single-segment shorten (`{{tov}}`)
+- `w3_expand_system` — W3 Check Timing single-segment expand (`{{tov}}`)
+
+**Migration aid**: новий `sheets/prompts.tsv` — TSV з усіма current values, copied verbatim з jsCode constants. Користувач paste-ить його в новий prompts tab; Sheets coreectly handles multiline quoted values на TSV paste.
+
+**Файлові зміни**:
+- `workflows/W2_Translate_v2.json` — додано `Read Prompts` ноду; 6 Code-нод (Prepare Tone Analysis, Prepare and Expand, Verify Translations, Gemini Editor, OpenAI Editor, Adapt Translations) переписано на `loadPrompt()`
+- `workflows/W3_Synthesize_v2.json` — додано `Read Prompts` ноду; Check Timing + Pad переписано на `loadPrompt()` для SHORTEN/EXPAND
+- `code_nodes/*.js` — всі 6 mirror files updated
+- `sheets/prompts.tsv` — новий seed file з 11 рядками + header
+- `docs/sheets_schema.md` — нова секція `Sheet: prompts` з повним schema і списком ключів
+- `docs/config_keys.md` — `tone_of_voice` помічений як moved
+
+Rationale:
+- **Daily-edit-friendly UX**: edit-сейв-перезапустити без жодних n8n операцій. Workflow читає поточну версію промпта при кожному prompt-related call.
+- **Single source of truth**: всі editable text в одному місці; config tab чистий тільки для API keys + folder IDs + numeric thresholds (system-level речі).
+- **Fail-fast on missing keys**: typo в key → run падає миттєво з понятним повідомленням `Missing prompt "X" in prompts sheet`. Краще ніж silent-default яке могло б давати дивні результати.
+- **Cache compatibility preserved**: рендеринг прoмптів детермінований за вмістом ряду — Anthropic `cache_control: ephemeral` cache hits продовжують працювати поки prompt row не змінюється. Editing prompt invalidates cache на наступний run — minor cost blip (~$0.01).
+- **OpenAI Editor (orphan) patched теж**: тримає його inter-changeable з Gemini Editor — для swap-back не треба коду.
+
+Tradeoffs:
+- **One extra Sheets API read per run** (~1-2s): negligible vs. LLM call durations.
+- **Throw on missing key може bite during exploratory editing**: користувач робить typo → run падає. Прийнятна ціна за visibility над silent fallback.
+- **Template placeholder mistakes silent**: якщо user пише `{tov}` замість `{{tov}}`, substitution не firing і literal `{tov}` потрапить у промпт. Mitigation: documented convention в `sheets_schema.md` + `description` column у кожному ряду нагадує які placeholders дозволені.
+- **TSV multiline paste**: works in Sheets для quoted values з вбудованими newlines (precedent in Google Sheets paste behavior). Якщо paste пошкодиться — fallback: open `prompts.tsv` в LibreOffice / Numbers / Excel, save as Google Sheets file, copy from there.
+
+Conflict with prior decisions: complements `OPENAI_GPT5_CROSS_MODEL_EDITOR` (2026-05-20), `W2_GEMINI_EDITOR_REPLACES_OPENAI_AS_DEFAULT` (2026-05-21), `QA_SYSTEM_EXPANSION_FOR_CACHE_AND_COVERAGE` (2026-05-20). Усі ці decisions додавали або тюнили промпти — тепер тюнінг live-editable без code touchpoint.
+
+User-action steps (one-time setup):
+1. Open the Google Sheet → create new tab named **`prompts`**
+2. Open `sheets/prompts.tsv` from repo → select all → copy → paste at A1 of new prompts tab
+3. У `config` tab → delete the `tone_of_voice` row (тепер живе в prompts)
+4. Re-import `workflows/W2_Translate_v2.json` AND `workflows/W3_Synthesize_v2.json` у n8n
+5. Test run на 2-сегментній лекції → confirm output ≈ identical to today's good run
+
+After this, prompt-editing flow is:
+- Sheet → prompts tab → edit any `value` cell → save
+- Next W2/W3 run uses the new text. Zero n8n actions.
+
+Verification:
+- Both workflow JSONs parse ✓
+- All Code nodes pass JS-syntax check ✓
+- No hardcoded big prompt consts left (`QA_SYSTEM` / `EDITOR_SYSTEM` / `SHORTEN_STATIC` / `EXPAND_STATIC` / `SYSTEM_PROMPT` / `ATTEMPT_PROMPTS` все на `loadPrompt(...)`) ✓
+- `sheets/prompts.tsv` round-trip parses cleanly: 11 rows + header, multilines preserved ✓
+
+Future work:
+- Якщо row count росте → перейти з flat `key|description|value` на `category|key|description|value` для group-by-area view у Sheets
+- Якщо user часто хоче A/B тестувати — додати `editor_model_override` ключ у prompts tab (або config) для quick swap між моделями

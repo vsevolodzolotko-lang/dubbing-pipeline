@@ -15,55 +15,20 @@ $('Read Config').all().forEach(i => { if (i.json.key) configMap[i.json.key] = i.
 const apiKey = configMap.openai_api_key || '';
 if (!apiKey) throw new Error('openai_api_key missing from config sheet');
 
-const EDITOR_SYSTEM = `You are a SECOND-PASS EDITOR for meditation/wellness translations. A primary QA model (Claude Sonnet 4.5) has already reviewed these translations once for false-friend mistranslations, formality drift, and tone-of-voice violations. Your job is to catch what the first pass missed — NOT to re-edit clean translations for style.
-
-INPUT: a JSON object mapping segment_id → { en, de, es, fr, pl, pt, it, tr }. Each segment has the English source plus 7 translations.
-
-=== PRIMARY RULE (HIGHEST PRIORITY) ===
-If a translation has NO false friend, NO formality drift, NO ToV violation, and NO typo — RETURN IT UNCHANGED. Do not modify wording, rhythm, or word choice just because you would phrase it differently. Style is a matter of taste; only intervene on objective issues you can name.
-
-=== CLASS 1: LITERAL-DICTIONARY MISTRANSLATIONS (false friends) ===
-Replace if found:
-- DE: "gültig" for "valid" (means "valid ticket/document"). Use "Ich bin wertvoll." or "Ich bin richtig, so wie ich bin."
-- FR: "suffisant" for "enough" when about a person (means "arrogant, conceited"). Use "Je suis assez." or "Je me suffis."
-- FR: "valide" for "valid" when about a person (means "able-bodied"). Use "Je suis légitime." or "J'ai ma place."
-- TR: "geçerli/geçerliyim" for "valid" (means "valid as a rule/password"). Use "Değerliyim." or "Ben yeterliyim."
-- PL: bare "Jestem dość." for "I am enough" (ungrammatical). Use "Jestem wystarczający." or "Jestem dość dobry."
-- ES: "válido" for "valid" about a person reads clinical/legal. Prefer warmer "Yo valgo." or "Tengo valor."
-- PT: "válido" for "valid" about a person reads clinical/legal. Prefer "Eu tenho valor." or "Eu importo."
-- IT: "valido" for "valid" about a person reads clinical. Prefer "Ho valore." or "Sono prezioso."
-- ES/PT/IT: "suficiente"/"sufficiente" applied to a person is grammatical but reads flat for affirmations. When slot allows, prefer self-acceptance phrasing.
-- ANY obvious typos: double letters where they shouldn't be, missing or wrong diacritics on common words.
-
-=== CLASS 2: FORMALITY DRIFT (must stay informal singular) ===
-All translations MUST use informal singular address. Replace any formal-creep:
-- DE: must use "du/dich/dein", NEVER "Sie/Ihnen/Ihr" or capitalized formal forms.
-- ES: must be Castilian "tú/te/tu", NEVER "usted/le/su"; NEVER Latin American "vos/ustedes".
-- FR: must use "tu/te/ton/ta/tes", NEVER "vous/votre/vos".
-- IT: must use "tu/ti/tuo/tua/tuoi/tue", NEVER capitalized formal "Lei/La/Suo/Le".
-- PL: must use direct "ty"-form verbs (e.g., "jesteś", "czujesz"), NEVER "Pan/Pani/Państwo" or third-person formality.
-- PT: must be European Portuguese "tu/te/teu/tua" with EU conjugation ("tu fazes", "tu sentes"), NEVER Brazilian "você/seu/sua" or BR verb forms ("você faz", "você sente").
-- TR: must use "sen/seni/senin", NEVER "siz/sizi/sizin" or capitalized formal forms.
-
-=== CLASS 3: TONE-OF-VOICE VIOLATIONS ===
-Spirio's voice is the warm, knowing friend — not a guru, coach, or marketer. Replace or soften:
-- Marketing/transformation vocab: "transformación/transformation/Transformation", "alpha", "vibration/vibración", "manifest/manifester/manifestar", "energy field" — strip or rephrase to plain sensation.
-- Promise/guarantee tone: "you will feel amazing" → soften to "you might notice" / "puedes notar" / "tu peux remarquer" / "vielleicht spürst du" / etc.
-- Bare imperative filler: "Just relax", "Be present", "Calm down" without sensation grounding — replace with sensation-grounded language ("let your shoulders drop", "notice the weight of your hands").
-- Clinical/medical register: "diagnóstico", "intervención terapéutica", over-formal Latinisms in ES/PT/IT — soften to everyday vocabulary.
-- Word-for-word anglicism: a translation that copies English syntax verbatim and reads stilted in the target language. Rephrase to native rhythm without losing meaning.
-- Urgency words: "immediately", "ya mismo", "tout de suite", "sofort" — these break meditative pacing.
-
-=== HARD CONSTRAINTS (do not violate even when correcting) ===
-- LENGTH: keep corrections within ±25% of original character count (TTS timing budget).
-- NEGATIONS: preserve "no"/"not"/"never"/"without" exactly as in source.
-- CONTRASTS: preserve "A, not B" / "A but B" / "A instead of B" patterns exactly.
-- NUMBERS, PROPER NOUNS, NAMED TECHNIQUES: never alter.
-- PAUSE MARKERS: preserve "..." and "—" exactly.
-- DEFAULT BEHAVIOR: return translations UNCHANGED. Only intervene when you can name a specific Class 1/2/3 violation. When in doubt, leave it alone.
-
-=== OUTPUT FORMAT ===
-JSON object mapping segment_id → { de, es, fr, pl, pt, it, tr } with same 7 langs. No "en" in output. No commentary. Only the JSON.`;
+// Externalized-prompts loader. Reads from the "prompts" Google Sheets tab via
+// upstream Read Prompts node. Throws if a required key is missing (fail-fast).
+// Placeholders use {{var}} syntax; vars object replaces them at load time.
+const promptMap = {};
+$('Read Prompts').all().forEach(i => { if (i.json.key) promptMap[i.json.key] = i.json.value; });
+function loadPrompt(key, vars = {}) {
+  const raw = promptMap[key];
+  if (!raw) throw new Error(`Missing prompt "${key}" in prompts sheet — add a row with this key`);
+  return Object.entries(vars).reduce(
+    (s, [k, v]) => s.replace(new RegExp(`\\{\\{${k}\\}\\}`, 'g'), String(v ?? '')),
+    raw
+  );
+}
+const EDITOR_SYSTEM = loadPrompt('editor_system');
 
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 async function callEditor(body) {

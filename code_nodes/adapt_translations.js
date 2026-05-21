@@ -15,46 +15,25 @@ if (!apiKey) throw new Error('anthropic_api_key missing from config sheet');
 // config keys cps_estimate_de, cps_estimate_es, …, cps_estimate_tr. Computed below.
 const CPS_DEFAULTS = { de: 12, es: 15, fr: 15, pl: 14, pt: 16, it: 14, tr: 14 };
 
-const SYSTEM_PROMPT = `You are a localization editor for meditation/wellness audio. Your job is to shorten a translated text so it fits within a strict time budget for audio dubbing.
-
-CRITICAL RULES — these override the shortening request:
-- Every distinct concept in the English source MUST remain in the translation
-- Preserve negations exactly: "no", "not", "without", "never"
-- Preserve contrasts: "A, not B" / "A but B" / "A instead of B" patterns
-- Preserve specific nouns, named techniques, numbers and proper names
-- Keep the language, tone, and informal address (du/tu/ty/sen) unchanged
-- Preserve '...' and '—' as pause timing cues
-- Do NOT translate or switch languages — edit only the given translation
-- Only remove genuinely redundant filler words (e.g., "really", "very", "just", "actually")
-- Return ONLY the shortened text. No explanation, no quotes, no preamble.
-- DO NOT include character counts, "(N characters)", or any meta-commentary.
-- DO NOT include reasoning words ("Wait", "Let me", "Actually", "Note:", "Hmm").
-- DO NOT use markdown formatting (**, __, backticks).
-- DO NOT include multiple drafts — pick ONE and output only it.
-- DO NOT include blank lines.`;
+// Externalized-prompts loader. Reads from the "prompts" Google Sheets tab via
+// upstream Read Prompts node. Throws if a required key is missing (fail-fast).
+// Placeholders use {{var}} syntax; vars object replaces them at load time.
+const promptMap = {};
+$('Read Prompts').all().forEach(i => { if (i.json.key) promptMap[i.json.key] = i.json.value; });
+function loadPrompt(key, vars = {}) {
+  const raw = promptMap[key];
+  if (!raw) throw new Error(`Missing prompt "${key}" in prompts sheet — add a row with this key`);
+  return Object.entries(vars).reduce(
+    (s, [k, v]) => s.replace(new RegExp(`\\{\\{${k}\\}\\}`, 'g'), String(v ?? '')),
+    raw
+  );
+}
+const SYSTEM_PROMPT = loadPrompt('adapt_shorten_system');
 
 const ATTEMPT_PROMPTS = [
-  (lang, budget, est, en, trans, minChars) =>
-    `Shorten this ${lang} translation slightly (~5-15%) to fit within ${budget}s (currently ~${est}s).
-Remove only filler words and minor redundancies. Preserve sentence structure and all key concepts.
-Minimum allowed length: ${minChars} characters.
-
-Original English (preserve all concepts): ${en}
-Current translation: ${trans}`,
-  (lang, budget, est, en, trans, minChars) =>
-    `Shorten this ${lang} translation more (~15-25%) to fit within ${budget}s (currently ~${est}s).
-Rephrase for compactness, but every concept from the English source must remain.
-Minimum allowed length: ${minChars} characters.
-
-Original English (preserve all concepts): ${en}
-Current translation: ${trans}`,
-  (lang, budget, est, en, trans, minChars) =>
-    `Shorten this ${lang} translation as much as possible to fit within ${budget}s (currently ~${est}s).
-Preserve every distinct concept, negation, contrast, and proper noun from the English. Cut only filler and stylistic flourishes.
-Minimum allowed length: ${minChars} characters.
-
-Original English (preserve all concepts): ${en}
-Current translation: ${trans}`,
+  (lang, budget, est, en, trans, minChars) => loadPrompt('adapt_attempt_light',  { lang, budget, est, en, trans, min_chars: minChars }),
+  (lang, budget, est, en, trans, minChars) => loadPrompt('adapt_attempt_medium', { lang, budget, est, en, trans, min_chars: minChars }),
+  (lang, budget, est, en, trans, minChars) => loadPrompt('adapt_attempt_max',    { lang, budget, est, en, trans, min_chars: minChars }),
 ];
 
 
