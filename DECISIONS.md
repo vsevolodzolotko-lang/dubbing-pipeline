@@ -1908,3 +1908,44 @@ Verification:
 Future work:
 - Якщо row count росте → перейти з flat `key|description|value` на `category|key|description|value` для group-by-area view у Sheets
 - Якщо user часто хоче A/B тестувати — додати `editor_model_override` ключ у prompts tab (або config) для quick swap між моделями
+
+---
+
+### 2026-05-21 — EXTERNAL_REVIEW_BRIEFING_DOC
+
+Context: Після того як 11 промптів і ToV externalize-нулись у `prompts` Sheets-tab (commit `6eac2d7`), користувач захотів відправити проект на external evaluation — paste-нути briefing + поточні промпти в стороннюю LLM (GPT-5 / Claude Opus / Gemini) для оцінки якості промптів і architecture refactor suggestions.
+
+Decision: створено `docs/external_review_briefing.md` — single self-contained Markdown document (~2800 слів) написаний як direct prompt для зовнішньої LLM. Структура:
+
+1. Role framing
+2. Project goal (1 параграф)
+3. High-level architecture (W_Master → W1 → W2 → W3)
+4. Data model (5 sheets tabs)
+5. W2 translation pipeline detailed (всі 6 stages, 4-layer defense rationale, chunked-parallel CHUNK=3)
+6. W3 synthesis pipeline brief (TTS + in-flight shorten/expand + breath-borrow timing)
+7. Index of 11 prompts (key → role/consumer/model/placeholders/output/size)
+8. Hard constraints (7 languages, informal address per-lang, EU variants, false-friend traps, ±25% length, preserve rules, ToV)
+9. Recent observations (Gemini migration, latency cliff, prompts externalization)
+10. Evaluation task (per-prompt review + cross-prompt review + architecture suggestions + risks)
+11. Suggested output format (Markdown sections, ratings, suggested rewrites)
+12. What NOT to change (load-bearing constants: keys, placeholder syntax, JSON schema, cross-model architecture, hard constraints)
+
+Rationale:
+- **Self-contained** — external LLM не може open repo links, тож все потрібне inline.
+- **Neutral framing** — не "we think X is broken", щоб LLM формувала unbiased opinion. Recent iterations згадані як факти, не biases.
+- **Не дублюємо prompt content** — користувач paste-нe актуальні рядки з sheet окремо. Briefing описує що кожен робить + accepted placeholders.
+- **Explicit "do not change"** список — guard rails щоб LLM-suggestions не зламали code-side dependencies (prompt keys, placeholder syntax, JSON schema).
+- **Suggested output format** — Markdown per-prompt sections з rating/strengths/issues/suggested-rewrite — дає LLM clear template і робить response easy to scan.
+
+Files changed:
+- `docs/external_review_briefing.md` — новий
+
+User-action:
+1. Open the briefing file → copy entire content
+2. Open the live `prompts` tab in the Sheet → copy all 11 rows including header
+3. Paste both into target external LLM (briefing first, then prompts table)
+4. Ask for evaluation; iterate if LLM needs clarification
+
+Future work:
+- If pipeline changes significantly later, briefing must be regenerated manually (snapshot of current state)
+- Could add a `scripts/regenerate_briefing.js` that pulls latest stats from DECISIONS.md + workflow node counts, but that's overengineering for now
