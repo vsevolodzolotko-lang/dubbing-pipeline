@@ -1618,3 +1618,91 @@ Future work (після з'ясування ElevenLabs відповіді):
 - Якщо JSON error з конкретним кодом → handler у `tts()` retry-loop для exponential backoff на цьому коді
 - Якщо 200-with-empty-body → треба переключати ElevenLabs HTTP node на `onError: stopWorkflow` (приймемо швидкий fail замість мовчазного silence)
 - Якщо HTTP-level помилка проковтнута без binary → треба міняти `onError` на upstream node
+
+---
+
+### 2026-05-21 — N8N_FILESYSTEM_BINARY_ROOT_CAUSE_FIX
+
+Context: Останній прогон з `0bbe5f2` нарешті дав точну діагностику в `warning` полі:
+
+```
+{"hasBinarySlot":true,"hasBinaryDataObj":true,
+ "binaryDataKeys":["mimeType","fileType","data","id","fileSize"],
+ "hasDataField":true,"dataFieldType":"string","dataFieldLen":13,
+ "binaryMimeType":"audio/pcm","binaryFileName":null,
+ "pcmBytes":9,"contentPreview":"~)^+-zo"}
+```
+
+**ROOT CAUSE finally identified**: ключі `id` і `fileSize` у `binaryDataKeys` + `dataFieldLen=13` — це класичний **n8n filesystem-mode pattern**. При `N8N_BINARY_DATA_MODE=filesystem`:
+- `binary.data.data` = **маленький placeholder/reference** (13 символів), НЕ base64 контент
+- `binary.data.id` = filesystem reference UUID до реального файлу на диску
+- Реальні байти доступні ТІЛЬКИ через `await this.helpers.getBinaryDataBuffer(itemIndex, 'data')`
+
+Усі наші Code-ноди робили `Buffer.from(binary.data.data, 'base64')` — це декодувало placeholder як base64 → 9 байтів сміття → `pcmDuration ≈ 0.0002s` → rounds to 0 → silent placeholder branch → silence WAV.
+
+**Це пояснює ВСІ симптоми попередніх кількох днів**:
+- Today's silent audio output + `real_duration=0` everywhere
+- Yesterday's "Build Full WAVs are 44 bytes" mystery (точно та сама проблема в другій Code-ноді: Build Full also reads `binary.data.data` directly)
+- Чому до 2026-05-19 (до додавання `N8N_BINARY_DATA_MODE=filesystem` per commit 7090296) все працювало — у inline mode `binary.data.data` ДІЙСНО containing base64 content
+- Чому ElevenLabs API logs показували нормальні запити з валідними response-ами — TTS реально працював, ми просто не доходили до байтів
+
+Якби з самого початку ми мали діагностичний log для `binary.data.id` чи `binaryDataKeys` — побачили б це ще 2 дні тому. Урок: при будь-якій незрозумілій binary-проблемі — насамперед dump full `binary.data` structure, не тільки `data` field.
+
+Decision: переписати обидві Code-ноди на правильний n8n filesystem-aware pattern.
+
+**Fix 1 — Check Timing + Pad** ([workflows/W3_Synthesize_v2.json](workflows/W3_Synthesize_v2.json)):
+
+```js
+let pcm = null;
+if (binaryData) {
+  try {
+    pcm = await this.helpers.getBinaryDataBuffer(0, 'data');
+    failureDiag.pcmBytes = pcm?.length || 0;
+    // ... preview logic ...
+  } catch (e) {
+    failureDiag.bufferLoadError = e.message;
+  }
+}
+```
+
+itemIndex = 0 бо Loop Over Items з `batchSize=1` гарантує одне item per Code-execution.
+
+**Fix 2 — Build Full Audio Per Lang** ([workflows/W3_Synthesize_v2.json](workflows/W3_Synthesize_v2.json)):
+
+```js
+// На початку:
+const indexMap = new Map(items.map((it, idx) => [it, idx]));
+
+// У циклі:
+const originalIdx = indexMap.get(e);
+const wavBuf = await this.helpers.getBinaryDataBuffer(originalIdx, 'data');
+```
+
+Build Full ітерує `items.filter().sort()` — потребує оригінальний `itemIndex` у `$input.all()` для виклику `getBinaryDataBuffer`. Map (item reference → original index) це вирішує.
+
+**Fix 3** — `tts()` inline helper в Check Timing + Pad **залишається БЕЗ змін**. Він робить прямий `this.helpers.httpRequest({ encoding: 'arraybuffer' })` і отримує Buffer напряму через `Buffer.from(resp.body)` — це bypass-ить filesystem-mode storage. Цей шлях завжди працював коректно. Це пояснює чому `seg_005_fr` мав success вчора (expansion_attempts=1 means tts() retry fire-ив, отримав реальний Buffer через httpRequest helper).
+
+Rationale:
+- **Корінь проблеми ясний, fix очевидний**: `getBinaryDataBuffer` — задокументований n8n API для саме цього випадку. n8n docs це прямо рекомендують для filesystem-mode workflows.
+- **Жодних tradeoffs**: працює і в inline, і в filesystem mode. `getBinaryDataBuffer` сам резолвить storage backend.
+- **3 layer-и захисту що додали за останні дні стають коректними**: empty-Buffer guard (тепер catch tiny errors), 100ms threshold (тепер catch real ElevenLabs errors), batchSize=1 (тепер reliable). Усі правильно flag-итимуть needs_attention=true коли потрібно, але **тепер нарешті НЕ FAIL-итимуть** на normal-success path.
+- **Diagnostic improvements залишаються**: failureDiag в warning полі, console.warn у Build Full skip cases — на майбутнє якщо ElevenLabs реально падатиме.
+
+Conflict with prior decisions: complementary до `MEMORY_REFACTOR_W3_BUILD_FULL_AFTER_OOM_KILL` (2026-05-19) — той decision ввімкнув filesystem mode (`N8N_BINARY_DATA_MODE=filesystem`), що вирішило memory issue АЛЕ silently зламало binary access у Code-нодах. Тепер обидва concerns закриті: filesystem mode active + Code-ноди correctly use filesystem-aware API.
+
+Files changed:
+- `workflows/W3_Synthesize_v2.json` — Check Timing + Pad uses `getBinaryDataBuffer(0, 'data')`; Build Full Audio Per Lang uses indexMap + `getBinaryDataBuffer(originalIdx, 'data')`
+- `code_nodes/check_timing_and_pad.js` — mirror sync
+- `code_nodes/build_full_audio_per_lang.js` — mirror sync
+
+Verification:
+- Re-import W3.json у n8n (n-та раз; обіцяю — це останній фікс для цього зашморгу)
+- Прогнати W3 на test_small (1-3 сегменти) — переконатись що `real_duration_sec > 0` і файли мають голос
+- Прогнати full lesson tc_practice_23_ph2-flow-the-ball — повна валідація
+- Очікувано: ~100% success rate, audible voice, multi-MB full WAVs (не 44 bytes)
+- Якщо все ОК → опціонально знизити `Rate Limit Guard` назад з 1.5s на 0.5s (більше не треба cushion, batchSize=1 + correct binary access вирішує) — окремий commit
+
+Lessons learned:
+1. **Diagnostic-first debugging**: 3 дні chasing симптоми (empty pcm, empty WAVs, batchSize, rate limits) поки не дамповнули повну `binary.data` structure. Урок — при `binary` проблемах ВІДРАЗУ dump `Object.keys(binary.data)` and check for filesystem-mode markers (`id`, `fileSize`).
+2. **n8n filesystem mode docs gotcha**: документація n8n говорить про `getBinaryDataBuffer` але приховує що `binary.data.data` змінює semantics. Easy trap для Code-нод-розробників.
+3. **Cross-decision dependency**: enabling filesystem mode requires Code-нод-аудит. Якщо є nodes що читають `binary.data.data` directly — вони ламаються. Слід було ловити це ще під час 7090296 (memory refactor), але без e2e тесту не помітили.

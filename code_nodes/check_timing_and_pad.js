@@ -59,37 +59,44 @@ const maxAllowed          = isShortSeg ? slot : enDur;
 const inputItem = $input.first();
 const binaryData = inputItem.binary?.data;
 
-// Capture full diagnostic snapshot for the warning field — visible in n8n
-// Output panel without needing log-level visibility. Used only on TTS failure.
+// Capture diagnostic snapshot for the warning field — visible in n8n Output
+// panel without needing log-level visibility. Used only on TTS failure.
 const failureDiag = {
   hasBinarySlot:     !!inputItem.binary,
   hasBinaryDataObj:  !!binaryData,
   binaryDataKeys:    binaryData ? Object.keys(binaryData) : [],
-  hasDataField:      !!binaryData?.data,
-  dataFieldType:     binaryData?.data === undefined ? 'undefined' : typeof binaryData.data,
-  dataFieldLen:      typeof binaryData?.data === 'string' ? binaryData.data.length : null,
   binaryMimeType:    binaryData?.mimeType || null,
   binaryFileName:    binaryData?.fileName || null,
+  binaryFileSize:    binaryData?.fileSize || null,
+  binaryDataId:      binaryData?.id || null,
   pcmBytes:          0,
+  bufferLoadError:   null,
   contentPreview:    null,
 };
 
-let pcm = binaryData?.data ? Buffer.from(binaryData.data, 'base64') : null;
-if (pcm) {
-  failureDiag.pcmBytes = pcm.length;
-  // Capture preview before we potentially null pcm out — useful for diagnosing
-  // error JSON blobs, redirect text, etc. Plain ASCII gets shown readably;
-  // binary PCM gets shown as escaped chars (still useful — at least we see
-  // it's binary).
-  failureDiag.contentPreview = pcm.length > 0
-    ? Buffer.from(binaryData.data, 'base64').toString('utf8', 0, Math.min(200, pcm.length))
-    : '(empty)';
+// CRITICAL: must use this.helpers.getBinaryDataBuffer() — NOT Buffer.from(binary.data.data).
+// With N8N_BINARY_DATA_MODE=filesystem, binary.data.data is a small placeholder
+// reference (~13 chars), not the actual base64 content. The real bytes live on
+// the filesystem behind binary.data.id and must be loaded via the helper.
+// Without this fix, every TTS response decoded as 9 bytes of garbage → empty
+// silent placeholder WAVs across the entire lesson.
+let pcm = null;
+if (binaryData) {
+  try {
+    pcm = await this.helpers.getBinaryDataBuffer(0, 'data');
+    failureDiag.pcmBytes = pcm?.length || 0;
+    if (pcm && pcm.length > 0 && pcm.length < 500) {
+      // Only preview small buffers — large valid TTS audio doesn't need a preview
+      failureDiag.contentPreview = pcm.toString('utf8', 0, Math.min(200, pcm.length));
+    }
+  } catch (e) {
+    failureDiag.bufferLoadError = e.message;
+    console.error(`getBinaryDataBuffer failed for ${segment_id}_${lang}: ${e.message}`);
+  }
 }
 
 // Failure threshold: anything shorter than 100ms of PCM (4410 bytes at 22050Hz
-// mono 16-bit) is treated as a failed TTS response. ElevenLabs sometimes returns
-// HTTP 200 with a small error blob (JSON error message, redirect, partial
-// response) that n8n materializes as a non-empty Buffer.
+// mono 16-bit) is treated as a failed TTS response.
 const MIN_VALID_PCM_BYTES = 4410;  // 0.1s × 22050 × 2
 if (pcm && pcm.length < MIN_VALID_PCM_BYTES) {
   console.error(`TTS response too small for ${segment_id}_${lang}: ${pcm.length} bytes. Preview: ${JSON.stringify(failureDiag.contentPreview)}`);
@@ -97,7 +104,7 @@ if (pcm && pcm.length < MIN_VALID_PCM_BYTES) {
 }
 let text = job.text;
 let initialTtsFailed = !pcm;
-if (initialTtsFailed && !pcm && binaryData?.data === undefined) console.error(`Initial ElevenLabs TTS produced no binary at all for ${segment_id}_${lang} — likely HTTP error swallowed by onError.`);
+if (initialTtsFailed && !binaryData) console.error(`Initial ElevenLabs TTS produced no binary at all for ${segment_id}_${lang} — likely HTTP error swallowed by onError.`);
 
 function pcmDuration(buf) { return buf.length / (SAMPLE_RATE * BPS); }
 

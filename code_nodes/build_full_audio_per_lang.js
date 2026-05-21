@@ -15,6 +15,11 @@ const activeLangs = (configMap.active_langs || 'de,es,fr,it,pl,pt,tr')
 const items = $input.all();
 if (!items.length) throw new Error('No items — Download Segment WAV must run first');
 
+// Map item reference → its original index in $input.all() so that, after
+// filter/sort, we can still pass the correct itemIndex to getBinaryDataBuffer.
+// (Critical for N8N_BINARY_DATA_MODE=filesystem support — see Check Timing + Pad.)
+const indexMap = new Map(items.map((it, idx) => [it, idx]));
+
 const results = [];
 for (const lang of activeLangs) {
   // Lazy filter for current lang only (no pre-grouping → no doubled refs).
@@ -42,16 +47,31 @@ for (const lang of activeLangs) {
   let skippedNoBinary = 0;
   let skippedEmptyWav = 0;
   for (const e of entries) {
-    const binData = e.binary?.data;
-    if (!binData?.data) {
+    if (!e.binary?.data) {
       skippedNoBinary++;
-      console.warn(`Build Full: ${lang} ${e.json?.segment_id} skipped — no binary.data on item`);
+      console.warn(`Build Full: ${lang} ${e.json?.segment_id} skipped — no binary slot on item`);
       continue;
     }
-    const wavBuf = Buffer.from(binData.data, 'base64');
-    if (wavBuf.length <= 44) {
+    // CRITICAL: must use this.helpers.getBinaryDataBuffer() — see Check Timing
+    // + Pad for full explanation. With N8N_BINARY_DATA_MODE=filesystem the raw
+    // binary.data.data is a tiny placeholder, not the actual WAV bytes.
+    const originalIdx = indexMap.get(e);
+    if (originalIdx === undefined) {
+      skippedNoBinary++;
+      console.warn(`Build Full: ${lang} ${e.json?.segment_id} skipped — could not resolve original item index`);
+      continue;
+    }
+    let wavBuf;
+    try {
+      wavBuf = await this.helpers.getBinaryDataBuffer(originalIdx, 'data');
+    } catch (err) {
+      skippedNoBinary++;
+      console.warn(`Build Full: ${lang} ${e.json?.segment_id} skipped — getBinaryDataBuffer failed: ${err.message}`);
+      continue;
+    }
+    if (!wavBuf || wavBuf.length <= 44) {
       skippedEmptyWav++;
-      console.warn(`Build Full: ${lang} ${e.json?.segment_id} skipped — WAV is ${wavBuf.length} bytes (header-only or empty)`);
+      console.warn(`Build Full: ${lang} ${e.json?.segment_id} skipped — WAV is ${wavBuf?.length ?? 0} bytes (header-only or empty)`);
       continue;
     }
     let pcm = wavBuf.subarray(44);
