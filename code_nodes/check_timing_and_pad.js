@@ -41,10 +41,13 @@ $('Read Prompts').all().forEach(i => { if (i.json.key) promptMap[i.json.key] = i
 function loadPrompt(key, vars = {}) {
   const raw = promptMap[key];
   if (!raw) throw new Error(`Missing prompt "${key}" in prompts sheet — add a row with this key`);
-  return Object.entries(vars).reduce(
-    (s, [k, v]) => s.replace(new RegExp(`\\{\\{${k}\\}\\}`, 'g'), String(v ?? '')),
+  const result = Object.entries(vars).reduce(
+    (s, [k, v]) => s.replace(new RegExp(`\\{\\{\\s*${k}\\s*\\}\\}`, 'g'), String(v ?? '')),
     raw
   );
+  const leaks = result.match(/\{\{\s*[a-z][a-z0-9_]*\s*\}\}/g);
+  if (leaks) throw new Error(`Unsubstituted placeholders in prompt "${key}": ${leaks.join(', ')}`);
+  return result;
 }
 const TOV     = loadPrompt('tone_of_voice');
 
