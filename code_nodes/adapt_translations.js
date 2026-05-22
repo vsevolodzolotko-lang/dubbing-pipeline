@@ -33,11 +33,17 @@ function loadPrompt(key, vars = {}) {
 }
 const SYSTEM_PROMPT = loadPrompt('adapt_shorten_system');
 
-const ATTEMPT_PROMPTS = [
-  (lang, budget, est, en, trans, minChars) => loadPrompt('adapt_attempt_light',  { lang, budget, est, en, trans, min_chars: minChars }),
-  (lang, budget, est, en, trans, minChars) => loadPrompt('adapt_attempt_medium', { lang, budget, est, en, trans, min_chars: minChars }),
-  (lang, budget, est, en, trans, minChars) => loadPrompt('adapt_attempt_max',    { lang, budget, est, en, trans, min_chars: minChars }),
+// R6.a: unified template + 3 attempt-level aggression descriptors.
+// AGGRESSION[i] passed as {{aggression}} placeholder; i = attempt level (0..2).
+const AGGRESSION = [
+  'Aim for ~5-15% reduction. Remove only filler words and minor redundancies. Preserve sentence structure and all key concepts.',
+  'Aim for ~15-25% reduction. Rephrase for compactness, but every concept from the English source must remain.',
+  'Reduce as much as possible. Preserve every distinct concept, negation, contrast, and proper noun from the English. Cut only filler and stylistic flourishes.',
 ];
+const ATTEMPT_PROMPTS = AGGRESSION.map(aggression =>
+  (lang, budget, est, en, trans, minChars) =>
+    loadPrompt('adapt_attempt_template', { lang, budget, est, en, trans, min_chars: minChars, aggression })
+);
 
 
 // Strip Claude meta-commentary.

@@ -335,20 +335,26 @@ If you must cut characters and these are your only options — return the ORIGIN
 - DO NOT use markdown formatting (**, __, backticks).
 - DO NOT include multiple drafts — pick ONE and output only it.
 - DO NOT include blank lines."
-"adapt_attempt_light"	"W2 Adapt Translations attempt 1 (light) — user-message template. Placeholders: {{lang}} {{budget}} {{est}} {{en}} {{trans}} {{min_chars}}."	"Shorten this {{lang}} translation slightly (~5-15%) to fit within {{budget}}s (currently ~{{est}}s).
+"adapt_attempt_light"	"W2 Adapt Translations attempt 1 (light). DEPRECATED after R6.a — replaced by adapt_attempt_template. Kept as rollback backup; safe to delete after R6.a stabilizes."	"Shorten this {{lang}} translation slightly (~5-15%) to fit within {{budget}}s (currently ~{{est}}s).
 Remove only filler words and minor redundancies. Preserve sentence structure and all key concepts.
 Minimum allowed length: {{min_chars}} characters.
 
 Original English (preserve all concepts): {{en}}
 Current translation: {{trans}}"
-"adapt_attempt_medium"	"W2 Adapt Translations attempt 2 (medium)."	"Shorten this {{lang}} translation more (~15-25%) to fit within {{budget}}s (currently ~{{est}}s).
+"adapt_attempt_medium"	"W2 Adapt Translations attempt 2 (medium). DEPRECATED after R6.a — replaced by adapt_attempt_template. Kept as rollback backup; safe to delete after R6.a stabilizes."	"Shorten this {{lang}} translation more (~15-25%) to fit within {{budget}}s (currently ~{{est}}s).
 Rephrase for compactness, but every concept from the English source must remain.
 Minimum allowed length: {{min_chars}} characters.
 
 Original English (preserve all concepts): {{en}}
 Current translation: {{trans}}"
-"adapt_attempt_max"	"W2 Adapt Translations attempt 3 (max)."	"Shorten this {{lang}} translation as much as possible to fit within {{budget}}s (currently ~{{est}}s).
+"adapt_attempt_max"	"W2 Adapt Translations attempt 3 (max). DEPRECATED after R6.a — replaced by adapt_attempt_template. Kept as rollback backup; safe to delete after R6.a stabilizes."	"Shorten this {{lang}} translation as much as possible to fit within {{budget}}s (currently ~{{est}}s).
 Preserve every distinct concept, negation, contrast, and proper noun from the English. Cut only filler and stylistic flourishes.
+Minimum allowed length: {{min_chars}} characters.
+
+Original English (preserve all concepts): {{en}}
+Current translation: {{trans}}"
+"adapt_attempt_template"	"W2 Adapt Translations — unified user-message template (R6.a). Replaces adapt_attempt_{light,medium,max}. Placeholders: {{lang}} {{budget}} {{est}} {{en}} {{trans}} {{min_chars}} {{aggression}}. The aggression descriptor is supplied by the Code node based on attempt level (0=light, 1=medium, 2=max)."	"Shorten this {{lang}} translation to fit within {{budget}}s (currently ~{{est}}s).
+{{aggression}}
 Minimum allowed length: {{min_chars}} characters.
 
 Original English (preserve all concepts): {{en}}
