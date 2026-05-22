@@ -46,6 +46,13 @@ Every row has two columns: `key`, `value`. Missing keys fall back to the default
 | `drive_input_folder_id` | *(required if using W_Master)* | W_Master Drive Trigger | Google Drive folder ID watched by W_Master for new audio files. Set on the Drive Trigger node directly in n8n UI (not read from sheet at runtime — n8n needs the folder ID when registering the poll). Documented here so the same value is recorded alongside the other folder IDs. |
 | `slack_channel` | *(required if using W_Master)* | W_Master Build Slack Message | Slack channel ID where W_Master posts the completion message. Use channel ID (e.g. `C01234ABCDE`) — find it in Slack: right-click channel → View channel details → bottom of dialog shows ID. The bot itself authenticates via an n8n Slack credential, not via the config sheet. Bot must be in the channel (`/invite @YourBotName`) unless its OAuth scope includes `chat:write.public`. |
 
+## Manual W1 trigger
+
+| Key | Default | Read by | Purpose |
+|---|---|---|---|
+| `manual_w1_file_id` | *(empty)* | W1 Get Params | Google Drive file ID of the audio to process when W1 is triggered manually (not via W_Master). Edit this row before each ad-hoc W1 run; click Execute on W1 Manual Trigger. W_Master-triggered runs ignore this — W_Master passes file_id in its payload, which takes priority. If both this row is empty AND W_Master didn't trigger, Get Params throws a clear actionable error. |
+| `manual_w1_lesson_id` | *(empty)* | W1 Get Params | Lesson identifier (becomes the `segment_id` prefix, e.g. `the_anchor_seg_001`). Same semantics as `manual_w1_file_id` — used only for manual W1 runs, overridden by W_Master payload when present. Pick a stable name per lesson so re-runs overwrite consistent segment_ids. |
+
 ---
 
 ## Per-language CPS overrides

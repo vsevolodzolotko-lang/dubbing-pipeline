@@ -25,7 +25,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Accept params from either Execute Workflow Trigger (parent passes {file_id, lesson_id})\n// or Manual Trigger (fall back to hardcoded test defaults).\nconst incoming = $input.first()?.json || {};\nconst file_id = incoming.file_id || '1gDRuwWEtfeHcQwEjEMbg4cQOHZQC_nYR';\nconst lesson_id = incoming.lesson_id || 'sleep_001';\nif (!file_id) throw new Error('Missing file_id');\nif (!lesson_id) throw new Error('Missing lesson_id');\nreturn [{ json: { file_id, lesson_id } }];"
+        "jsCode": "// Accept params from one of three sources, in priority order:\n//   1. Execute Workflow Trigger payload (W_Master passes {file_id, lesson_id}).\n//   2. Manual Trigger pinned data (rare; only if user explicitly pinned).\n//   3. Config sheet keys (manual_w1_file_id, manual_w1_lesson_id) — primary\n//      mechanism for manual ad-hoc runs.\n// Throws with actionable message if all three are empty.\nconst fromExec   = $('Execute Workflow Trigger').first()?.json || {};\nconst fromManual = $('Manual Trigger').first()?.json || {};\nconst configMap = {};\n$('Read Config').all().forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });\n\nconst file_id = fromExec.file_id || fromManual.file_id || configMap.manual_w1_file_id;\nconst lesson_id = fromExec.lesson_id || fromManual.lesson_id || configMap.manual_w1_lesson_id;\n\nif (!file_id) {\n  throw new Error('Missing file_id. For manual W1 runs, set the `manual_w1_file_id` row in the config sheet to the Drive file ID of the audio to process. For W_Master-triggered runs, ensure W_Master is passing file_id in its payload.');\n}\nif (!lesson_id) {\n  throw new Error('Missing lesson_id. For manual W1 runs, set the `manual_w1_lesson_id` row in the config sheet to the lesson identifier (will become segment_id prefix, e.g. \"my_lesson\"). For W_Master-triggered runs, ensure W_Master is passing lesson_id in its payload.');\n}\nreturn [{ json: { file_id, lesson_id } }];"
       },
       "id": "6f6bbf51-b7cf-4bdc-b47e-7393d646dd9a",
       "name": "Get Params",
@@ -322,6 +322,37 @@
           "name": "Google Sheets account"
         }
       }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU/edit?usp=sharing",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1187289606,
+          "mode": "list",
+          "cachedResultName": "config",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU/edit#gid=1187289606"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      },
+      "id": "mpgxvbcg7me6fqqx",
+      "name": "Read Config",
+      "position": [
+        104,
+        80
+      ]
     }
   ],
   "pinData": {},
@@ -330,7 +361,7 @@
       "main": [
         [
           {
-            "node": "Get Params",
+            "node": "Read Config",
             "type": "main",
             "index": 0
           }
@@ -341,7 +372,7 @@
       "main": [
         [
           {
-            "node": "Get Params",
+            "node": "Read Config",
             "type": "main",
             "index": 0
           }
@@ -386,6 +417,17 @@
         [
           {
             "node": "Segment Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Config": {
+      "main": [
+        [
+          {
+            "node": "Get Params",
             "type": "main",
             "index": 0
           }
