@@ -4,6 +4,22 @@
 
 ---
 
+### 2026-05-22 — CPS recalibration (R7.a): TR 14→10, PL 14→13, PT 16→15
+
+Context: After R4/R6.c prompt refactors stabilized translation quality, profiling `the_anchor` (31 affirmation segments × 7 langs) and combining with `test4` data (N=231 total samples) revealed measurable drift between configured `cps_estimate_*` values and observed chars-per-second at each voice's default playback speed. TR was the most painful: default_speed=0.80, observed CPS=10.5, configured at 14 — a -3.49 cps miss, causing chronic `final_speed=1.10/1.15` compression retries in W3 (8 of 31 TR segments hit the speed cap on the_anchor R4 run).
+
+Decision:
+- `cps_estimate_tr`: 14 → **10** (HIGH confidence, N=25, delta -3.49)
+- `cps_estimate_pl`: 14 → **13** (HIGH confidence, N=21, delta -0.99 — at threshold, updated)
+- `cps_estimate_pt`: 16 → **15** (HIGH confidence, N=30, delta -1.01)
+- DE/ES/FR/IT: deltas under ±1.0, left unchanged.
+
+Rationale: Filter rule for CPS measurement is now "at each lang's auto-detected default voice speed" (min observed `final_speed` per lang), not blanket `final_speed=1.0`. PT voice runs at 0.9, TR at 0.8 by default — previous script (filtered to 1.0 only) had ZERO samples for those langs, hiding the drift. New `analyze_cps.js` v2 auto-detects per-lang default speed, joins optional `segments.csv` for `segment_type` breakdown, and prints copy-pasteable config update commands.
+
+Verification path: after applying new values, re-run a full lesson through W3 and re-run `analyze_cps.js` — expect |delta| < 1.0 across all langs at HIGH confidence.
+
+---
+
 ### 2026-05-09 — Example entry format
 
 Context: Needed a consistent way to document architectural and product decisions so future contributors understand why choices were made, not just what was chosen.

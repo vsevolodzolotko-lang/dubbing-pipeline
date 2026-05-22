@@ -50,17 +50,21 @@ Every row has two columns: `key`, `value`. Missing keys fall back to the default
 
 ## Per-language CPS overrides
 
-| Key | Default | Read by | Purpose |
-|---|---|---|---|
-| `cps_estimate_de` | `12`   | W2 Adapt Translations, W3 Check Timing + Pad | Per-language chars-per-second estimate. Used to predict whether a translation will fit in the slot before TTS (W2) and to compute `target_chars` for Claude shorten/expand prompts (W3). Defaults are baked into `CPS_DEFAULTS` in both code nodes. If a key is present in config, it overrides the default. |
-| `cps_estimate_es` | `15`   | (same) | |
-| `cps_estimate_fr` | `15`   | (same) | |
-| `cps_estimate_it` | `14`   | (same) | |
-| `cps_estimate_pl` | `14`   | (same) | |
-| `cps_estimate_pt` | `16`   | (same) | |
-| `cps_estimate_tr` | `14`   | (same) | |
+| Key | Default | Calibrated (2026-05-22) | Read by | Purpose |
+|---|---|---|---|---|
+| `cps_estimate_de` | `12`   | `12` (no change — obs 12.67, delta +0.67) | W2 Adapt Translations, W3 Check Timing + Pad | Per-language chars-per-second estimate. Used to predict whether a translation will fit in the slot before TTS (W2) and to compute `target_chars` for Claude shorten/expand prompts (W3). Defaults are baked into `CPS_DEFAULTS` in both code nodes. If a key is present in config, it overrides the default. |
+| `cps_estimate_es` | `15`   | `15` (no change — obs 15.30, delta +0.30) | (same) | |
+| `cps_estimate_fr` | `15`   | `15` (no change — obs 15.83, delta +0.83) | (same) | |
+| `cps_estimate_it` | `14`   | `14` (no change — obs 13.25, delta −0.75) | (same) | |
+| `cps_estimate_pl` | `14`   | **`13`** ← lower, obs 13.01, delta −0.99 | (same) | |
+| `cps_estimate_pt` | `16`   | **`15`** ← lower, obs 15.15, delta −0.85 | (same) | |
+| `cps_estimate_tr` | `14`   | **`10`** ← critical fix, obs 10.51, delta −3.49 | (same) | |
 
-Run `node scripts/analyze_cps.js <localizations.csv>` after any W3 run to compute the observed CPS per language and see whether to update the config values. Voice changes can shift CPS noticeably (different voice = different speaking pace).
+Calibration based on N=231 samples combined from `the_anchor` (R4 era, 31 segs × 7 langs) and `test4` (2 segs × 7 langs). Threshold for update: `|observed − current| > 1.0` cps. PL/PT close to threshold; updated for safety since multiple lessons converged on lower values.
+
+**TR was the largest miss** (delta −3.49): voice runs at `default_speed=0.8`, system was predicting at higher CPS, causing constant `final_speed=1.10/1.15` compression retries in W3. New value 10 should largely eliminate these.
+
+Re-run `node scripts/analyze_cps.js <localizations.csv> [--segments=<segments.csv>]` after any voice change, voice-param tweak, or content-type shift. See [`docs/cps_calibration.md`](cps_calibration.md) for full workflow.
 
 ## Dead keys to remove from your live sheet
 
