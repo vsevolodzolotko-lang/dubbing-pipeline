@@ -1,67 +1,68 @@
-# Adaptation Shorten Prompt — Synthesize fallback
+# Adaptation Shorten Prompt
 
-**Version:** 1.0
-**Used by:** W3 Check Timing + Pad (Synthesize), single-segment shorten loop
-
-Not to be confused with `prompts/adaptation.md`, which is the W2 multi-language adapt during Translate. This prompt fires only inside Synthesize when the initial TTS for one segment × one language exceeded its `effective_slot`.
-
----
+Single-segment text shortening when TTS output exceeds the available time slot AFTER initial Translate has already adapted.
 
 ## When called
 
-After initial TTS at speed 1.0, when `real_duration_sec > effective_slot` (i.e., breath-borrow couldn't absorb the overrun). Called up to 3 times per segment × lang with escalating attempt levels. Between each call: re-TTS at speed 1.0, re-measure, re-check.
+By Synthesize workflow when `real_duration_sec > effective_slot_sec` (en_duration + max_borrowable). Called as fallback before speed adjustment.
 
-## Inputs
-
-- `original_en` — the EN source text for this segment
-- `current_translation` — the current `{lang}` translation that produced TTS too long for `effective_slot`
-- `target_chars` — calculated from `effective_slot × LANG_CPS[lang]`
-- `attempt_level` — 1 (light), 2 (medium), 3 (max)
-- `lang` — target lang code (e.g. `de`)
-- `tov_content` — the full ToV text from config sheet
-
----
-
-## System prompt
+## Prompt template
 
 ```
 You are shortening a translated meditation/wellness script segment to fit a tight audio time slot.
 
-The current translation produced TTS audio that exceeds the available slot by a small margin. Your job: shorten the translation just enough to fit, while preserving meaning and tone.
+The current translation produces TTS audio that exceeds the available slot. Your job: shorten just enough to fit, while preserving meaning, tone, and ToV authenticity.
 
-ORIGINAL EN: {original_en}
-CURRENT TRANSLATION ({lang}): {current_translation}
-TARGET LENGTH: ~{target_chars} characters
-ATTEMPT LEVEL: {attempt_level} — {attempt_description}
+==== INPUTS ====
 
-ATTEMPT LEVEL DESCRIPTIONS:
-- Level 1 (light): Remove filler words, contractions, redundancies. Keep all meaning.
-- Level 2 (medium): Rephrase for compactness. May drop redundant qualifiers but keep all content.
-- Level 3 (max): Compress to essential meaning only. May drop secondary context but preserve core message.
+ORIGINAL EN TEXT:
+{original_en}
 
-TONE OF VOICE:
+CURRENT TRANSLATION in {lang}:
+{current_translation}
+
+CURRENT LENGTH: {current_chars} characters
+TARGET LENGTH: ~{target_chars} characters (need to remove ~{chars_to_remove} characters)
+ATTEMPT LEVEL: {attempt_level}
+
+- Level 1 (light): Remove redundant qualifiers. Keep all meaning.
+- Level 2 (medium): Compress complex sentences into simpler ones. Drop secondary context.
+- Level 3 (max): Preserve only core message. May drop one full clause if needed.
+
+==== BRAND TONE OF VOICE ====
+
 {tov_content}
 
-RULES:
-1. Stay close to target length (within ±10%)
-2. Maintain ToV warmth and rhythm
-3. Preserve any ellipsis (...) or em-dash (—) timing markers
-4. Never add new filler ("really", "very", etc.) — those break tone
-5. Use natural language structures for {lang}
-6. Preserve negations ("no", "not", "without", "never") and contrasts ("A, not B") exactly
-7. Preserve specific nouns, named techniques, numbers, proper names
+==== SHORTENING STRATEGY (ToV section 12.4) ====
 
-OUTPUT: ONLY the shortened translation text. No commentary, no explanation, no quotes.
+Remove in this order:
+
+1. Redundant qualifiers and adverbs ("very", "really", "quite", "naturally", "gently" — but only when not essential)
+2. Compound sentences → split into simpler shorter ones
+3. Secondary context phrases ("which means…", "as we know…", "in other words…")
+4. Optional sensory descriptors if essential meaning carries
+5. ONLY at Level 3: drop one full subordinate clause if needed
+
+==== STRICT RULES ====
+
+NEVER REMOVE:
+- Ellipsis (`...`) or em-dash (`—`) markers — those control audio pacing
+- Core directive ("breathe in", "notice your shoulders")
+- Permission language ("if it feels comfortable") — this IS Spirio voice
+- Inviting modifiers — see ToV section 3
+
+NEVER ADD:
+- New content not in original
+- Filler words
+- Formal address
+
+==== OUTPUT ====
+
+Output ONLY the shortened translation in {lang}. No commentary.
 ```
 
----
+## Implementation notes
 
-## Length floor
-
-Code-side check: if Claude returns text shorter than 60% of `current_translation.length`, reject the output and keep the previous (longer) version. Prevents over-aggressive compression that drops concepts despite the prompt instructions.
-
----
-
-## Output spec
-
-Single line of `{lang}` text. No JSON, no markdown, no surrounding quotes, no commentary. The Code node consumes the raw output, re-runs TTS at speed 1.0, and re-checks `real_duration_sec` vs `effective_slot`.
+If after 3 attempts at increasing aggression still over slot:
+- Trigger speed adjustment chain (1.10 → 1.15)
+- If still over → `needs_attention = true`
