@@ -4,6 +4,38 @@
 
 ---
 
+### 2026-05-23 — TOV_V3_UNIVERSAL_PRINCIPLES_ADDED
+
+Context: ToV v2 was meditation-centric. Spirio actually produces multiple content types: meditation, visualization, movement practices (Tai Chi/Qigong/Kundalini/Yoga), educational lectures, affirmations, mantras. Old ToV didn't differentiate.
+
+Decision: ToV v3 adds three structural improvements:
+1. Section 2 — Universal Principles (8 numbered rules applying to ALL content types)
+2. Section 10 — Content Type Specific Guidance (Educational / Guided Practice / Vocal)
+3. Section 12 — Translation Considerations (how to expand/shorten using authentic Spirio patterns instead of filler)
+
+All language patterns and phrases from v2 preserved 1:1. Section ordering preserved for backwards compatibility with existing prompts referencing section numbers.
+
+Rationale: Single ToV must cover all content types. Per-type subsections give translators and Tone Analysis the framework to handle different rhythms (short for practice, flowing for lecture). Translation Considerations directly addresses our expansion problem from real production data.
+
+---
+
+### 2026-05-23 — EXPANSION_STRATEGY_VIA_TOV_PATTERNS
+
+Context: Previous expansion prompt said "restore meaning that was cut" — works only when adaptation actually cut something. Doesn't help when source translation is naturally short (TR, PL). Claude Code advised against filler words but didn't provide alternative.
+
+Decision: New expansion strategy with 5 prioritized techniques, all sourced from ToV section 3 patterns:
+1. Inviting modifiers ("when you're ready")
+2. Sensory anchoring ("softly", "with care")
+3. Permission language ("you don't need to")
+4. Bridging awareness ("notice what happens when")
+5. Internal pauses via ellipsis (`...`)
+
+These are NOT filler — they ARE the substance of meditation/practice language. Expansion now explicitly classifies case as "restoration" (something was cut) or "authentic_expansion" (naturally short) and applies appropriate techniques.
+
+Rationale: Validates the existing brand voice instead of fighting it. The very patterns that make Spirio recognizable are exactly the ones that lengthen text without breaking tone. Two-attempt limit with revert-on-overshoot prevents runaway expansion.
+
+---
+
 ### 2026-05-22 — CPS recalibration (R7.a): TR 14→10, PL 14→13, PT 16→15
 
 Context: After R4/R6.c prompt refactors stabilized translation quality, profiling `the_anchor` (31 affirmation segments × 7 langs) and combining with `test4` data (N=231 total samples) revealed measurable drift between configured `cps_estimate_*` values and observed chars-per-second at each voice's default playback speed. TR was the most painful: default_speed=0.80, observed CPS=10.5, configured at 14 — a -3.49 cps miss, causing chronic `final_speed=1.10/1.15` compression retries in W3 (8 of 31 TR segments hit the speed cap on the_anchor R4 run).
