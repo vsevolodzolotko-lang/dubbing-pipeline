@@ -18,7 +18,7 @@ Every row has two columns: `key`, `value`. Missing keys fall back to the default
 | Key | Default | Read by | Purpose |
 |---|---|---|---|
 | `max_adaptation_attempts` | `3` | W2 Adapt Translations | Upper bound for the W2 CPS-driven adaptation loop per language. Not currently read by W3 (W3 hardcodes 3 attempts for synthesize-time shorten). |
-| `expansion_threshold` | `0.75` | W3 Check Timing + Pad | Triggers expansion loop when `real_duration_sec < en_duration_sec × expansion_threshold`. Lower → expansion fires less often (only very short TTS). Higher → expansion tries to fill more padding. Default lowered from 0.85 to 0.75 after observing that ratio 0.75–0.85 sounded acceptable without expansion. |
+| `expansion_threshold` | `0.85` | W3 Phase 2: Batch LLM+TTS | Triggers Phase 2 expansion when `real_duration_sec < en_duration_sec × expansion_threshold`. Lower → expansion fires less often (only very short TTS). Higher → expansion tries to fill more padding. **As of 2026-05-25**: inline expansion was removed from Check Timing + Pad; this threshold now gates the Phase 2 batch (Expand → Verify → Editor → re-TTS). Phase 2 includes all 7 langs (Phase 1's `finalSpeed===1.0` gate that excluded PT/TR no longer applies). |
 
 ## Synthesize timing
 

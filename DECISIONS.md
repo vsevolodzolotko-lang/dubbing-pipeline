@@ -4,6 +4,31 @@
 
 ---
 
+### 2026-05-25 — PHASE2_BATCHED_EXPANSION
+
+Context: Inline expansion in W3's `Check Timing + Pad` (calling `w3_expand_system` per segment) was bypassing the Verify + Editor defense layer. Sleep1_full re-run with new ToV v3 expansion strategy introduced grammatical errors (DE seg_007 "und erwartend" instead of "erwarten"; PL seg_042 "przyść" typo not caught; FR seg_003 / DE seg_042 hit speed cap 1.15 due to expansion overshoot). Verify and Editor only run inside W2 Translate pipeline; any text W3 expansion generates is never re-validated.
+
+Decision: Removed inline expansion from `Check Timing + Pad`. Added a 3-node Phase 2 chain in W3 that runs AFTER the per-segment Loop completes:
+1. `Phase 2: Batch LLM+TTS` (Code) — collects all rows with `real_duration < en_duration × 0.85` AND `needs_attention=false`, groups by segment_id, sends batches of 8 segments to Anthropic (CHUNK=6 parallel — Tier 2) for expansion using new `w3_expand_batch_system` prompt, pipes through `qa_verify_system` and `editor_system` (same prompts as W2 Verify/Editor), then re-TTSes accepted text. Builds new WAV with same lead silence + new TTS + recomputed tail silence. Reverts to Phase 1 audio on overshoot.
+2. `Phase 2: Drive Update` (HTTP Request) — PATCH /upload/drive/v3/files/{id}?uploadType=media via predefined Google Drive OAuth credential. Overwrites WAV binary in-place at same file_id so Download Segment WAV (in parallel branch) reads refreshed content transparently.
+3. `Phase 2: Update Localizations` (Google Sheets appendOrUpdate by row_key) — writes new text_translated, real_duration_sec, tail_silence_sec, final_duration_sec, expansion_attempts=1.
+
+Branch ordering: Read Localizations Fresh fans out to [Phase 2 chain, Download Segment WAV, Build VTT Per Lang] in that order. n8n's sequential connection evaluation runs Phase 2 to completion before Download starts.
+
+Rationale: Expansion text now passes through the same Verify+Editor defense as initial translations from W2 — catches grammatical errors, regional drift, false-friend traps. Tier 2 Anthropic allows CHUNK=6 parallelism (vs W2's CHUNK=3 on Tier 1). cache_control:ephemeral on system prompts reuses across batches. Single mega-Code node design follows existing Check Timing + Pad pattern (API-key auth work in Code, OAuth side-effects via dedicated downstream nodes). Drive update via HTTP Request rather than n8n's googleDrive node because v3 "update" operation modifies metadata, not file content.
+
+Trade-offs:
+- W3 wall-clock ~+1-2 min per lesson (LLM batches ~30-60s, re-TTS ~30-50s with ELEVENLABS_CHUNK=5 parallel).
+- Cost ~$1-2 additional per lesson (mostly batch LLM tokens + per-cell ElevenLabs TTS retries).
+- PT/TR now receive expansion (Phase 1 inline gating excluded them via `finalSpeed===1.0` check; Phase 2 has no such gate).
+- Old `w3_expand_system` Sheet row preserved as rollback backup (unused).
+
+Verification: re-run sleep1_full through W3 only (translations already in segments tab). Expect: seg_007 DE has correct "erwarten"; seg_042 PL has "przyjść"; seg_044/047 silence reductions preserved (from R8); PT seg_047 6.4s tail silence now closed via expansion. New needs_attention=true cases should NOT increase relative to R8.
+
+Rollback path: `git revert` the workflow JSON commit + delete `w3_expand_batch_system` row from Sheets `prompts` tab. Inline expansion was removed from Check Timing + Pad's jsCode — to fully revert, also restore that block via git.
+
+---
+
 ### 2026-05-23 — TOV_V3_UNIVERSAL_PRINCIPLES_ADDED
 
 Context: ToV v2 was meditation-centric. Spirio actually produces multiple content types: meditation, visualization, movement practices (Tai Chi/Qigong/Kundalini/Yoga), educational lectures, affirmations, mantras. Old ToV didn't differentiate.

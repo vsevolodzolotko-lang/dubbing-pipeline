@@ -232,23 +232,6 @@ ATTEMPT LEVEL: ${level}`;
   return result;
 }
 
-const EXPAND_STATIC = loadPrompt('w3_expand_system', { tov: TOV });
-
-async function claudeExpand(currentText, realSec) {
-  const targetChars = Math.floor(enDur * (LANG_CPS[lang] || 15));
-  const dynamicPart = `Task — expand this segment:
-LANG: ${lang}
-ORIGINAL EN: ${enRef}
-CURRENT (SHORTENED) TRANSLATION: ${currentText}
-TARGET LENGTH: ~${targetChars} characters`;
-
-  const systemBlocks = [
-    { type: 'text', text: EXPAND_STATIC, cache_control: { type: 'ephemeral' } },
-    { type: 'text', text: dynamicPart },
-  ];
-  const raw = await callClaude.call(this, systemBlocks, currentText);
-  return sanitizeClaudeOutput(raw);
-}
 
 if (!enDur || enDur <= 0) {
   const leadBytes   = Math.round(naturalLead * SAMPLE_RATE) * BPS;
@@ -344,23 +327,7 @@ if (pcmDuration(pcm) > maxAllowed) {
   pcm = pcm.subarray(0, truncBytes);
 }
 
-if (finalSpeed === 1.0 && !needsAttention) {
-  let lastText = text;
-  let lastPcm  = pcm;
-  while (expansionAttempts < 2 && pcmDuration(lastPcm) < enDur * expThreshold) {
-    const realSec = pcmDuration(lastPcm);
-    const longer  = await claudeExpand.call(this, lastText, realSec);
-    if (!longer || longer.length <= lastText.length || longer.length > lastText.length * MAX_RETAIN_EXPANSION) break;
-    const newPcm = await tts.call(this, longer, 1.0);
-    if (!newPcm) break;  // TTS failed during expand — keep previous, abort expansion.
-    if (pcmDuration(newPcm) > maxAllowed) break;
-    lastText = longer;
-    lastPcm  = newPcm;
-    expansionAttempts++;
-  }
-  text = lastText;
-  pcm  = lastPcm;
-}
+// Inline expansion removed — Phase 2 batch handles all expansion candidates.
 
 const realDur = pcmDuration(pcm);
 let leadSec, tailSec, borrowedSec;
