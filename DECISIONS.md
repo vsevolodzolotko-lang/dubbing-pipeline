@@ -4,6 +4,43 @@
 
 ---
 
+### 2026-05-26 — PHASE2_RETRY_AND_DIAGNOSTICS
+
+Context: Phase 2 batched expansion (commit c8e72d1) shipped and works end-to-end on sleep1_full — 21/47 candidates accepted, audio meaningfully expanded (seg_047 PT silence 6.255s → 0.083s, seg_044 PT "sem esso" typo → "sem esforço" caught by Editor). But 26 candidates remained unexpanded after a single pass, and the failure reasons (`no_change` / `overshoot` / `negative_tail` / `tts_empty`) were only visible via console.log histogram — not persisted in any Sheet, and lost entirely when n8n purges successful executions. Without per-cell diagnostics, it was impossible to tell whether to tune the prompt, the threshold, or the TTS budget. Additionally, cells where Phase 2 accepted expansion but the result was still very short (ratio < 0.70) were not flagged for human review.
+
+Decision: Added a 2-pass retry mechanism to Phase 2 with per-candidate outcome diagnostics:
+
+1. **Retry pass** (`code_nodes/phase2_batch_llm_tts.js` rewritten ~430 → ~580 LOC):
+   - After attempt 1 (Expand → Verify → Editor → re-TTS), classify each cell by outcome.
+   - `no_change` and accepted-but-still-short (newRealDur < en_dur × 0.85) → retry with `w3_expand_batch_retry_harder` prompt (push more ToV patterns, target_chars × 1.05).
+   - `overshoot` → retry with `w3_expand_batch_retry_shorter` prompt (pull back, target_chars × 0.85, strict ceiling).
+   - Retry skips Verify (latency saving) but keeps Editor (still catches typos on new expansion). `negative_tail`, `tts_empty`, `error` are not retried — too edge-case.
+   - Final result per cell: prefer attempt 2 if accepted, else attempt 1 if accepted, else most recent skip reason.
+
+2. **phase2_outcome column** in localizations sheet (`accepted` / `no_change` / `overshoot` / `negative_tail` / `tts_empty` / `error` / empty=`not_candidate`). Persists the diagnostic across runs regardless of n8n execution retention settings. Sortable/filterable in Sheets.
+
+3. **Items emit for ALL candidates** (not just accepted) — Phase 2 Code now emits one item per candidate with `has_binary` flag. New IF node `Phase 2: Has Binary?` routes:
+   - `has_binary=true` → Drive Update (PATCH new WAV) → Update Localizations
+   - `has_binary=false` → Update Localizations directly (writes `phase2_outcome` and `expansion_attempts` only; Phase 1 audio stays in Drive untouched)
+
+4. **needs_attention inline flag** — for accepted cells where `newRealDur < en_dur × 0.70`, set `needs_attention=true` in the emit. Threshold 0.70 (not 0.85) to avoid noise — flags only severely-short results that warrant human review.
+
+5. **Two new optional prompt rows** in Sheets `prompts` tab: `w3_expand_batch_retry_harder` and `w3_expand_batch_retry_shorter`. Both load via `loadPrompt(key, vars, optional=true)` — if missing, Phase 2 falls back to single-pass behavior (graceful degradation). Templates committed under `prompts/proposed_changes/`.
+
+Rationale: Per-candidate diagnostics unblock all future tuning iterations (CPS recalibration, threshold tuning, prompt revisions) — without them, every observation requires re-running with execution save enabled. Retry pass directly addresses the largest unaccepted category (`no_change`, ~50% of skips) where LLM returned identical text and a more aggressive prompt has a real chance. `expansion_attempts` semantics shifted: now means "LLM rounds the cell went through" (0/1/2), with accept/skip status carried by `phase2_outcome` — cleaner separation of metrics.
+
+Trade-offs:
+- W3 wall-clock +30-60s per lesson when retry candidates exist (1-2 extra batches × 2 prompt variants + ~10-15 re-TTS calls).
+- Phase 2 emit changed shape: now emits ALL candidates including rejected ones. Downstream Drive Update would 400 on missing binary — mitigated by new IF node.
+- `expansion_attempts` historic interpretation changed: pre-2026-05-26 `1`=accepted, post: `1`=attempt 1 ran (accepted OR rejected). For unambiguous accept/skip status, read `phase2_outcome` instead.
+- New `phase2_outcome` column must be added to live localizations sheet before re-import — otherwise Update Localizations writes are no-ops for that column.
+
+Verification: retry execution #71235 with currently saved workflow. Expect outcomes table to show ~10-15 cells flipping from `no_change`/`overshoot` to `accepted` via attempt 2. `phase2_outcome` should be populated for all 47 prior candidates (accepted + rejected). needs_attention=true for any accepted cells where newRealDur < en_dur × 0.70 (likely 3-5 cases).
+
+Rollback path: revert the workflow JSON commit + delete both retry prompt rows from Sheets. Phase 2 Code falls back to single-pass behavior when retry prompts missing.
+
+---
+
 ### 2026-05-25 — PHASE2_BATCHED_EXPANSION
 
 Context: Inline expansion in W3's `Check Timing + Pad` (calling `w3_expand_system` per segment) was bypassing the Verify + Editor defense layer. Sleep1_full re-run with new ToV v3 expansion strategy introduced grammatical errors (DE seg_007 "und erwartend" instead of "erwarten"; PL seg_042 "przyść" typo not caught; FR seg_003 / DE seg_042 hit speed cap 1.15 due to expansion overshoot). Verify and Editor only run inside W2 Translate pipeline; any text W3 expansion generates is never re-validated.

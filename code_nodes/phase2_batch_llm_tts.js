@@ -1,20 +1,25 @@
-// W3 Phase 2: Batched late-stage expansion through Verify + Editor.
+// W3 Phase 2: Batched late-stage expansion through Verify + Editor with retry pass.
 // Reads all localizations rows from Read Localizations Fresh, identifies cells with
-// real_duration < en_duration × threshold (and needs_attention=false), runs a batch
-// Expansion (Anthropic Sonnet) → Verify (Sonnet QA) → Editor (Gemini Flash) → re-TTS
-// pipeline. For each accepted expansion, builds a new WAV (same lead silence + new TTS +
-// recomputed tail silence) and emits an item with new binary + updated metadata for
-// downstream Drive Update (overwrites file at same audio_drive_file_id) and Update
-// Localizations Sheet nodes. Items where expansion was rejected or not needed are NOT
-// emitted (this branch terminates side-effect only; Download Segment WAV continues
-// reading the original Read Localizations Fresh items in parallel branch).
+// real_duration < en_duration × THRESHOLD (and needs_attention=false), runs a 2-pass
+// pipeline:
+//   Attempt 1: Expand (Sonnet, w3_expand_batch_system) → Verify (Sonnet QA)
+//              → Editor (Gemini Flash) → Re-TTS
+//   Attempt 2 (only for cells where attempt 1 was no_change / overshoot / still_short):
+//              Expand-retry-harder OR Expand-retry-shorter (per category)
+//              → Editor (Verify skipped on retry) → Re-TTS
+// For each candidate (accepted OR rejected) emits one item with phase2_outcome diagnostic.
+// Accepted items carry binary (new WAV) → IF node downstream routes them to Drive Update.
+// Rejected items have no binary → IF node routes them directly to Update Localizations
+// (writes phase2_outcome and expansion_attempts only; Phase 1 audio stays in Drive).
+// needs_attention=true is set for accepted cells where newRealDur < en_dur × 0.70.
 
 const SAMPLE_RATE = 22050;
 const BPS = 2;
 const EXPAND_BATCH_SIZE = 8;
-const CHUNK = 6;                 // Tier 2 Anthropic — higher parallelism than W2's CHUNK=3
-const ELEVENLABS_CHUNK = 5;      // parallel TTS calls per slice
-const MAX_RETAIN_EXPANSION = 1.5;
+const CHUNK = 6;                       // Tier 2 Anthropic — higher parallelism than W2's CHUNK=3
+const ELEVENLABS_CHUNK = 5;            // parallel TTS calls per slice
+const STILL_SHORT_THRESHOLD = 0.85;    // accepted but newRealDur < en_dur × this → retry harder
+const NEEDS_ATTENTION_THRESHOLD = 0.70;// accepted but newRealDur < en_dur × this → flag for human
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
 const ELEVENLABS_URL = (vid) => `https://api.elevenlabs.io/v1/text-to-speech/${vid}/stream?output_format=pcm_22050`;
@@ -37,9 +42,12 @@ if (!apiKey || !geminiKey || !elevenKey) {
   throw new Error('Phase 2: missing API key in config (anthropic_api_key/gemini_api_key/elevenlabs_api_key)');
 }
 
-function loadPrompt(key, vars = {}) {
+function loadPrompt(key, vars = {}, optional = false) {
   const raw = promptMap[key];
-  if (!raw) throw new Error(`Missing prompt "${key}" in prompts sheet — add a row with this key`);
+  if (!raw) {
+    if (optional) return null;
+    throw new Error(`Missing prompt "${key}" in prompts sheet — add a row with this key`);
+  }
   const result = Object.entries(vars).reduce(
     (s, [k, v]) => s.replace(new RegExp(`\\{\\{\\s*${k}\\s*\\}\\}`, 'g'), String(v ?? '')),
     raw
@@ -53,6 +61,13 @@ const TOV = loadPrompt('tone_of_voice');
 const EXPAND_BATCH_SYSTEM = loadPrompt('w3_expand_batch_system', { tov: TOV });
 const QA_SYSTEM = loadPrompt('qa_verify_system');
 const EDITOR_SYSTEM = loadPrompt('editor_system');
+// Retry prompts are optional — if missing, Phase 2 falls back to single-pass behavior
+const EXPAND_RETRY_HARDER = loadPrompt('w3_expand_batch_retry_harder', { tov: TOV }, true);
+const EXPAND_RETRY_SHORTER = loadPrompt('w3_expand_batch_retry_shorter', { tov: TOV }, true);
+const RETRY_ENABLED = !!(EXPAND_RETRY_HARDER && EXPAND_RETRY_SHORTER);
+if (!RETRY_ENABLED) {
+  console.log('Phase 2: retry prompts missing — running single-pass (no attempt 2)');
+}
 
 const CPS_DEFAULTS = { de: 12, es: 15, fr: 15, pl: 14, pt: 16, it: 14, tr: 14 };
 const LANG_CPS = {};
@@ -62,10 +77,9 @@ for (const l of ['de','es','fr','pl','pt','it','tr']) {
 
 // --- collect candidates ---
 const allItems = $input.all();
-const candidates = {};  // { segment_id: { en, langs: { [lang]: { current, real, en_dur, lead, file_id, row_key, lesson_id, voice_id, voice_speed, ... } } } }
+const candidates = {};  // { segment_id: { en, langs: { [lang]: { ... } } } }
 for (const it of allItems) {
   const j = it.json;
-  // Skip needs_attention rows (Phase 1 already flagged for manual review)
   if (j.needs_attention === true || j.needs_attention === 'TRUE' || j.needs_attention === 'true') continue;
   const enDur = parseFloat(j.en_duration_sec) || 0;
   const real = parseFloat(j.real_duration_sec) || 0;
@@ -162,51 +176,41 @@ function parseLLMJson(raw) {
   return {};
 }
 
-// --- group into batches of EXPAND_BATCH_SIZE segments ---
+// --- batch helpers ---
 const segmentEntries = Object.entries(candidates);
-const expandBatches = [];
-for (let i = 0; i < segmentEntries.length; i += EXPAND_BATCH_SIZE) {
-  expandBatches.push(segmentEntries.slice(i, i + EXPAND_BATCH_SIZE));
+function chunkSegments(entries, size) {
+  const batches = [];
+  for (let i = 0; i < entries.length; i += size) batches.push(entries.slice(i, i + size));
+  return batches;
 }
-console.log(`Phase 2: ${expandBatches.length} batches of up to ${EXPAND_BATCH_SIZE} segments each`);
 
-// --- Phase 2.1: BATCH EXPAND ---
-async function runOneExpandBatch(batch) {
+async function runOneExpandBatch(batch, systemPrompt, charsMultiplier) {
   const userMap = {};
   for (const [sid, data] of batch) {
     userMap[sid] = { en: data.en };
     for (const [lang, info] of Object.entries(data.langs)) {
-      const targetChars = Math.round(info.en_duration * (LANG_CPS[lang] || 15) * 0.95);
+      const targetChars = Math.round(info.en_duration * (LANG_CPS[lang] || 15) * charsMultiplier);
       userMap[sid][lang] = { current: info.current, target_chars: targetChars };
     }
   }
   const body = {
     model: 'claude-sonnet-4-5',
     max_tokens: 8000,
-    system: [{ type: 'text', text: EXPAND_BATCH_SYSTEM, cache_control: { type: 'ephemeral' } }],
+    system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content: JSON.stringify(userMap, null, 2) }],
   };
   const raw = await callAnthropic.call(this, body);
   return parseLLMJson(raw);
 }
 
-const expandedMap = {};
-for (let i = 0; i < expandBatches.length; i += CHUNK) {
-  const slice = expandBatches.slice(i, i + CHUNK);
-  const partial = await Promise.all(slice.map(b => runOneExpandBatch.call(this, b)));
-  for (const p of partial) Object.assign(expandedMap, p);
-}
-console.log(`Phase 2 expand complete — ${Object.keys(expandedMap).length} segments returned`);
-
-// --- Phase 2.2: BATCH VERIFY (using expanded text) ---
-async function runOneVerifyBatch(batch) {
+async function runOneVerifyBatch(batch, srcMap) {
   const userMap = {};
   for (const [sid, data] of batch) {
-    if (!expandedMap[sid]) continue;
+    if (!srcMap[sid]) continue;
     userMap[sid] = { en: data.en };
     for (const lang of Object.keys(data.langs)) {
-      const expanded = expandedMap[sid][lang];
-      if (expanded && expanded.trim()) userMap[sid][lang] = expanded.trim();
+      const t = srcMap[sid][lang];
+      if (t && t.trim()) userMap[sid][lang] = t.trim();
     }
   }
   if (Object.keys(userMap).length === 0) return {};
@@ -220,36 +224,13 @@ async function runOneVerifyBatch(batch) {
   return parseLLMJson(raw);
 }
 
-const verifiedMap = {};
-for (let i = 0; i < expandBatches.length; i += CHUNK) {
-  const slice = expandBatches.slice(i, i + CHUNK);
-  const partial = await Promise.all(slice.map(b => runOneVerifyBatch.call(this, b)));
-  for (const p of partial) Object.assign(verifiedMap, p);
-}
-
-// Apply verify corrections: if verify returned text for (sid, lang), use it; else keep expanded
-const postVerifyMap = {};
-for (const [sid, data] of segmentEntries) {
-  const expanded = expandedMap[sid];
-  if (!expanded) continue;
-  postVerifyMap[sid] = {};
-  for (const lang of Object.keys(data.langs)) {
-    const expText = expanded[lang];
-    if (!expText || !expText.trim()) continue;
-    const verText = verifiedMap[sid]?.[lang];
-    postVerifyMap[sid][lang] = (verText && verText.trim()) ? verText.trim() : expText.trim();
-  }
-}
-console.log(`Phase 2 verify complete`);
-
-// --- Phase 2.3: BATCH EDITOR ---
-async function runOneEditorBatch(batch) {
+async function runOneEditorBatch(batch, srcMap) {
   const userMap = {};
   for (const [sid, data] of batch) {
-    if (!postVerifyMap[sid]) continue;
+    if (!srcMap[sid]) continue;
     userMap[sid] = { en: data.en };
     for (const lang of Object.keys(data.langs)) {
-      const text = postVerifyMap[sid][lang];
+      const text = srcMap[sid][lang];
       if (text) userMap[sid][lang] = text;
     }
   }
@@ -266,28 +247,17 @@ async function runOneEditorBatch(batch) {
   return parseLLMJson(raw);
 }
 
-const editedMap = {};
-for (let i = 0; i < expandBatches.length; i += CHUNK) {
-  const slice = expandBatches.slice(i, i + CHUNK);
-  const partial = await Promise.all(slice.map(b => runOneEditorBatch.call(this, b)));
-  for (const p of partial) Object.assign(editedMap, p);
-}
-
-// Final text per (sid, lang) — prefer editor > verify > expanded
-const finalTextMap = {};
-for (const [sid, data] of segmentEntries) {
-  if (!postVerifyMap[sid]) continue;
-  finalTextMap[sid] = {};
-  for (const lang of Object.keys(data.langs)) {
-    const postVerify = postVerifyMap[sid][lang];
-    if (!postVerify) continue;
-    const edited = editedMap[sid]?.[lang];
-    finalTextMap[sid][lang] = (edited && edited.trim()) ? edited.trim() : postVerify;
+async function runAllBatchesParallel(batches, runner) {
+  const out = {};
+  for (let i = 0; i < batches.length; i += CHUNK) {
+    const slice = batches.slice(i, i + CHUNK);
+    const partial = await Promise.all(slice.map(b => runner.call(this, b)));
+    for (const p of partial) Object.assign(out, p);
   }
+  return out;
 }
-console.log(`Phase 2 editor complete`);
 
-// --- Phase 2.4: RE-TTS + WAV rebuild ---
+// --- RE-TTS + WAV rebuild ---
 function buildWav(pcm) {
   const n = pcm.length;
   const h = Buffer.alloc(44);
@@ -301,7 +271,7 @@ function buildWav(pcm) {
 async function reTtsOne(task) {
   const { sid, lang, newText, info } = task;
   if (!newText || newText.trim() === info.current.trim()) {
-    return { sid, lang, skipped: 'no_change' };
+    return { sid, lang, outcome: 'no_change' };
   }
   try {
     const ttsResp = await this.helpers.httpRequest({
@@ -323,20 +293,18 @@ async function reTtsOne(task) {
     });
     const newPcm = Buffer.from(ttsResp);
     if (!newPcm || newPcm.length < 4410) {
-      return { sid, lang, skipped: 'tts_too_short_or_empty', pcmLen: newPcm?.length || 0 };
+      return { sid, lang, outcome: 'tts_empty', pcmLen: newPcm?.length || 0 };
     }
     const newRealDur = newPcm.length / (SAMPLE_RATE * BPS);
 
-    // Overshoot guard: if new audio exceeds en_duration, abort — keep Phase 1 audio
     if (newRealDur > info.en_duration) {
-      return { sid, lang, skipped: 'overshoot', newRealDur, enDuration: info.en_duration };
+      return { sid, lang, outcome: 'overshoot', newRealDur, enDuration: info.en_duration, newText };
     }
 
-    // Recompute padding: lead stays same (naturalLead invariant), tail shrinks
     const lead = info.lead_silence;
-    let tail = info.en_duration - lead - newRealDur;
+    const tail = info.en_duration - lead - newRealDur;
     if (tail < 0) {
-      return { sid, lang, skipped: 'negative_tail', lead, newRealDur, enDur: info.en_duration };
+      return { sid, lang, outcome: 'negative_tail', lead, newRealDur, enDur: info.en_duration };
     }
     const leadBytes = Math.round(lead * SAMPLE_RATE) * BPS;
     const tailBytes = Math.round(tail * SAMPLE_RATE) * BPS;
@@ -347,9 +315,9 @@ async function reTtsOne(task) {
     ]);
     const newWav = buildWav(fullPcm);
     const finalDur = lead + newRealDur + tail;
-
     return {
-      sid, lang, success: true,
+      sid, lang,
+      outcome: 'accepted',
       newText,
       newRealDur: parseFloat(newRealDur.toFixed(3)),
       newTailSilence: parseFloat(tail.toFixed(3)),
@@ -359,72 +327,318 @@ async function reTtsOne(task) {
       info,
     };
   } catch (e) {
-    return { sid, lang, error: e.message };
+    return { sid, lang, outcome: 'error', error: e.message };
   }
 }
 
-// Build re-TTS task list (only cells where text actually changed)
-const reTtsTasks = [];
+async function runReTtsTasks(tasks) {
+  const results = [];
+  for (let i = 0; i < tasks.length; i += ELEVENLABS_CHUNK) {
+    const slice = tasks.slice(i, i + ELEVENLABS_CHUNK);
+    const partial = await Promise.all(slice.map(t => reTtsOne.call(this, t)));
+    for (const r of partial) results.push(r);
+  }
+  return results;
+}
+
+// =====================================================================
+// PHASE 2 — ATTEMPT 1
+// =====================================================================
+const expandBatches = chunkSegments(segmentEntries, EXPAND_BATCH_SIZE);
+console.log(`Phase 2 attempt 1: ${expandBatches.length} batches of up to ${EXPAND_BATCH_SIZE} segments`);
+
+const expand1Map = await runAllBatchesParallel.call(this,
+  expandBatches,
+  function (b) { return runOneExpandBatch.call(this, b, EXPAND_BATCH_SYSTEM, 0.95); }
+);
+console.log(`Phase 2 expand attempt 1 complete — ${Object.keys(expand1Map).length} segments returned`);
+
+const verify1Map = await runAllBatchesParallel.call(this,
+  expandBatches,
+  function (b) { return runOneVerifyBatch.call(this, b, expand1Map); }
+);
+
+const postVerify1Map = {};
 for (const [sid, data] of segmentEntries) {
-  if (!finalTextMap[sid]) continue;
-  for (const [lang, info] of Object.entries(data.langs)) {
-    const newText = finalTextMap[sid][lang];
-    if (!newText) continue;
-    if (newText.trim() === info.current.trim()) continue;
-    reTtsTasks.push({ sid, lang, newText, info });
+  const exp = expand1Map[sid];
+  if (!exp) continue;
+  postVerify1Map[sid] = {};
+  for (const lang of Object.keys(data.langs)) {
+    const expText = exp[lang];
+    if (!expText || !expText.trim()) continue;
+    const verText = verify1Map[sid]?.[lang];
+    postVerify1Map[sid][lang] = (verText && verText.trim()) ? verText.trim() : expText.trim();
   }
 }
-console.log(`Phase 2: ${reTtsTasks.length} cells accepted for re-TTS (${totalCells - reTtsTasks.length} unchanged after LLM pipeline)`);
+console.log('Phase 2 verify attempt 1 complete');
 
-// Process re-TTS in CHUNK-parallel slices
-const reTtsResults = [];
-for (let i = 0; i < reTtsTasks.length; i += ELEVENLABS_CHUNK) {
-  const slice = reTtsTasks.slice(i, i + ELEVENLABS_CHUNK);
-  const partial = await Promise.all(slice.map(t => reTtsOne.call(this, t)));
-  for (const r of partial) reTtsResults.push(r);
+const editor1Map = await runAllBatchesParallel.call(this,
+  expandBatches,
+  function (b) { return runOneEditorBatch.call(this, b, postVerify1Map); }
+);
+
+const final1TextMap = {};
+for (const [sid, data] of segmentEntries) {
+  if (!postVerify1Map[sid]) continue;
+  final1TextMap[sid] = {};
+  for (const lang of Object.keys(data.langs)) {
+    const pv = postVerify1Map[sid][lang];
+    if (!pv) continue;
+    const ed = editor1Map[sid]?.[lang];
+    final1TextMap[sid][lang] = (ed && ed.trim()) ? ed.trim() : pv;
+  }
+}
+console.log('Phase 2 editor attempt 1 complete');
+
+// Build attempt 1 re-TTS tasks (only cells where text changed)
+const reTts1Tasks = [];
+for (const [sid, data] of segmentEntries) {
+  if (!final1TextMap[sid]) continue;
+  for (const [lang, info] of Object.entries(data.langs)) {
+    const newText = final1TextMap[sid][lang];
+    if (!newText) continue;
+    reTts1Tasks.push({ sid, lang, newText, info });
+  }
 }
 
-// Count outcomes
-const accepted = reTtsResults.filter(r => r.success);
-const skipped = reTtsResults.filter(r => r.skipped);
-const errored = reTtsResults.filter(r => r.error);
-console.log(`Phase 2 re-TTS results: accepted=${accepted.length}, skipped=${skipped.length}, errored=${errored.length}`);
-if (skipped.length > 0) {
-  const reasons = {};
-  for (const s of skipped) reasons[s.skipped] = (reasons[s.skipped] || 0) + 1;
-  console.log(`Phase 2 skip reasons:`, JSON.stringify(reasons));
+const results1 = await runReTtsTasks.call(this, reTts1Tasks);
+
+// Build outcomes map keyed by row_key — track attempt 1 for ALL candidates
+const outcomes = {};
+for (const [sid, data] of segmentEntries) {
+  for (const [lang, info] of Object.entries(data.langs)) {
+    outcomes[info.row_key] = { info, attempt1: null, attempt2: null };
+  }
+}
+for (const r of results1) {
+  const rk = `${r.sid}_${r.lang}`;
+  if (outcomes[rk]) outcomes[rk].attempt1 = r;
 }
 
-// Emit per-(sid, lang) items for accepted expansions only
-return accepted.map(r => ({
-  json: {
-    row_key:                       `${r.sid}_${r.lang}`,
-    segment_id:                    r.sid,
-    lang:                          r.lang,
-    lesson_id:                     r.info.lesson_id,
-    text_translated:               r.newText,
-    en_start_sec:                  r.info.en_start_sec,
-    en_duration_sec:               r.info.en_duration,
-    real_duration_sec:             r.newRealDur,
-    lead_silence_sec:              r.newLeadSilence,
-    slot_start_sec:                r.info.slot_start_sec,
-    slot_end_sec:                  r.info.slot_end_sec,
-    tts_budget_sec:                r.info.tts_budget_sec,
-    tail_silence_sec:              r.newTailSilence,
-    final_duration_sec:            r.newFinalDur,
-    borrowed_sec:                  0,
-    expansion_attempts:            1,
-    shorten_retries_in_synthesize: 0,
-    final_speed:                   r.info.voice_speed,
-    needs_attention:               false,
-    audio_drive_file_id:           r.info.audio_drive_file_id,
-    file_name:                     `${r.sid}_${r.lang}.wav`,
-  },
-  binary: {
-    data: {
-      data:     r.wavBase64,
-      mimeType: 'audio/wav',
-      fileName: `${r.sid}_${r.lang}.wav`,
-    },
-  },
-}));
+// Count attempt 1 outcomes
+const outcomeCounts1 = {};
+for (const rk of Object.keys(outcomes)) {
+  const a1 = outcomes[rk].attempt1;
+  const oc = a1 ? a1.outcome : 'no_attempt';
+  outcomeCounts1[oc] = (outcomeCounts1[oc] || 0) + 1;
+}
+console.log('Phase 2 attempt 1 outcomes:', JSON.stringify(outcomeCounts1));
+
+// =====================================================================
+// PHASE 2 — ATTEMPT 2 (retry pass)
+// =====================================================================
+// Classify retry candidates:
+//   harder: no_change OR (accepted but newRealDur < en_dur × STILL_SHORT_THRESHOLD)
+//   shorter: overshoot
+//   no-retry: negative_tail, tts_empty, error — too edge-case, leave as-is
+
+const harderTasks = [];   // { sid, lang, info, prevText }
+const shorterTasks = [];
+
+if (RETRY_ENABLED) {
+  for (const [rk, o] of Object.entries(outcomes)) {
+    const a1 = o.attempt1;
+    const info = o.info;
+    if (!a1) continue;
+    if (a1.outcome === 'no_change') {
+      harderTasks.push({ sid: info.segment_id, lang: info.lang, info, prevText: info.current });
+    } else if (a1.outcome === 'accepted' && a1.newRealDur < info.en_duration * STILL_SHORT_THRESHOLD) {
+      harderTasks.push({ sid: info.segment_id, lang: info.lang, info, prevText: a1.newText });
+    } else if (a1.outcome === 'overshoot') {
+      shorterTasks.push({ sid: info.segment_id, lang: info.lang, info, prevText: a1.newText });
+    }
+  }
+}
+
+console.log(`Phase 2 attempt 2 candidates: harder=${harderTasks.length}, shorter=${shorterTasks.length}`);
+
+async function runRetryGroup(tasks, systemPrompt, charsMultiplier) {
+  if (tasks.length === 0) return [];
+  // Re-group by segment_id for batch input. We need en_text per segment;
+  // candidates[sid].en already has it.
+  const groupedBySid = {};
+  for (const t of tasks) {
+    if (!groupedBySid[t.sid]) groupedBySid[t.sid] = [];
+    groupedBySid[t.sid].push(t);
+  }
+  const entries = Object.entries(groupedBySid);
+  const retryBatches = [];
+  for (let i = 0; i < entries.length; i += EXPAND_BATCH_SIZE) {
+    retryBatches.push(entries.slice(i, i + EXPAND_BATCH_SIZE));
+  }
+  // Build batch in format expected by runOneExpandBatch (segmentEntries-shaped):
+  // each batch element = [sid, { en, langs: { [lang]: info with previous_attempt added } }]
+  const formattedBatches = retryBatches.map(batch =>
+    batch.map(([sid, taskList]) => {
+      const langsObj = {};
+      for (const t of taskList) {
+        langsObj[t.lang] = { ...t.info, previous_attempt: t.prevText };
+      }
+      return [sid, { en: candidates[sid].en, langs: langsObj }];
+    })
+  );
+
+  // Custom expand call that includes previous_attempt in user payload
+  async function runOneRetryExpand(batch) {
+    const userMap = {};
+    for (const [sid, data] of batch) {
+      userMap[sid] = { en: data.en };
+      for (const [lang, info] of Object.entries(data.langs)) {
+        const targetChars = Math.round(info.en_duration * (LANG_CPS[lang] || 15) * charsMultiplier);
+        userMap[sid][lang] = {
+          current: info.current,
+          previous_attempt: info.previous_attempt,
+          target_chars: targetChars,
+        };
+      }
+    }
+    const body = {
+      model: 'claude-sonnet-4-5',
+      max_tokens: 8000,
+      system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+      messages: [{ role: 'user', content: JSON.stringify(userMap, null, 2) }],
+    };
+    const raw = await callAnthropic.call(this, body);
+    return parseLLMJson(raw);
+  }
+
+  const expandRetryMap = await runAllBatchesParallel.call(this, formattedBatches, runOneRetryExpand);
+
+  // Skip Verify, run Editor only
+  const editorRetryMap = await runAllBatchesParallel.call(this,
+    formattedBatches,
+    function (b) { return runOneEditorBatch.call(this, b, expandRetryMap); }
+  );
+
+  // Final text per task: editor → expand → fallback to prevText
+  const reTtsRetryTasks = [];
+  for (const t of tasks) {
+    const ed = editorRetryMap[t.sid]?.[t.lang];
+    const ex = expandRetryMap[t.sid]?.[t.lang];
+    const finalText = (ed && ed.trim()) ? ed.trim() : ((ex && ex.trim()) ? ex.trim() : null);
+    if (!finalText) continue;
+    reTtsRetryTasks.push({ sid: t.sid, lang: t.lang, newText: finalText, info: t.info });
+  }
+
+  return await runReTtsTasks.call(this, reTtsRetryTasks);
+}
+
+const [results2Harder, results2Shorter] = await Promise.all([
+  runRetryGroup.call(this, harderTasks, EXPAND_RETRY_HARDER || EXPAND_BATCH_SYSTEM, 1.05),
+  runRetryGroup.call(this, shorterTasks, EXPAND_RETRY_SHORTER || EXPAND_BATCH_SYSTEM, 0.85),
+]);
+const results2 = [...results2Harder, ...results2Shorter];
+for (const r of results2) {
+  const rk = `${r.sid}_${r.lang}`;
+  if (outcomes[rk]) outcomes[rk].attempt2 = r;
+}
+
+const outcomeCounts2 = {};
+for (const rk of Object.keys(outcomes)) {
+  const a2 = outcomes[rk].attempt2;
+  if (a2) outcomeCounts2[a2.outcome] = (outcomeCounts2[a2.outcome] || 0) + 1;
+}
+console.log('Phase 2 attempt 2 outcomes:', JSON.stringify(outcomeCounts2));
+
+// =====================================================================
+// MERGE & EMIT
+// =====================================================================
+// Per row_key, choose best result:
+//   - If attempt 2 accepted → use attempt 2 (it had better target)
+//   - Else if attempt 1 accepted → use attempt 1
+//   - Else → use most recent outcome reason (attempt 2 if exists else attempt 1)
+
+function pickFinal(o) {
+  const a1 = o.attempt1;
+  const a2 = o.attempt2;
+  if (a2 && a2.outcome === 'accepted') return { result: a2, attempts: 2, outcome: 'accepted' };
+  if (a1 && a1.outcome === 'accepted') return { result: a1, attempts: a2 ? 2 : 1, outcome: 'accepted' };
+  // No accept — report most recent skip outcome
+  if (a2) return { result: null, attempts: 2, outcome: a2.outcome };
+  if (a1) return { result: null, attempts: 1, outcome: a1.outcome };
+  return { result: null, attempts: 0, outcome: 'no_attempt' };
+}
+
+const emitted = [];
+const finalOutcomeCounts = {};
+for (const [rk, o] of Object.entries(outcomes)) {
+  const { result, attempts, outcome } = pickFinal(o);
+  finalOutcomeCounts[outcome] = (finalOutcomeCounts[outcome] || 0) + 1;
+  const info = o.info;
+  if (result && outcome === 'accepted') {
+    // Accepted — emit with binary, recompute needs_attention
+    const ratio = result.newRealDur / info.en_duration;
+    const needsAttention = ratio < NEEDS_ATTENTION_THRESHOLD;
+    emitted.push({
+      json: {
+        row_key:                       info.row_key,
+        segment_id:                    info.segment_id,
+        lang:                          info.lang,
+        lesson_id:                     info.lesson_id,
+        text_translated:               result.newText,
+        en_start_sec:                  info.en_start_sec,
+        en_duration_sec:               info.en_duration,
+        real_duration_sec:             result.newRealDur,
+        lead_silence_sec:              result.newLeadSilence,
+        slot_start_sec:                info.slot_start_sec,
+        slot_end_sec:                  info.slot_end_sec,
+        tts_budget_sec:                info.tts_budget_sec,
+        tail_silence_sec:              result.newTailSilence,
+        final_duration_sec:            result.newFinalDur,
+        borrowed_sec:                  0,
+        expansion_attempts:            attempts,
+        shorten_retries_in_synthesize: 0,
+        final_speed:                   info.voice_speed,
+        needs_attention:               needsAttention,
+        audio_drive_file_id:           info.audio_drive_file_id,
+        phase2_outcome:                'accepted',
+        file_name:                     `${info.segment_id}_${info.lang}.wav`,
+        has_binary:                    true,
+      },
+      binary: {
+        data: {
+          data:     result.wavBase64,
+          mimeType: 'audio/wav',
+          fileName: `${info.segment_id}_${info.lang}.wav`,
+        },
+      },
+    });
+  } else {
+    // Rejected — emit json only (no binary). Update Localizations writes outcome only.
+    // Preserve Phase 1 audio fields (already in sheet) by NOT overwriting them — we only
+    // set phase2_outcome and expansion_attempts. Other fields are filled with current
+    // values so appendOrUpdate keeps them unchanged.
+    emitted.push({
+      json: {
+        row_key:                       info.row_key,
+        segment_id:                    info.segment_id,
+        lang:                          info.lang,
+        lesson_id:                     info.lesson_id,
+        text_translated:               info.current,
+        en_start_sec:                  info.en_start_sec,
+        en_duration_sec:               info.en_duration,
+        real_duration_sec:             info.real_duration,
+        lead_silence_sec:              info.lead_silence,
+        slot_start_sec:                info.slot_start_sec,
+        slot_end_sec:                  info.slot_end_sec,
+        tts_budget_sec:                info.tts_budget_sec,
+        tail_silence_sec:              info.en_duration - info.lead_silence - info.real_duration,
+        final_duration_sec:            info.en_duration,
+        borrowed_sec:                  0,
+        expansion_attempts:            attempts,
+        shorten_retries_in_synthesize: 0,
+        final_speed:                   info.voice_speed,
+        needs_attention:               false,
+        audio_drive_file_id:           info.audio_drive_file_id,
+        phase2_outcome:                outcome,
+        file_name:                     `${info.segment_id}_${info.lang}.wav`,
+        has_binary:                    false,
+      },
+    });
+  }
+}
+
+console.log('Phase 2 FINAL outcomes:', JSON.stringify(finalOutcomeCounts));
+console.log(`Phase 2 emit: ${emitted.filter(e => e.json.has_binary).length} accepted (with binary), ${emitted.filter(e => !e.json.has_binary).length} skipped (no binary)`);
+
+return emitted;
