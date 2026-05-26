@@ -410,18 +410,26 @@ for (const [sid, data] of segmentEntries) {
 }
 console.log('Phase 2 editor attempt 1 complete');
 
-// Build attempt 1 re-TTS tasks (only cells where text changed)
+// Build attempt 1 re-TTS tasks. Cells where LLM didn't return text get
+// a synthetic 'llm_dropped' result so we record the outcome explicitly
+// (otherwise they'd silently fall through to pickFinal's 'no_attempt' bucket
+// which makes diagnostics ambiguous — was the cell never tried, or did the
+// LLM just drop it from its JSON response).
 const reTts1Tasks = [];
+const droppedResults1 = [];
 for (const [sid, data] of segmentEntries) {
-  if (!final1TextMap[sid]) continue;
   for (const [lang, info] of Object.entries(data.langs)) {
-    const newText = final1TextMap[sid][lang];
-    if (!newText) continue;
-    reTts1Tasks.push({ sid, lang, newText, info });
+    const newText = final1TextMap[sid]?.[lang];
+    if (!newText) {
+      droppedResults1.push({ sid, lang, outcome: 'llm_dropped' });
+    } else {
+      reTts1Tasks.push({ sid, lang, newText, info });
+    }
   }
 }
 
-const results1 = await runReTtsTasks.call(this, reTts1Tasks);
+const reTtsResults1 = await runReTtsTasks.call(this, reTts1Tasks);
+const results1 = [...reTtsResults1, ...droppedResults1];
 
 // Build outcomes map keyed by row_key — track attempt 1 for ALL candidates
 const outcomes = {};
@@ -530,17 +538,25 @@ async function runRetryGroup(tasks, systemPrompt, charsMultiplier) {
     function (b) { return runOneEditorBatch.call(this, b, expandRetryMap); }
   );
 
-  // Final text per task: editor → expand → fallback to prevText
+  // Final text per task: editor → expand → fallback to prevText.
+  // Cells where retry LLM dropped output get a synthetic 'llm_dropped' result
+  // so attempt 2 outcome is explicit (rather than silently leaving attempt1's
+  // outcome as the final, which obscures that retry was attempted at all).
   const reTtsRetryTasks = [];
+  const droppedRetryResults = [];
   for (const t of tasks) {
     const ed = editorRetryMap[t.sid]?.[t.lang];
     const ex = expandRetryMap[t.sid]?.[t.lang];
     const finalText = (ed && ed.trim()) ? ed.trim() : ((ex && ex.trim()) ? ex.trim() : null);
-    if (!finalText) continue;
-    reTtsRetryTasks.push({ sid: t.sid, lang: t.lang, newText: finalText, info: t.info });
+    if (!finalText) {
+      droppedRetryResults.push({ sid: t.sid, lang: t.lang, outcome: 'llm_dropped' });
+    } else {
+      reTtsRetryTasks.push({ sid: t.sid, lang: t.lang, newText: finalText, info: t.info });
+    }
   }
 
-  return await runReTtsTasks.call(this, reTtsRetryTasks);
+  const reTtsRetryRes = await runReTtsTasks.call(this, reTtsRetryTasks);
+  return [...reTtsRetryRes, ...droppedRetryResults];
 }
 
 const [results2Harder, results2Shorter] = await Promise.all([
