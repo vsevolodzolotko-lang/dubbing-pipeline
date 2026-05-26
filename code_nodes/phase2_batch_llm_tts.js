@@ -20,6 +20,7 @@ const CHUNK = 6;                       // Tier 2 Anthropic — higher parallelis
 const ELEVENLABS_CHUNK = 5;            // parallel TTS calls per slice
 const STILL_SHORT_THRESHOLD = 0.85;    // accepted but newRealDur < en_dur × this → retry harder
 const NEEDS_ATTENTION_THRESHOLD = 0.70;// accepted but newRealDur < en_dur × this → flag for human
+const STRUCTURALLY_IMPOSSIBLE_LEAD_RATIO = 0.5; // skip cells where lead_silence ≥ en_dur × this — TTS budget too small to ever expand within slot (Phase 1 borrow / first-segment offset / huge inter-segment gap)
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
 const ELEVENLABS_URL = (vid) => `https://api.elevenlabs.io/v1/text-to-speech/${vid}/stream?output_format=pcm_22050`;
@@ -78,6 +79,7 @@ for (const l of ['de','es','fr','pl','pt','it','tr']) {
 // --- collect candidates ---
 const allItems = $input.all();
 const candidates = {};  // { segment_id: { en, langs: { [lang]: { ... } } } }
+let structurallySkipped = 0;
 for (const it of allItems) {
   const j = it.json;
   if (j.needs_attention === true || j.needs_attention === 'TRUE' || j.needs_attention === 'true') continue;
@@ -90,6 +92,17 @@ for (const it of allItems) {
   const voice = voiceMap[lang];
   if (!voice || !voice.voice_id) continue;
 
+  // Structural impossibility guard: if Phase 1 lead already consumes ≥50% of slot
+  // (first segment with large EN start offset, accumulated borrow into next slot,
+  // or huge inter-segment gap), TTS budget = en_dur - lead is too small to expand.
+  // Phase 2 expansion would always overshoot or hit negative_tail. Skip entirely
+  // to save LLM cost and avoid noise in diagnostics.
+  const leadSilence = parseFloat(j.lead_silence_sec) || 0;
+  if (leadSilence >= enDur * STRUCTURALLY_IMPOSSIBLE_LEAD_RATIO) {
+    structurallySkipped++;
+    continue;
+  }
+
   if (!candidates[j.segment_id]) {
     candidates[j.segment_id] = { en: j.en_text || '', langs: {} };
   }
@@ -97,7 +110,7 @@ for (const it of allItems) {
     current: j.text_translated || '',
     real_duration: real,
     en_duration: enDur,
-    lead_silence: parseFloat(j.lead_silence_sec) || 0,
+    lead_silence: leadSilence,
     audio_drive_file_id: j.audio_drive_file_id,
     row_key: j.row_key,
     segment_id: j.segment_id,
@@ -113,8 +126,15 @@ for (const it of allItems) {
     slot_start_sec: parseFloat(j.slot_start_sec) || 0,
     slot_end_sec: parseFloat(j.slot_end_sec) || 0,
     tts_budget_sec: parseFloat(j.tts_budget_sec) || enDur,
+    // Phase 1 values preserved verbatim for skipped emit (avoid recomputing tail/final)
+    phase1_tail_silence: parseFloat(j.tail_silence_sec) || 0,
+    phase1_final_duration: parseFloat(j.final_duration_sec) || enDur,
+    phase1_borrowed: parseFloat(j.borrowed_sec) || 0,
+    phase1_final_speed: parseFloat(j.final_speed) || 1.0,
+    phase1_shorten_retries: parseFloat(j.shorten_retries_in_synthesize) || 0,
   };
 }
+if (structurallySkipped > 0) console.log(`Phase 2: skipped ${structurallySkipped} structurally-impossible cells (lead ≥ en_dur × ${STRUCTURALLY_IMPOSSIBLE_LEAD_RATIO})`);
 
 const totalSegments = Object.keys(candidates).length;
 let totalCells = 0;
@@ -604,10 +624,11 @@ for (const [rk, o] of Object.entries(outcomes)) {
       },
     });
   } else {
-    // Rejected — emit json only (no binary). Update Localizations writes outcome only.
-    // Preserve Phase 1 audio fields (already in sheet) by NOT overwriting them — we only
-    // set phase2_outcome and expansion_attempts. Other fields are filled with current
-    // values so appendOrUpdate keeps them unchanged.
+    // Rejected — emit json only (no binary). Update Localizations writes phase2_outcome
+    // and expansion_attempts; all audio-fitting fields (tail/final/borrowed/final_speed/
+    // shorten_retries) are passed through verbatim from Phase 1 input — we never recompute
+    // them from formulas that may not match Phase 1's actual WAV structure (e.g.
+    // first-segment offset, accumulated borrow, structurally tight slots).
     emitted.push({
       json: {
         row_key:                       info.row_key,
@@ -622,12 +643,12 @@ for (const [rk, o] of Object.entries(outcomes)) {
         slot_start_sec:                info.slot_start_sec,
         slot_end_sec:                  info.slot_end_sec,
         tts_budget_sec:                info.tts_budget_sec,
-        tail_silence_sec:              info.en_duration - info.lead_silence - info.real_duration,
-        final_duration_sec:            info.en_duration,
-        borrowed_sec:                  0,
+        tail_silence_sec:              info.phase1_tail_silence,
+        final_duration_sec:            info.phase1_final_duration,
+        borrowed_sec:                  info.phase1_borrowed,
         expansion_attempts:            attempts,
-        shorten_retries_in_synthesize: 0,
-        final_speed:                   info.voice_speed,
+        shorten_retries_in_synthesize: info.phase1_shorten_retries,
+        final_speed:                   info.phase1_final_speed,
         needs_attention:               false,
         audio_drive_file_id:           info.audio_drive_file_id,
         phase2_outcome:                outcome,

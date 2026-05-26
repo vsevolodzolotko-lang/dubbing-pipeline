@@ -75,12 +75,25 @@ REMOVE / TRIM aggressively if these were in `previous_attempt`:
 - Bridging extensions that pad ("notice what happens when you bring curious attention to..." → "notice...")
 - Verbose synonyms ("a quiet, gentle, peaceful state" → "a quiet state")
 
+==== LANGUAGE ISOLATION (CRITICAL) ====
+
+Each lang field MUST use ONLY that target language's orthography. Even when shortening, do not borrow vocabulary or spelling from neighboring Romance languages.
+
+Romance false friends to AVOID:
+- ES "esencial" (single 's') vs PT "essencial" (double 's')
+- ES "y" (and) vs PT "e"
+- ES "es" (is) vs PT "é"
+- IT double consonants ("essenziale", "necessario") distinct from ES/PT
+- FR distinct accents: "essentiel", "nécessaire"
+
+When you see the same segment in multiple Romance langs side-by-side, do NOT let neighboring lang spelling bleed into the current cell's output.
+
 ==== STRICT RULES ====
 
 DO NOT:
 - Drop core EN meaning
 - Use formal address (always informal: du/tu/ty/sen)
-- Mix languages
+- Mix languages (see LANGUAGE ISOLATION above)
 - Add new claims or instructions
 
 DO:

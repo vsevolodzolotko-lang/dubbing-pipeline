@@ -4,6 +4,42 @@
 
 ---
 
+### 2026-05-26 — PHASE2_TUNING_POSTRETRY
+
+Context: First full W_Master run with Phase 2 retry pass + diagnostics (commit 48e8671) on sleep1_full revealed three issues in the CSV output:
+
+1. **Data corruption in skipped emit**: for `negative_tail` / `no_change` / `overshoot` rejected candidates, my code overwrote Phase 1's stored `tail_silence_sec`, `final_duration_sec`, `borrowed_sec`, `final_speed`, `shorten_retries_in_synthesize` with values recomputed from the formula `tail = en_dur - lead - real_dur`. This formula doesn't match Phase 1's actual WAV structure for first-segment offsets, accumulated borrow, or structurally tight slots. Result: seg_001_fr showed `tail_silence_sec=-1.942` even though Phase 1's actual audio file is correct — only the sheet metadata was corrupted.
+
+2. **Wasted LLM calls on structurally impossible cells**: Phase 1's natural EN lead for first segments (seg_001 lead=2.88s) or accumulated borrow (seg_011 lead=1.165s of en_dur=2.88s; seg_020 lead=4.64s of en_dur=9.04s; seg_038 lead=10.885s exceeding en_dur=6.24s!) leaves so little TTS budget that ANY expansion overshoots or hits negative_tail. ~15 of the rejected cells fell here — Phase 2 spent LLM and TTS calls on cases that physically cannot improve.
+
+3. **Cross-language contamination in retry pass**: seg_019_es came back as `"...sino porque es essencial..."` — `essencial` is the Portuguese spelling (double 's'); Spanish uses `esencial` (single 's'). This is a classic Romance false-friend leak. The expansion ran in batch mode where multiple langs for the same segment_id appear side-by-side in the LLM input JSON, so the model "borrowed" PT orthography into the ES cell. Neither Verify nor Editor caught it. Retry-harder prompt seemed more prone to this (pushing for richer vocabulary increases false-friend risk).
+
+Decision: Three targeted fixes, no architectural changes:
+
+1. **Preserve Phase 1 fields verbatim in skipped emit**: candidates collection now stores `phase1_tail_silence`, `phase1_final_duration`, `phase1_borrowed`, `phase1_final_speed`, `phase1_shorten_retries` from the input row. Skipped emit branch writes these unchanged instead of recomputing. Update Localizations writes preserve Phase 1's actual file metadata.
+
+2. **Structurally impossible filter**: at candidate collection time, skip cells where `lead_silence_sec >= en_duration_sec × STRUCTURALLY_IMPOSSIBLE_LEAD_RATIO` (default 0.5). These cells are not emitted at all — Phase 1 audio stays, sheet row untouched, `phase2_outcome` remains empty (= `not_candidate`). Console logs the skipped count. Saves ~30% Phase 2 LLM cost on lessons with large gaps. Cells that ARE structurally feasible still get attempted; the filter only prunes geometrically hopeless ones.
+
+3. **Cross-lang isolation guard in expand prompts**: added `==== LANGUAGE ISOLATION ====` section to all three Phase 2 expand prompts (`w3_expand_batch_system`, `w3_expand_batch_retry_harder`, `w3_expand_batch_retry_shorter`). Section lists common Romance false-friend pairs explicitly (esencial/essencial/essenziale/essentiel, y/e, es/é, accent rules) and instructs LLM to treat each lang cell as fully isolated regardless of batch input shape. Harder-retry prompt has stronger warning since aggressive expansion correlates with false-friend risk. Verify/Editor system prompts NOT changed (shared with W2; out of scope here).
+
+Rationale:
+- Fix #1 unblocks accurate post-run analysis — without it sheet metadata for ~15 rejected cells per lesson is misleading.
+- Fix #2 is a pure cost optimization. Structurally impossible cells were always rejected; now they're rejected upfront without LLM/TTS spend.
+- Fix #3 is a quality fix targeting a specific reported regression (seg_019_es "essencial"). Cross-lang contamination is most likely with batched same-segment-multi-lang input format we use; explicit guard with false-friend examples is the cheapest mitigation. If it doesn't fully solve, next escalation is splitting batches per-lang (loses cache efficiency, ~3-4× cost).
+
+Trade-offs:
+- `STRUCTURALLY_IMPOSSIBLE_LEAD_RATIO=0.5` is conservative — some cells with lead between 0.4 and 0.5 might still be plausibly expandable. If the filter feels too aggressive after a few lessons, raise to 0.6. Configurable as constant in code.
+- Cross-lang guard adds ~400 chars to each expand prompt → +400 chars × `cache_control: ephemeral` cached after first batch, so per-batch overhead is negligible after batch 1.
+
+Verification: re-run W3 on sleep1_full. Expect:
+- seg_001 / seg_011 / seg_020 / seg_038 cells with large leads have `phase2_outcome` empty (filtered out, never attempted)
+- seg_019_es should now contain `esencial` (correct ES spelling); same for any new false-friend cases
+- rejected cells with `phase2_outcome=overshoot` or `no_change` should have valid Phase 1 tail/final values matching the previous lesson's audio metadata
+
+Rollback: revert this commit. Each fix is independent — could split into 3 commits if any fix proves problematic, but they're small and orthogonal enough to ship together.
+
+---
+
 ### 2026-05-26 — PHASE2_RETRY_AND_DIAGNOSTICS
 
 Context: Phase 2 batched expansion (commit c8e72d1) shipped and works end-to-end on sleep1_full — 21/47 candidates accepted, audio meaningfully expanded (seg_047 PT silence 6.255s → 0.083s, seg_044 PT "sem esso" typo → "sem esforço" caught by Editor). But 26 candidates remained unexpanded after a single pass, and the failure reasons (`no_change` / `overshoot` / `negative_tail` / `tts_empty`) were only visible via console.log histogram — not persisted in any Sheet, and lost entirely when n8n purges successful executions. Without per-cell diagnostics, it was impossible to tell whether to tune the prompt, the threshold, or the TTS budget. Additionally, cells where Phase 2 accepted expansion but the result was still very short (ratio < 0.70) were not flagged for human review.

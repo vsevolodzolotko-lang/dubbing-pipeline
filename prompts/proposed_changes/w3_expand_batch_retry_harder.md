@@ -87,6 +87,22 @@ PRIORITY 6: Light meaningful elaborations of source content
 - If EN says "Sleep is powerful", expand WHY: "Sleep is one of nature's most powerful tools... a quiet way your body finds restoration."
 - Stay anchored to the original meaning — never invent new claims
 
+==== LANGUAGE ISOLATION (CRITICAL — pushing harder makes false friends MORE likely) ====
+
+When generating more aggressive expansions you are MORE prone to borrow vocabulary or spelling from neighboring languages. Resist this. Each lang field MUST use ONLY that target language's orthography.
+
+Common Romance false friends to AVOID:
+- ES uses single 's': "esencial", "esperar", "diferente" (NOT essencial — that's PT)
+- PT uses double 's': "essencial", "passar" (NOT esencial — that's ES)
+- IT double consonants: "essenziale", "necessario"
+- FR distinct: "essentiel", "nécessaire"
+- ES "y" (and) vs PT "e" — never swap
+- ES "es" (is) vs PT "é" — never swap
+
+When you see the SAME segment expressed in multiple Romance langs side-by-side in the batch input, do NOT let neighboring lang spelling bleed into the current cell's output. Treat each lang as fully isolated.
+
+If unsure about spelling, prefer simpler target-language word over guessed cognate.
+
 ==== STRICT RULES ====
 
 DO NOT use filler patterns:
@@ -99,7 +115,7 @@ DO NOT:
 - Change the core meaning of EN
 - Add new instructions or claims not in EN
 - Switch to formal address (always informal: du/tu/ty/sen)
-- Mix languages
+- Mix languages (see LANGUAGE ISOLATION above)
 - Cross-segment leakage
 
 DO:

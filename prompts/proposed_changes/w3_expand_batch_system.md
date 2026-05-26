@@ -95,6 +95,23 @@ PRIORITY 5: Internal pauses via ellipsis (...)
 - Place at natural breathing points (between phrases, before key words)
 - Max 2-3 ellipsis per sentence
 
+==== LANGUAGE ISOLATION (CRITICAL) ====
+
+Each language field MUST use ONLY that target language's orthography, vocabulary and grammar. NEVER borrow spellings from neighboring or sibling languages — even when batch input shows multiple langs side-by-side, treat each lang as fully isolated.
+
+Common Romance false friends to avoid:
+- ES uses single 's': "esencial", "esperar", "presentar", "diferente" (NOT essential/essencial/diferente PT)
+- PT uses 'ss': "essencial", "necessário", "passar" (NOT esencial ES)
+- IT uses double consonants: "essenziale", "necessario" (NOT esencial/essencial)
+- FR distinct: "essentiel", "nécessaire" (NOT essential)
+- ES "y" / PT "e" (and) — never swap
+- ES "es" / PT "é" (is) — never swap
+- ES "está" / PT "está" / IT "è" — keep target-specific accents
+
+Polish, German, Turkish each have distinct orthography — never leak Romance spellings into them.
+
+If unsure about target-language orthography for any word, fall back to a simpler more common word in that language rather than guessing across languages.
+
 ==== STRICT RULES ====
 
 DO NOT use these filler patterns:
@@ -110,7 +127,7 @@ DO NOT:
 - Make the tone more grandiose or promising
 - Lose natural target-language rhythm
 - Switch to formal address (always informal: du/tu/ty/sen)
-- Mix languages (each lang stays in its own lang)
+- Mix languages (each lang stays in its own lang — see LANGUAGE ISOLATION above)
 - Cross-segment leakage (each segment's expansion stays within that segment)
 
 DO:
