@@ -1,31 +1,61 @@
-// Reads a localizations CSV (exported from the Google Sheet) and prints the
-// observed CPS (chars-per-second) per language, based on rows where
-// final_speed == 1 (so speed-adjusted segments don't skew the measurement).
+// CPS calibration tool v2.
+//
+// Reads one or more `localizations` CSVs exported from the Google Sheet and
+// prints observed chars-per-second (CPS) per language, with optional
+// per-(lang, segment_type) breakdown when a `segments` CSV is provided.
+//
+// CPS values live in the `config` sheet as `cps_estimate_{lang}` rows. They
+// are read by W2 Adapt Translations and W3 Check Timing + Pad to predict
+// whether a translation will fit a slot. After a voice change, voice-param
+// tweak, or content-type shift (meditative ↔ educational), re-run this script
+// to see whether observed CPS still matches what's configured.
 //
 // Usage:
-//   node scripts/analyze_cps.js path/to/localizations.csv
+//   node scripts/analyze_cps.js <localizations.csv> [more.csv ...]
+//        [--segments=<segments.csv>]   # enables per-segment_type breakdown
+//        [--voices=<voices.csv>]       # default: sheets/voices.csv
+//        [--config=<config.csv>]       # auto-detected next to first CSV
+//
+// Filtering: for each lang, the script auto-detects the default voice speed
+// as min(final_speed) observed in the data (since voice defaults vary —
+// PT often runs at 0.9, TR at 0.8). Only rows at that default speed are
+// used for CPS measurement (retries at 1.10/1.15 are excluded — those are
+// compression, not natural pace).
 //
 // Output:
-//   - Per-segment CPS rows (so you can spot outliers)
-//   - Summary table with weighted mean CPS per lang, current config value,
-//     and recommended config value to copy into the `config` sheet.
-//
-// Why this script: CPS values live in the `config` sheet as
-// `cps_estimate_{lang}` rows. They are read by W2 Adapt Translations and W3
-// Check Timing + Pad. After each W3 run, you can use this script to confirm
-// that the configured CPS still matches what the current voices actually
-// produce — and update the sheet if a voice change shifted the numbers.
+//   - Per-lang summary table with observed_cps, current, recommend, delta.
+//   - Per-(lang, segment_type) breakdown if segments.csv was provided.
+//   - voice_id snapshot from voices.csv to help spot voice changes between
+//     runs.
+//   - Copy-pasteable update commands for the config sheet.
 
 const fs   = require('fs');
 const path = require('path');
 
-const csvPath = process.argv[2];
-if (!csvPath) {
-  console.error('usage: node scripts/analyze_cps.js <localizations.csv>');
+// --- arg parsing ---
+const args = process.argv.slice(2);
+const csvPaths = [];
+const opts = {};
+for (const a of args) {
+  if (a.startsWith('--segments=')) opts.segments = a.slice('--segments='.length);
+  else if (a.startsWith('--voices=')) opts.voices = a.slice('--voices='.length);
+  else if (a.startsWith('--config=')) opts.config = a.slice('--config='.length);
+  else if (a.startsWith('--')) { console.error('unknown flag:', a); process.exit(1); }
+  else csvPaths.push(a);
+}
+
+if (csvPaths.length === 0) {
+  console.error('usage: node scripts/analyze_cps.js <localizations.csv> [more.csv ...]');
+  console.error('       [--segments=<segments.csv>] [--voices=<voices.csv>] [--config=<config.csv>]');
   process.exit(1);
 }
 
-// Minimal CSV parser — handles quoted fields with commas and escaped quotes.
+const SCRIPT_DIR = path.dirname(__filename);
+const REPO       = path.dirname(SCRIPT_DIR);
+const voicesPath = opts.voices  || path.join(REPO, 'sheets/voices.csv');
+const configPath = opts.config  || path.join(path.dirname(csvPaths[0]), 'config.csv');
+
+// --- minimal CSV parser ---
 function parseCsv(text) {
   const rows = [];
   let row = [], field = '', inQuotes = false;
@@ -33,91 +63,235 @@ function parseCsv(text) {
     const c = text[i];
     if (inQuotes) {
       if (c === '"' && text[i + 1] === '"') { field += '"'; i++; }
-      else if (c === '"') { inQuotes = false; }
-      else { field += c; }
+      else if (c === '"') inQuotes = false;
+      else field += c;
     } else {
-      if (c === '"') { inQuotes = true; }
+      if (c === '"') inQuotes = true;
       else if (c === ',') { row.push(field); field = ''; }
       else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
-      else if (c === '\r') { /* skip */ }
-      else { field += c; }
+      else if (c !== '\r') field += c;
     }
   }
   if (field.length || row.length) { row.push(field); rows.push(row); }
   return rows;
 }
 
-const raw  = fs.readFileSync(csvPath, 'utf8');
-const rows = parseCsv(raw).filter(r => r.length > 1);
-if (rows.length < 2) { console.error('CSV looks empty'); process.exit(1); }
-
-const header = rows[0];
-const idx = name => header.indexOf(name);
-
-const C = {
-  segment_id:        idx('segment_id'),
-  lang:              idx('lang'),
-  text_translated:   idx('text_translated'),
-  real_duration_sec: idx('real_duration_sec'),
-  final_speed:       idx('final_speed'),
-};
-for (const [k, v] of Object.entries(C)) {
-  if (v < 0) { console.error(`missing column: ${k}`); process.exit(1); }
+function loadCsv(p, required) {
+  if (!fs.existsSync(p)) {
+    if (required) { console.error('missing required file:', p); process.exit(1); }
+    return null;
+  }
+  return parseCsv(fs.readFileSync(p, 'utf8')).filter(r => r.length > 1);
 }
 
-// Read current cps_estimate_* values from config sheet (optional sibling file)
-const configPath = path.join(path.dirname(csvPath), 'config.csv');
+// --- read all localization CSVs ---
+const samples = [];
+for (const p of csvPaths) {
+  const rows = loadCsv(p, true);
+  if (rows.length < 2) { console.error('CSV looks empty:', p); continue; }
+  const h = rows[0];
+  const I = n => h.indexOf(n);
+  const C = {
+    segment_id:        I('segment_id'),
+    lang:              I('lang'),
+    text_translated:   I('text_translated'),
+    real_duration_sec: I('real_duration_sec'),
+    final_speed:       I('final_speed'),
+  };
+  for (const [k, v] of Object.entries(C)) {
+    if (v < 0) { console.error(`${p}: missing column ${k}`); process.exit(1); }
+  }
+  const sourceLabel = path.basename(p);
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    const lang  = (r[C.lang] || '').trim();
+    const text  = (r[C.text_translated] || '').trim();
+    const dur   = parseFloat(r[C.real_duration_sec]) || 0;
+    const speed = parseFloat(r[C.final_speed]) || 0;
+    if (!lang || !text || dur <= 0 || speed <= 0) continue;
+    samples.push({
+      source: sourceLabel,
+      segment_id: r[C.segment_id],
+      lang, text, chars: text.length, dur, speed,
+    });
+  }
+  console.error(`loaded ${rows.length - 1} rows from ${sourceLabel}`);
+}
+console.error(`total raw samples: ${samples.length}\n`);
+
+// --- optional: load segments.csv for per-segment_type join ---
+const segmentTypeMap = {};
+if (opts.segments) {
+  const rows = loadCsv(opts.segments, true);
+  const h = rows[0];
+  const sidCol = h.indexOf('segment_id');
+  const stCol  = h.indexOf('segment_type');
+  if (sidCol < 0 || stCol < 0) {
+    console.error('segments.csv missing segment_id or segment_type column');
+    process.exit(1);
+  }
+  for (let i = 1; i < rows.length; i++) {
+    const sid = (rows[i][sidCol] || '').trim();
+    const st  = (rows[i][stCol]  || '').trim();
+    if (sid && st) segmentTypeMap[sid] = st;
+  }
+  console.error(`loaded segment_type for ${Object.keys(segmentTypeMap).length} segments\n`);
+}
+
+// --- optional: load voices.csv for voice_id snapshot ---
+const voiceIds = {};
+if (fs.existsSync(voicesPath)) {
+  const rows = loadCsv(voicesPath, false);
+  if (rows) {
+    const h = rows[0];
+    const langCol = h.indexOf('lang');
+    const vidCol  = h.indexOf('voice_id');
+    if (langCol >= 0 && vidCol >= 0) {
+      for (let i = 1; i < rows.length; i++) {
+        const lang = (rows[i][langCol] || '').trim();
+        const vid  = (rows[i][vidCol]  || '').trim();
+        if (lang && vid) voiceIds[lang] = vid;
+      }
+    }
+  }
+}
+
+// --- optional: load config.csv for current cps_estimate_* ---
 const currentCps = {};
 if (fs.existsSync(configPath)) {
-  const configRows = parseCsv(fs.readFileSync(configPath, 'utf8')).filter(r => r.length >= 2);
-  for (const row of configRows) {
-    const m = (row[0] || '').match(/^cps_estimate_([a-z]{2})$/i);
-    if (m) currentCps[m[1].toLowerCase()] = parseFloat(row[1]) || null;
+  const rows = loadCsv(configPath, false);
+  if (rows) {
+    for (const row of rows) {
+      const m = (row[0] || '').match(/^cps_estimate_([a-z]{2})$/i);
+      if (m) currentCps[m[1].toLowerCase()] = parseFloat(row[1]) || null;
+    }
+  }
+}
+// Fallback: hardcoded defaults from docs/config_keys.md
+const HARDCODED_DEFAULTS = { de: 12, es: 15, fr: 15, it: 14, pl: 14, pt: 16, tr: 14 };
+for (const [l, v] of Object.entries(HARDCODED_DEFAULTS)) {
+  if (currentCps[l] == null) currentCps[l] = v;
+}
+
+// --- detect default voice speed per lang ---
+// Voice's natural playback speed = min(final_speed) observed in data.
+// (Retries always go UP from default — 1.10, 1.15 — so min is the floor.)
+const defaultSpeed = {};
+for (const s of samples) {
+  if (defaultSpeed[s.lang] == null || s.speed < defaultSpeed[s.lang]) {
+    defaultSpeed[s.lang] = s.speed;
   }
 }
 
+// --- aggregate observed CPS per lang at default speed ---
 const byLang = {};
-for (let i = 1; i < rows.length; i++) {
-  const r = rows[i];
-  const lang  = (r[C.lang] || '').trim();
-  const text  = r[C.text_translated] || '';
-  const dur   = parseFloat(r[C.real_duration_sec]) || 0;
-  const speed = parseFloat(r[C.final_speed]) || 0;
-  if (!lang || !text.trim() || dur <= 0 || speed !== 1) continue;
-  if (!byLang[lang]) byLang[lang] = { samples: [], totalChars: 0, totalSec: 0 };
-  const charsLen = text.trim().length;
-  const cps = charsLen / dur;
-  byLang[lang].samples.push({ segment_id: r[C.segment_id], chars: charsLen, dur, cps });
-  byLang[lang].totalChars += charsLen;
-  byLang[lang].totalSec   += dur;
+for (const s of samples) {
+  if (s.speed !== defaultSpeed[s.lang]) continue;
+  if (!byLang[s.lang]) byLang[s.lang] = { samples: [], chars: 0, sec: 0 };
+  byLang[s.lang].samples.push(s);
+  byLang[s.lang].chars += s.chars;
+  byLang[s.lang].sec   += s.dur;
 }
 
-console.log('\n== Per-segment CPS (final_speed=1.0 only) ==');
-for (const lang of Object.keys(byLang).sort()) {
-  console.log(`\n[${lang}]`);
-  for (const s of byLang[lang].samples) {
-    console.log(`  ${s.segment_id.padEnd(22)} ${String(s.chars).padStart(4)} chars / ${s.dur.toFixed(3).padStart(6)}s = ${s.cps.toFixed(2)} cps`);
+// --- per-(lang, segment_type) if segments.csv provided ---
+const byLangType = {};
+if (Object.keys(segmentTypeMap).length > 0) {
+  for (const s of samples) {
+    if (s.speed !== defaultSpeed[s.lang]) continue;
+    const st = segmentTypeMap[s.segment_id];
+    if (!st) continue;
+    const key = `${s.lang}|${st}`;
+    if (!byLangType[key]) byLangType[key] = { lang: s.lang, type: st, samples: [], chars: 0, sec: 0 };
+    byLangType[key].samples.push(s);
+    byLangType[key].chars += s.chars;
+    byLangType[key].sec   += s.dur;
   }
 }
 
-console.log('\n== Summary: weighted mean CPS per lang ==');
-console.log('lang  samples  totalChars  totalSec  observed_cps   current  recommend  delta');
-console.log('----  -------  ----------  --------  ------------   -------  ---------  -----');
-for (const lang of Object.keys(byLang).sort()) {
+// --- output ---
+console.log('========================================');
+console.log('CPS calibration report');
+console.log('========================================\n');
+
+console.log('Per-lang summary (each lang at its detected default voice speed):\n');
+console.log('lang  voice_id              default_spd  N      chars  sec      obs_cps  current  recommend  delta  confidence');
+console.log('----  --------------------  -----------  -----  -----  -------  -------  -------  ---------  -----  ----------');
+
+const recommendations = [];
+const LANGS = ['de','es','fr','it','pl','pt','tr'];
+for (const lang of LANGS) {
   const b = byLang[lang];
-  const observed = b.totalChars / b.totalSec;
-  const current  = currentCps[lang];
-  // Recommend rounding to nearest 0.5 to keep config tidy
+  if (!b || b.samples.length === 0) {
+    console.log(`${lang.padEnd(4)}  ${(voiceIds[lang] || '(no voices.csv)').padEnd(20)}                ${'(no data)'.padStart(40)}`);
+    continue;
+  }
+  const observed = b.chars / b.sec;
   const recommend = Math.round(observed * 2) / 2;
-  const delta = current != null ? (observed - current).toFixed(2) : '-';
+  const current = currentCps[lang];
+  const delta = observed - current;
+  const conf = b.samples.length >= 20 ? 'HIGH'
+             : b.samples.length >= 10 ? 'MED'
+             : 'LOW';
   console.log(
-    `${lang.padEnd(4)}  ${String(b.samples.length).padStart(7)}  ${String(b.totalChars).padStart(10)}  ${b.totalSec.toFixed(2).padStart(8)}  ${observed.toFixed(2).padStart(12)}  ${current != null ? current.toFixed(2).padStart(7) : '   -   '}  ${recommend.toFixed(2).padStart(9)}  ${String(delta).padStart(5)}`
+    `${lang.padEnd(4)}  ${(voiceIds[lang] || '').padEnd(20)}  ${defaultSpeed[lang].toFixed(2).padStart(11)}  ` +
+    `${String(b.samples.length).padStart(5)}  ${String(b.chars).padStart(5)}  ${b.sec.toFixed(2).padStart(7)}  ` +
+    `${observed.toFixed(2).padStart(7)}  ${current.toFixed(2).padStart(7)}  ${recommend.toFixed(2).padStart(9)}  ` +
+    `${delta.toFixed(2).padStart(5)}  ${conf.padStart(10)}`
   );
+  if (Math.abs(delta) > 1.0) recommendations.push({ lang, current, recommend, delta, conf });
 }
 
-console.log('\nLegend:');
-console.log('  observed_cps = totalChars / totalSec (weighted mean across all rows for the lang)');
-console.log('  current      = cps_estimate_{lang} from config.csv if present alongside the localizations CSV');
-console.log('  recommend    = observed_cps rounded to nearest 0.5 (good config value)');
-console.log('  delta        = observed - current (sign and magnitude of drift from configured value)');
-console.log('\nIf |delta| > 1.0 cps, consider updating the config sheet.');
+// --- per-(lang, segment_type) breakdown ---
+if (Object.keys(byLangType).length > 0) {
+  console.log('\n\nPer-(lang, segment_type) breakdown:');
+  console.log('(Useful for spotting content-type drift — e.g. instructions speak slower than narrative.)\n');
+  console.log('lang  type         N      obs_cps  delta_vs_lang_mean');
+  console.log('----  -----------  -----  -------  ------------------');
+  const sorted = Object.values(byLangType).sort((a, b) =>
+    a.lang.localeCompare(b.lang) || a.type.localeCompare(b.type)
+  );
+  for (const g of sorted) {
+    const obs = g.chars / g.sec;
+    const langMean = byLang[g.lang] ? byLang[g.lang].chars / byLang[g.lang].sec : null;
+    const drift = langMean != null ? (obs - langMean).toFixed(2) : '-';
+    console.log(
+      `${g.lang.padEnd(4)}  ${g.type.padEnd(11)}  ${String(g.samples.length).padStart(5)}  ` +
+      `${obs.toFixed(2).padStart(7)}  ${String(drift).padStart(18)}`
+    );
+  }
+  console.log('\nIf |delta_vs_lang_mean| > 1.5 for any segment_type, that content class');
+  console.log('speaks measurably differently — consider per-content-type CPS in the future.');
+}
+
+// --- recommendations ---
+console.log('\n\n========================================');
+console.log('Recommended config updates (|delta| > 1.0)');
+console.log('========================================\n');
+
+if (recommendations.length === 0) {
+  console.log('  None — all current CPS values are within ±1.0 cps of observed.\n');
+} else {
+  console.log('Open the `config` sheet in Google Sheets and update these key/value rows:\n');
+  for (const r of recommendations) {
+    const direction = r.delta < 0 ? '↓' : '↑';
+    console.log(`  cps_estimate_${r.lang}   ${r.current.toFixed(1)} → ${r.recommend.toFixed(1)}   ${direction} delta ${r.delta.toFixed(2)}, ${r.conf} confidence (N=${byLang[r.lang].samples.length})`);
+  }
+  console.log('\nAfter editing the sheet, re-run this script to confirm new values are stable.');
+}
+
+// --- legend / next steps ---
+console.log(`
+Notes:
+  - "default_spd" is auto-detected as min(final_speed) per lang. PT/TR voices typically
+    run below 1.0 by default; other langs at 1.0.
+  - "current" reads from config.csv if you exported it alongside localizations; otherwise
+    uses hardcoded defaults from docs/config_keys.md.
+  - "confidence" — LOW (<10 samples) / MED (10-19) / HIGH (≥20). Don't trust LOW deltas.
+  - "voice_id" snapshot from sheets/voices.csv. If voice changed between runs, old CPS
+    values are stale — re-calibrate against new voice data.
+
+Next steps if you updated config values:
+  1. Edit the \`config\` sheet rows shown above.
+  2. Run one more lesson through W3 to validate predictions match reality.
+  3. Re-run this script with the new lesson's CSV to confirm |delta| < 1.0 across all langs.
+`);

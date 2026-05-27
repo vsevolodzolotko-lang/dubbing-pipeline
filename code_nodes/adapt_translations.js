@@ -23,18 +23,27 @@ $('Read Prompts').all().forEach(i => { if (i.json.key) promptMap[i.json.key] = i
 function loadPrompt(key, vars = {}) {
   const raw = promptMap[key];
   if (!raw) throw new Error(`Missing prompt "${key}" in prompts sheet — add a row with this key`);
-  return Object.entries(vars).reduce(
-    (s, [k, v]) => s.replace(new RegExp(`\\{\\{${k}\\}\\}`, 'g'), String(v ?? '')),
+  const result = Object.entries(vars).reduce(
+    (s, [k, v]) => s.replace(new RegExp(`\\{\\{\\s*${k}\\s*\\}\\}`, 'g'), String(v ?? '')),
     raw
   );
+  const leaks = result.match(/\{\{\s*[a-z][a-z0-9_]*\s*\}\}/g);
+  if (leaks) throw new Error(`Unsubstituted placeholders in prompt "${key}": ${leaks.join(', ')}`);
+  return result;
 }
 const SYSTEM_PROMPT = loadPrompt('adapt_shorten_system');
 
-const ATTEMPT_PROMPTS = [
-  (lang, budget, est, en, trans, minChars) => loadPrompt('adapt_attempt_light',  { lang, budget, est, en, trans, min_chars: minChars }),
-  (lang, budget, est, en, trans, minChars) => loadPrompt('adapt_attempt_medium', { lang, budget, est, en, trans, min_chars: minChars }),
-  (lang, budget, est, en, trans, minChars) => loadPrompt('adapt_attempt_max',    { lang, budget, est, en, trans, min_chars: minChars }),
+// R6.a: unified template + 3 attempt-level aggression descriptors.
+// AGGRESSION[i] passed as {{aggression}} placeholder; i = attempt level (0..2).
+const AGGRESSION = [
+  'Aim for ~5-15% reduction. Remove only filler words and minor redundancies. Preserve sentence structure and all key concepts.',
+  'Aim for ~15-25% reduction. Rephrase for compactness, but every concept from the English source must remain.',
+  'Reduce as much as possible. Preserve every distinct concept, negation, contrast, and proper noun from the English. Cut only filler and stylistic flourishes.',
 ];
+const ATTEMPT_PROMPTS = AGGRESSION.map(aggression =>
+  (lang, budget, est, en, trans, minChars) =>
+    loadPrompt('adapt_attempt_template', { lang, budget, est, en, trans, min_chars: minChars, aggression })
+);
 
 
 // Strip Claude meta-commentary.

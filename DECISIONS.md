@@ -4,6 +4,217 @@
 
 ---
 
+### 2026-05-27 — PHASE2_SLOT_DURATION_DRIFT
+
+Context: User noticed full WAV lengths differed between languages and felt segments were drifting from their EN start positions. Root cause (present in Phase 2 since inception, only now caught by close alignment inspection): `reTtsOne` rebuilt accepted files to duration = `en_duration` instead of the segment's full slot = `lead_silence + en_duration`. The tail formula `tail = en_duration - lead - newRealDur` subtracts lead, so `finalDur = lead + real + tail = en_duration` — every accepted Phase 2 file was short by exactly its `lead_silence`. Phase 1 files correctly occupy the full slot (`lead + en_duration`), so a mix produced cumulative drift: each accepted segment shifted everything after it earlier by `lead`. Because languages have different counts of accepted segments with different leads, total shortfall differed per language (sleep2_end: de −0.56s, es −0.72s, it −0.24s, pl −0.32s) → unequal full lengths.
+
+Decision: Target the exact Phase 1 file duration. `reTtsOne` now uses `targetFileDur = info.phase1_final_duration` (already captured in the candidate, falls back to `lead + en_duration`), with `tail = targetFileDur - lead - newRealDur` and overshoot guard `newRealDur > (targetFileDur - lead)`. The rebuilt file equals the slot the Phase 1 file occupied, so concatenation stays EN-aligned and all languages sum to the identical EN-total length.
+
+Why phase1_final_duration is safe vs recomputing: it mirrors Phase 1 regardless of natural-lead vs breath-lead (naturalLead=0) segments, where the lead is carved *within* en_duration rather than added before it. Recomputing `lead + en_duration` would over-pad breath-lead segments. Phase 2 candidates never have borrow (`borrowed_sec>0` requires `real>en_dur`, but candidate filter requires `real<en_dur×0.85` — mutually exclusive), so phase1_final_duration always equals the clean slot with no borrow extension, and the borrow-trim logic in Build Full Audio is unaffected.
+
+Verification: after re-run, every `{lesson}_full_{lang}.wav` has the SAME duration across all 7 languages (= EN timeline, ~last_en_end − first_slot_start), ±sample-rounding. Each segment starts at its EN slot position. `final_duration_sec` for accepted Phase 2 rows now equals the slot (lead + en_duration), matching Phase 1 passthrough rows for the same segment.
+
+Rollback: revert this commit (reintroduces the per-segment `lead` shortfall and cross-language drift).
+
+---
+
+### 2026-05-27 — PHASE2_MERGE_BRANCHES
+
+Context: The PHASE2_ORDERING_BARRIER fix (same day, earlier) gated the full-audio/VTT chain behind `Phase 2: Update Localizations`. But Update Localizations has TWO incoming connections (from `Phase 2: Drive Update` on the accepted/true branch, and from `Phase 2: Has Binary?` false branch). n8n executes a node once per incoming connection that delivers data, so Update Localizations fired TWICE — once with accepted items (~half), once with rejected+passthrough items (~half). When it was a terminal node this was a harmless idempotent double sheet-write. After the ordering-barrier fix hung Download→Build Full off it, each fire triggered a SEPARATE concat pass over a PARTIAL segment set. Result on sleep2_end: two full WAVs per language in the full folder (e.g. de 157 KB + 897 KB), each containing a different subset of segments in scrambled order, and the full audio not matching the per-segment output files.
+
+Decision: Insert a `Phase 2: Merge Branches` node (n8n-nodes-base.merge, typeVersion 3, mode=append, 2 inputs) to recombine the IF branches into a single stream before Update Localizations:
+- Has Binary? [true] → Drive Update → Merge[input 0]
+- Has Binary? [false] → Merge[input 1]
+- Merge → Update Localizations → Download Segment WAV + Build VTT Per Lang
+
+Update Localizations now has exactly ONE incoming connection (from Merge), so it fires once with all ~329 rows. Download → Build Full Audio then runs once over the complete, sorted segment set → one full WAV per language, concatenated from the actual current Drive files (Phase 2 audio for accepted cells, Phase 1 for the rest — matching the output folder).
+
+Item pairing (`$('Phase 2: Batch LLM+TTS').item.json.X` in Update Localizations column mappings) survives the Merge append — n8n preserves pairedItem linkage, so each row still resolves back to its Batch LLM+TTS source even though Drive Update output is a Drive API response shape.
+
+Trade-offs / known edge:
+- Merge "append" waits for both inputs. In the normal case both have data (there are always passthrough non-candidates on the false branch, and usually ≥1 accepted on the true branch). The rare 0-accepted lesson leaves Merge input 0 empty; recent n8n proceeds with the available input, but if a future 0-accepted lesson hangs at Merge, that's the place to look.
+- User must delete the duplicate full WAVs from the bad sleep2_end run manually (Drive create-by-name doesn't overwrite).
+
+Verification: re-run a lesson. Exactly ONE `{lesson}_full_{lang}.wav` per language in the full folder. Its content/length matches concatenating that language's per-segment output files (minus borrow trim). Lengths across languages converge to ≈ EN total (each segment padded to en_duration).
+
+Rollback: revert this commit (reintroduces double-fire) — not advisable. Prefer fixing forward.
+
+---
+
+### 2026-05-27 — PHASE2_ORDERING_BARRIER
+
+Context: User reported that per-segment WAVs in the output Drive folder did not match the concatenated full-lesson WAV in the full folder — both in total duration AND in content (some segments in the full WAV were a different generation than the per-segment files). Root cause: a race condition in the W3 execution graph. `Read Localizations Fresh` fanned out to THREE parallel branches off a single output: [Phase 2: Batch LLM+TTS, Download Segment WAV, Build VTT Per Lang]. The original 2026-05-25 design assumed n8n would run the Phase 2 branch to completion first because it was listed first — but n8n does not guarantee branch execution order for a single fan-out. Phase 2 takes ~2 min (batch LLM + re-TTS + Drive PATCH); Download Segment WAV is fast. So Download Segment WAV downloaded per-segment files (Phase 1 audio) and Build Full Audio concatenated them BEFORE / concurrently with Phase 2: Drive Update overwriting those same files with expanded audio. Net: full WAV = Phase 1 audio, per-segment Drive files = Phase 2 audio. Mismatch by design flaw.
+
+Decision: Make the full-audio + VTT chain explicitly depend on Phase 2 completion instead of running in parallel. Rewired:
+- `Read Localizations Fresh` → now feeds ONLY `Phase 2: Batch LLM+TTS` (dropped the parallel Download/VTT edges).
+- `Phase 2: Update Localizations` → now feeds `Download Segment WAV` AND `Build VTT Per Lang`. Since Update Localizations is the terminal node of the Phase 2 chain (after Drive Update completes its PATCHes), the downstream concat chain starts only after all per-segment files are refreshed.
+
+To make this work without a 0-candidate dead-end, `Phase 2: Batch LLM+TTS` now emits ALL input rows, not just candidates:
+- Candidates: existing accept (binary) / reject (phase2_outcome) logic.
+- Non-candidates (already-fitting rows, needs_attention rows, structurally-impossible skips): emitted as passthrough via `makePassthrough()` — full row, has_binary=false, phase2_outcome=''. They route through Has Binary?[false] → Update Localizations (idempotent rewrite of values they already hold).
+- 0-candidate lesson: early-return now emits all rows as passthrough so the chain still runs and the full WAV is still built.
+
+This guarantees Update Localizations always fires with the complete 329-row set, which deterministically triggers Download → Build Full Audio with the full segment list and refreshed Drive content.
+
+Bonus: Build VTT Per Lang now reads post-Phase 2 text (it takes rows from Update Localizations output, which has the accepted expanded text), so subtitles align with the expanded audio. Previously VTT used pre-Phase 2 text from Read Localizations Fresh and could mismatch.
+
+Trade-offs:
+- Update Localizations now writes all ~329 rows every run (was: only candidates). appendOrUpdate batches into few API calls; ~5-15s extra. Idempotent — non-candidate rows rewrite identical values.
+- Phase 2: Batch LLM+TTS emit count goes from ~candidates to always 329. Memory: passthrough items carry no binary, so heap impact is small (the ~30 accepted items with WAV binary dominate memory, unchanged).
+- W3 wall-clock: the concat chain now runs strictly AFTER Phase 2 instead of overlapping it, so total time is Phase1 + Phase2 + concat (sequential) rather than Phase1 + max(Phase2, concat). Adds the concat duration (~1-2 min) to the critical path. Correctness over speed — the overlap was producing wrong output.
+
+Verification: re-run any lesson through W_Master. Per-segment files in output folder must byte-match the corresponding portions of the full WAV. Check a known Phase 2 accepted segment (e.g. one with phase2_outcome=accepted, expansion_attempts=2): its standalone WAV duration and content should equal what's heard at its slot in the full lesson WAV. Full WAV length ≈ sum(final_duration_sec) − sum(borrowed_sec), all from post-Phase 2 values.
+
+Rollback: revert this commit (restores the parallel fan-out and candidate-only emit). Note the original had the race condition — rollback reintroduces it.
+
+---
+
+### 2026-05-26 — PHASE2_TUNING_POSTRETRY
+
+Context: First full W_Master run with Phase 2 retry pass + diagnostics (commit 48e8671) on sleep1_full revealed three issues in the CSV output:
+
+1. **Data corruption in skipped emit**: for `negative_tail` / `no_change` / `overshoot` rejected candidates, my code overwrote Phase 1's stored `tail_silence_sec`, `final_duration_sec`, `borrowed_sec`, `final_speed`, `shorten_retries_in_synthesize` with values recomputed from the formula `tail = en_dur - lead - real_dur`. This formula doesn't match Phase 1's actual WAV structure for first-segment offsets, accumulated borrow, or structurally tight slots. Result: seg_001_fr showed `tail_silence_sec=-1.942` even though Phase 1's actual audio file is correct — only the sheet metadata was corrupted.
+
+2. **Wasted LLM calls on structurally impossible cells**: Phase 1's natural EN lead for first segments (seg_001 lead=2.88s) or accumulated borrow (seg_011 lead=1.165s of en_dur=2.88s; seg_020 lead=4.64s of en_dur=9.04s; seg_038 lead=10.885s exceeding en_dur=6.24s!) leaves so little TTS budget that ANY expansion overshoots or hits negative_tail. ~15 of the rejected cells fell here — Phase 2 spent LLM and TTS calls on cases that physically cannot improve.
+
+3. **Cross-language contamination in retry pass**: seg_019_es came back as `"...sino porque es essencial..."` — `essencial` is the Portuguese spelling (double 's'); Spanish uses `esencial` (single 's'). This is a classic Romance false-friend leak. The expansion ran in batch mode where multiple langs for the same segment_id appear side-by-side in the LLM input JSON, so the model "borrowed" PT orthography into the ES cell. Neither Verify nor Editor caught it. Retry-harder prompt seemed more prone to this (pushing for richer vocabulary increases false-friend risk).
+
+Decision: Three targeted fixes, no architectural changes:
+
+1. **Preserve Phase 1 fields verbatim in skipped emit**: candidates collection now stores `phase1_tail_silence`, `phase1_final_duration`, `phase1_borrowed`, `phase1_final_speed`, `phase1_shorten_retries` from the input row. Skipped emit branch writes these unchanged instead of recomputing. Update Localizations writes preserve Phase 1's actual file metadata.
+
+2. **Structurally impossible filter**: at candidate collection time, skip cells where `lead_silence_sec >= en_duration_sec × STRUCTURALLY_IMPOSSIBLE_LEAD_RATIO` (default 0.5). These cells are not emitted at all — Phase 1 audio stays, sheet row untouched, `phase2_outcome` remains empty (= `not_candidate`). Console logs the skipped count. Saves ~30% Phase 2 LLM cost on lessons with large gaps. Cells that ARE structurally feasible still get attempted; the filter only prunes geometrically hopeless ones.
+
+3. **Cross-lang isolation guard in expand prompts**: added `==== LANGUAGE ISOLATION ====` section to all three Phase 2 expand prompts (`w3_expand_batch_system`, `w3_expand_batch_retry_harder`, `w3_expand_batch_retry_shorter`). Section lists common Romance false-friend pairs explicitly (esencial/essencial/essenziale/essentiel, y/e, es/é, accent rules) and instructs LLM to treat each lang cell as fully isolated regardless of batch input shape. Harder-retry prompt has stronger warning since aggressive expansion correlates with false-friend risk. Verify/Editor system prompts NOT changed (shared with W2; out of scope here).
+
+Rationale:
+- Fix #1 unblocks accurate post-run analysis — without it sheet metadata for ~15 rejected cells per lesson is misleading.
+- Fix #2 is a pure cost optimization. Structurally impossible cells were always rejected; now they're rejected upfront without LLM/TTS spend.
+- Fix #3 is a quality fix targeting a specific reported regression (seg_019_es "essencial"). Cross-lang contamination is most likely with batched same-segment-multi-lang input format we use; explicit guard with false-friend examples is the cheapest mitigation. If it doesn't fully solve, next escalation is splitting batches per-lang (loses cache efficiency, ~3-4× cost).
+
+Trade-offs:
+- `STRUCTURALLY_IMPOSSIBLE_LEAD_RATIO=0.5` is conservative — some cells with lead between 0.4 and 0.5 might still be plausibly expandable. If the filter feels too aggressive after a few lessons, raise to 0.6. Configurable as constant in code.
+- Cross-lang guard adds ~400 chars to each expand prompt → +400 chars × `cache_control: ephemeral` cached after first batch, so per-batch overhead is negligible after batch 1.
+
+Verification: re-run W3 on sleep1_full. Expect:
+- seg_001 / seg_011 / seg_020 / seg_038 cells with large leads have `phase2_outcome` empty (filtered out, never attempted)
+- seg_019_es should now contain `esencial` (correct ES spelling); same for any new false-friend cases
+- rejected cells with `phase2_outcome=overshoot` or `no_change` should have valid Phase 1 tail/final values matching the previous lesson's audio metadata
+
+Rollback: revert this commit. Each fix is independent — could split into 3 commits if any fix proves problematic, but they're small and orthogonal enough to ship together.
+
+---
+
+### 2026-05-26 — PHASE2_RETRY_AND_DIAGNOSTICS
+
+Context: Phase 2 batched expansion (commit c8e72d1) shipped and works end-to-end on sleep1_full — 21/47 candidates accepted, audio meaningfully expanded (seg_047 PT silence 6.255s → 0.083s, seg_044 PT "sem esso" typo → "sem esforço" caught by Editor). But 26 candidates remained unexpanded after a single pass, and the failure reasons (`no_change` / `overshoot` / `negative_tail` / `tts_empty`) were only visible via console.log histogram — not persisted in any Sheet, and lost entirely when n8n purges successful executions. Without per-cell diagnostics, it was impossible to tell whether to tune the prompt, the threshold, or the TTS budget. Additionally, cells where Phase 2 accepted expansion but the result was still very short (ratio < 0.70) were not flagged for human review.
+
+Decision: Added a 2-pass retry mechanism to Phase 2 with per-candidate outcome diagnostics:
+
+1. **Retry pass** (`code_nodes/phase2_batch_llm_tts.js` rewritten ~430 → ~580 LOC):
+   - After attempt 1 (Expand → Verify → Editor → re-TTS), classify each cell by outcome.
+   - `no_change` and accepted-but-still-short (newRealDur < en_dur × 0.85) → retry with `w3_expand_batch_retry_harder` prompt (push more ToV patterns, target_chars × 1.05).
+   - `overshoot` → retry with `w3_expand_batch_retry_shorter` prompt (pull back, target_chars × 0.85, strict ceiling).
+   - Retry skips Verify (latency saving) but keeps Editor (still catches typos on new expansion). `negative_tail`, `tts_empty`, `error` are not retried — too edge-case.
+   - Final result per cell: prefer attempt 2 if accepted, else attempt 1 if accepted, else most recent skip reason.
+
+2. **phase2_outcome column** in localizations sheet (`accepted` / `no_change` / `overshoot` / `negative_tail` / `tts_empty` / `error` / empty=`not_candidate`). Persists the diagnostic across runs regardless of n8n execution retention settings. Sortable/filterable in Sheets.
+
+3. **Items emit for ALL candidates** (not just accepted) — Phase 2 Code now emits one item per candidate with `has_binary` flag. New IF node `Phase 2: Has Binary?` routes:
+   - `has_binary=true` → Drive Update (PATCH new WAV) → Update Localizations
+   - `has_binary=false` → Update Localizations directly (writes `phase2_outcome` and `expansion_attempts` only; Phase 1 audio stays in Drive untouched)
+
+4. **needs_attention inline flag** — for accepted cells where `newRealDur < en_dur × 0.70`, set `needs_attention=true` in the emit. Threshold 0.70 (not 0.85) to avoid noise — flags only severely-short results that warrant human review.
+
+5. **Two new optional prompt rows** in Sheets `prompts` tab: `w3_expand_batch_retry_harder` and `w3_expand_batch_retry_shorter`. Both load via `loadPrompt(key, vars, optional=true)` — if missing, Phase 2 falls back to single-pass behavior (graceful degradation). Templates committed under `prompts/proposed_changes/`.
+
+Rationale: Per-candidate diagnostics unblock all future tuning iterations (CPS recalibration, threshold tuning, prompt revisions) — without them, every observation requires re-running with execution save enabled. Retry pass directly addresses the largest unaccepted category (`no_change`, ~50% of skips) where LLM returned identical text and a more aggressive prompt has a real chance. `expansion_attempts` semantics shifted: now means "LLM rounds the cell went through" (0/1/2), with accept/skip status carried by `phase2_outcome` — cleaner separation of metrics.
+
+Trade-offs:
+- W3 wall-clock +30-60s per lesson when retry candidates exist (1-2 extra batches × 2 prompt variants + ~10-15 re-TTS calls).
+- Phase 2 emit changed shape: now emits ALL candidates including rejected ones. Downstream Drive Update would 400 on missing binary — mitigated by new IF node.
+- `expansion_attempts` historic interpretation changed: pre-2026-05-26 `1`=accepted, post: `1`=attempt 1 ran (accepted OR rejected). For unambiguous accept/skip status, read `phase2_outcome` instead.
+- New `phase2_outcome` column must be added to live localizations sheet before re-import — otherwise Update Localizations writes are no-ops for that column.
+
+Verification: retry execution #71235 with currently saved workflow. Expect outcomes table to show ~10-15 cells flipping from `no_change`/`overshoot` to `accepted` via attempt 2. `phase2_outcome` should be populated for all 47 prior candidates (accepted + rejected). needs_attention=true for any accepted cells where newRealDur < en_dur × 0.70 (likely 3-5 cases).
+
+Rollback path: revert the workflow JSON commit + delete both retry prompt rows from Sheets. Phase 2 Code falls back to single-pass behavior when retry prompts missing.
+
+---
+
+### 2026-05-25 — PHASE2_BATCHED_EXPANSION
+
+Context: Inline expansion in W3's `Check Timing + Pad` (calling `w3_expand_system` per segment) was bypassing the Verify + Editor defense layer. Sleep1_full re-run with new ToV v3 expansion strategy introduced grammatical errors (DE seg_007 "und erwartend" instead of "erwarten"; PL seg_042 "przyść" typo not caught; FR seg_003 / DE seg_042 hit speed cap 1.15 due to expansion overshoot). Verify and Editor only run inside W2 Translate pipeline; any text W3 expansion generates is never re-validated.
+
+Decision: Removed inline expansion from `Check Timing + Pad`. Added a 3-node Phase 2 chain in W3 that runs AFTER the per-segment Loop completes:
+1. `Phase 2: Batch LLM+TTS` (Code) — collects all rows with `real_duration < en_duration × 0.85` AND `needs_attention=false`, groups by segment_id, sends batches of 8 segments to Anthropic (CHUNK=6 parallel — Tier 2) for expansion using new `w3_expand_batch_system` prompt, pipes through `qa_verify_system` and `editor_system` (same prompts as W2 Verify/Editor), then re-TTSes accepted text. Builds new WAV with same lead silence + new TTS + recomputed tail silence. Reverts to Phase 1 audio on overshoot.
+2. `Phase 2: Drive Update` (HTTP Request) — PATCH /upload/drive/v3/files/{id}?uploadType=media via predefined Google Drive OAuth credential. Overwrites WAV binary in-place at same file_id so Download Segment WAV (in parallel branch) reads refreshed content transparently.
+3. `Phase 2: Update Localizations` (Google Sheets appendOrUpdate by row_key) — writes new text_translated, real_duration_sec, tail_silence_sec, final_duration_sec, expansion_attempts=1.
+
+Branch ordering: Read Localizations Fresh fans out to [Phase 2 chain, Download Segment WAV, Build VTT Per Lang] in that order. n8n's sequential connection evaluation runs Phase 2 to completion before Download starts.
+
+Rationale: Expansion text now passes through the same Verify+Editor defense as initial translations from W2 — catches grammatical errors, regional drift, false-friend traps. Tier 2 Anthropic allows CHUNK=6 parallelism (vs W2's CHUNK=3 on Tier 1). cache_control:ephemeral on system prompts reuses across batches. Single mega-Code node design follows existing Check Timing + Pad pattern (API-key auth work in Code, OAuth side-effects via dedicated downstream nodes). Drive update via HTTP Request rather than n8n's googleDrive node because v3 "update" operation modifies metadata, not file content.
+
+Trade-offs:
+- W3 wall-clock ~+1-2 min per lesson (LLM batches ~30-60s, re-TTS ~30-50s with ELEVENLABS_CHUNK=5 parallel).
+- Cost ~$1-2 additional per lesson (mostly batch LLM tokens + per-cell ElevenLabs TTS retries).
+- PT/TR now receive expansion (Phase 1 inline gating excluded them via `finalSpeed===1.0` check; Phase 2 has no such gate).
+- Old `w3_expand_system` Sheet row preserved as rollback backup (unused).
+
+Verification: re-run sleep1_full through W3 only (translations already in segments tab). Expect: seg_007 DE has correct "erwarten"; seg_042 PL has "przyjść"; seg_044/047 silence reductions preserved (from R8); PT seg_047 6.4s tail silence now closed via expansion. New needs_attention=true cases should NOT increase relative to R8.
+
+Rollback path: `git revert` the workflow JSON commit + delete `w3_expand_batch_system` row from Sheets `prompts` tab. Inline expansion was removed from Check Timing + Pad's jsCode — to fully revert, also restore that block via git.
+
+---
+
+### 2026-05-23 — TOV_V3_UNIVERSAL_PRINCIPLES_ADDED
+
+Context: ToV v2 was meditation-centric. Spirio actually produces multiple content types: meditation, visualization, movement practices (Tai Chi/Qigong/Kundalini/Yoga), educational lectures, affirmations, mantras. Old ToV didn't differentiate.
+
+Decision: ToV v3 adds three structural improvements:
+1. Section 2 — Universal Principles (8 numbered rules applying to ALL content types)
+2. Section 10 — Content Type Specific Guidance (Educational / Guided Practice / Vocal)
+3. Section 12 — Translation Considerations (how to expand/shorten using authentic Spirio patterns instead of filler)
+
+All language patterns and phrases from v2 preserved 1:1. Section ordering preserved for backwards compatibility with existing prompts referencing section numbers.
+
+Rationale: Single ToV must cover all content types. Per-type subsections give translators and Tone Analysis the framework to handle different rhythms (short for practice, flowing for lecture). Translation Considerations directly addresses our expansion problem from real production data.
+
+---
+
+### 2026-05-23 — EXPANSION_STRATEGY_VIA_TOV_PATTERNS
+
+Context: Previous expansion prompt said "restore meaning that was cut" — works only when adaptation actually cut something. Doesn't help when source translation is naturally short (TR, PL). Claude Code advised against filler words but didn't provide alternative.
+
+Decision: New expansion strategy with 5 prioritized techniques, all sourced from ToV section 3 patterns:
+1. Inviting modifiers ("when you're ready")
+2. Sensory anchoring ("softly", "with care")
+3. Permission language ("you don't need to")
+4. Bridging awareness ("notice what happens when")
+5. Internal pauses via ellipsis (`...`)
+
+These are NOT filler — they ARE the substance of meditation/practice language. Expansion now explicitly classifies case as "restoration" (something was cut) or "authentic_expansion" (naturally short) and applies appropriate techniques.
+
+Rationale: Validates the existing brand voice instead of fighting it. The very patterns that make Spirio recognizable are exactly the ones that lengthen text without breaking tone. Two-attempt limit with revert-on-overshoot prevents runaway expansion.
+
+---
+
+### 2026-05-22 — CPS recalibration (R7.a): TR 14→10, PL 14→13, PT 16→15
+
+Context: After R4/R6.c prompt refactors stabilized translation quality, profiling `the_anchor` (31 affirmation segments × 7 langs) and combining with `test4` data (N=231 total samples) revealed measurable drift between configured `cps_estimate_*` values and observed chars-per-second at each voice's default playback speed. TR was the most painful: default_speed=0.80, observed CPS=10.5, configured at 14 — a -3.49 cps miss, causing chronic `final_speed=1.10/1.15` compression retries in W3 (8 of 31 TR segments hit the speed cap on the_anchor R4 run).
+
+Decision:
+- `cps_estimate_tr`: 14 → **10** (HIGH confidence, N=25, delta -3.49)
+- `cps_estimate_pl`: 14 → **13** (HIGH confidence, N=21, delta -0.99 — at threshold, updated)
+- `cps_estimate_pt`: 16 → **15** (HIGH confidence, N=30, delta -1.01)
+- DE/ES/FR/IT: deltas under ±1.0, left unchanged.
+
+Rationale: Filter rule for CPS measurement is now "at each lang's auto-detected default voice speed" (min observed `final_speed` per lang), not blanket `final_speed=1.0`. PT voice runs at 0.9, TR at 0.8 by default — previous script (filtered to 1.0 only) had ZERO samples for those langs, hiding the drift. New `analyze_cps.js` v2 auto-detects per-lang default speed, joins optional `segments.csv` for `segment_type` breakdown, and prints copy-pasteable config update commands.
+
+Verification path: after applying new values, re-run a full lesson through W3 and re-run `analyze_cps.js` — expect |delta| < 1.0 across all langs at HIGH confidence.
+
+---
+
 ### 2026-05-09 — Example entry format
 
 Context: Needed a consistent way to document architectural and product decisions so future contributors understand why choices were made, not just what was chosen.

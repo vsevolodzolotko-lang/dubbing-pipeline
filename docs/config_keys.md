@@ -18,7 +18,7 @@ Every row has two columns: `key`, `value`. Missing keys fall back to the default
 | Key | Default | Read by | Purpose |
 |---|---|---|---|
 | `max_adaptation_attempts` | `3` | W2 Adapt Translations | Upper bound for the W2 CPS-driven adaptation loop per language. Not currently read by W3 (W3 hardcodes 3 attempts for synthesize-time shorten). |
-| `expansion_threshold` | `0.75` | W3 Check Timing + Pad | Triggers expansion loop when `real_duration_sec < en_duration_sec × expansion_threshold`. Lower → expansion fires less often (only very short TTS). Higher → expansion tries to fill more padding. Default lowered from 0.85 to 0.75 after observing that ratio 0.75–0.85 sounded acceptable without expansion. |
+| `expansion_threshold` | `0.85` | W3 Phase 2: Batch LLM+TTS | Triggers Phase 2 expansion when `real_duration_sec < en_duration_sec × expansion_threshold`. Lower → expansion fires less often (only very short TTS). Higher → expansion tries to fill more padding. **As of 2026-05-25**: inline expansion was removed from Check Timing + Pad; this threshold now gates the Phase 2 batch (Expand → Verify → Editor → re-TTS). Phase 2 includes all 7 langs (Phase 1's `finalSpeed===1.0` gate that excluded PT/TR no longer applies). |
 
 ## Synthesize timing
 
@@ -46,21 +46,32 @@ Every row has two columns: `key`, `value`. Missing keys fall back to the default
 | `drive_input_folder_id` | *(required if using W_Master)* | W_Master Drive Trigger | Google Drive folder ID watched by W_Master for new audio files. Set on the Drive Trigger node directly in n8n UI (not read from sheet at runtime — n8n needs the folder ID when registering the poll). Documented here so the same value is recorded alongside the other folder IDs. |
 | `slack_channel` | *(required if using W_Master)* | W_Master Build Slack Message | Slack channel ID where W_Master posts the completion message. Use channel ID (e.g. `C01234ABCDE`) — find it in Slack: right-click channel → View channel details → bottom of dialog shows ID. The bot itself authenticates via an n8n Slack credential, not via the config sheet. Bot must be in the channel (`/invite @YourBotName`) unless its OAuth scope includes `chat:write.public`. |
 
+## Manual W1 trigger
+
+| Key | Default | Read by | Purpose |
+|---|---|---|---|
+| `manual_w1_file_id` | *(empty)* | W1 Get Params | Google Drive file ID of the audio to process when W1 is triggered manually (not via W_Master). Edit this row before each ad-hoc W1 run; click Execute on W1 Manual Trigger. W_Master-triggered runs ignore this — W_Master passes file_id in its payload, which takes priority. If both this row is empty AND W_Master didn't trigger, Get Params throws a clear actionable error. |
+| `manual_w1_lesson_id` | *(empty)* | W1 Get Params | Lesson identifier (becomes the `segment_id` prefix, e.g. `the_anchor_seg_001`). Same semantics as `manual_w1_file_id` — used only for manual W1 runs, overridden by W_Master payload when present. Pick a stable name per lesson so re-runs overwrite consistent segment_ids. |
+
 ---
 
 ## Per-language CPS overrides
 
-| Key | Default | Read by | Purpose |
-|---|---|---|---|
-| `cps_estimate_de` | `12`   | W2 Adapt Translations, W3 Check Timing + Pad | Per-language chars-per-second estimate. Used to predict whether a translation will fit in the slot before TTS (W2) and to compute `target_chars` for Claude shorten/expand prompts (W3). Defaults are baked into `CPS_DEFAULTS` in both code nodes. If a key is present in config, it overrides the default. |
-| `cps_estimate_es` | `15`   | (same) | |
-| `cps_estimate_fr` | `15`   | (same) | |
-| `cps_estimate_it` | `14`   | (same) | |
-| `cps_estimate_pl` | `14`   | (same) | |
-| `cps_estimate_pt` | `16`   | (same) | |
-| `cps_estimate_tr` | `14`   | (same) | |
+| Key | Default | Calibrated (2026-05-22) | Read by | Purpose |
+|---|---|---|---|---|
+| `cps_estimate_de` | `12`   | `12` (no change — obs 12.67, delta +0.67) | W2 Adapt Translations, W3 Check Timing + Pad | Per-language chars-per-second estimate. Used to predict whether a translation will fit in the slot before TTS (W2) and to compute `target_chars` for Claude shorten/expand prompts (W3). Defaults are baked into `CPS_DEFAULTS` in both code nodes. If a key is present in config, it overrides the default. |
+| `cps_estimate_es` | `15`   | `15` (no change — obs 15.30, delta +0.30) | (same) | |
+| `cps_estimate_fr` | `15`   | `15` (no change — obs 15.83, delta +0.83) | (same) | |
+| `cps_estimate_it` | `14`   | `14` (no change — obs 13.25, delta −0.75) | (same) | |
+| `cps_estimate_pl` | `14`   | **`13`** ← lower, obs 13.01, delta −0.99 | (same) | |
+| `cps_estimate_pt` | `16`   | **`15`** ← lower, obs 15.15, delta −0.85 | (same) | |
+| `cps_estimate_tr` | `14`   | **`10`** ← critical fix, obs 10.51, delta −3.49 | (same) | |
 
-Run `node scripts/analyze_cps.js <localizations.csv>` after any W3 run to compute the observed CPS per language and see whether to update the config values. Voice changes can shift CPS noticeably (different voice = different speaking pace).
+Calibration based on N=231 samples combined from `the_anchor` (R4 era, 31 segs × 7 langs) and `test4` (2 segs × 7 langs). Threshold for update: `|observed − current| > 1.0` cps. PL/PT close to threshold; updated for safety since multiple lessons converged on lower values.
+
+**TR was the largest miss** (delta −3.49): voice runs at `default_speed=0.8`, system was predicting at higher CPS, causing constant `final_speed=1.10/1.15` compression retries in W3. New value 10 should largely eliminate these.
+
+Re-run `node scripts/analyze_cps.js <localizations.csv> [--segments=<segments.csv>]` after any voice change, voice-param tweak, or content-type shift. See [`docs/cps_calibration.md`](cps_calibration.md) for full workflow.
 
 ## Dead keys to remove from your live sheet
 

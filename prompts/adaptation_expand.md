@@ -1,63 +1,155 @@
-# Adaptation Expand Prompt — Synthesize over-shortening recovery
+# Adaptation Expand Prompt
 
-**Version:** 1.0
-**Used by:** W3 Check Timing + Pad (Synthesize), expansion loop
-
-Companion to `prompts/adaptation_shorten.md`. While `shorten` fires when TTS is too long, this prompt fires when TTS came out too short — usually because W2 over-adapted the translation based on CPS estimate that turned out conservative.
-
----
+Single-segment translation expansion when TTS output is significantly shorter than the audio slot.
 
 ## When called
 
-After initial TTS (and any breath-borrow / shorten loop) settled the audio, when `real_duration_sec < en_duration_sec × expansion_threshold` (default 0.85). Called up to 2 times per segment × lang. Between each call: re-TTS at speed 1.0, re-measure.
-
-If a call produces overshoot (`real > effective_slot`), revert to the previous (shorter, but in-budget) translation. No further expansion attempts for that segment.
+By Synthesize workflow when `real_duration_sec < en_duration_sec * expansion_threshold` (default 0.85).
 
 ## Inputs
 
-- `original_en` — the EN source text for this segment
-- `current_translation` — the over-shortened `{lang}` translation
-- `target_chars` — calculated from `en_duration_sec × LANG_CPS[lang]`
-- `lang` — target lang code
-- `tov_content` — the full ToV text from config sheet
+- Original EN text
+- Current translation (the one that turned out too short)
+- Target character count = `round(en_duration_sec * cps_estimate_lang * 0.95)`
+- Brand Tone of Voice (full ToV content from config sheet)
+- Language code (`de`, `es`, `fr`, `pl`, `pt`, `it`, `tr`)
 
----
+## Why current translation may be short
 
-## System prompt
+Two distinct cases:
+
+- **Case A — Restoration**: Previous adaptation cut too aggressively (look for `adaptation_attempts > 0` in segments sheet).
+- **Case B — Authentic expansion**: Target language is naturally more concise than English (typical for TR, sometimes PL, ES).
+
+Both cases need expansion, but with different approaches.
+
+## Prompt template
 
 ```
-You are expanding a previously-shortened translation to fit a longer audio slot.
+You are expanding a translated meditation/wellness script segment to fit a longer audio slot.
 
-The current translation was shortened earlier, but TTS output is now too short — creating awkward silence in the dubbed audio. Your job: restore meaningful content while keeping the brand tone intact.
+The current translation produces TTS audio that is too short — creating awkward silence in the dubbed audio. Your job: expand the translation to fit the time slot using AUTHENTIC SPIRIO LANGUAGE PATTERNS, not filler words.
 
-ORIGINAL EN: {original_en}
-CURRENT (SHORTENED) TRANSLATION ({lang}): {current_translation}
-TARGET LENGTH: ~{target_chars} characters
+==== INPUTS ====
 
-TONE OF VOICE:
+ORIGINAL EN TEXT:
+{original_en}
+
+CURRENT (TOO-SHORT) TRANSLATION in {lang}:
+{current_translation}
+
+CURRENT LENGTH: {current_chars} characters
+TARGET LENGTH: ~{target_chars} characters (need to add ~{chars_to_add} characters)
+
+==== BRAND TONE OF VOICE ====
+
 {tov_content}
 
-RULES:
-1. Restore meaningful content that was likely cut, especially context-setting phrases or qualifiers
-2. Do NOT add filler ("really", "very", "kind of") — those break meditative tone
-3. Do NOT artificially repeat or rephrase the same idea
-4. Stay close to target length (within ±10%)
-5. Preserve ToV: warm, knowing-friend tone
-6. Natural language structures for {lang}
-7. Preserve negations and contrasts from the English source — if EN says "no extra tools, only fingertips" the translation must keep both halves of that idea
-8. Preserve specific nouns, named techniques, numbers, proper names from the English source
+==== EXPANSION STRATEGY ====
 
-OUTPUT: ONLY the expanded translation. No commentary, no explanation, no quotes.
+Step 1 — Identify the case:
+
+- If ORIGINAL EN contains content that's missing from CURRENT translation → this is "restoration" case. Restore the cut content first.
+- If ORIGINAL EN and CURRENT translation convey the same meaning but translation is just naturally shorter → this is "authentic expansion" case. Add Spirio-native phrasing.
+
+Step 2 — Apply expansion techniques in this priority order:
+
+PRIORITY 1: Inviting modifiers (Spirio ToV section 3 — "Inviting movement into sensation")
+Add phrases like:
+- "when you're ready"
+- "if it feels comfortable"
+- "if it feels right"
+- "allowing yourself to"
+- "without forcing"
+
+These work especially well at sentence beginnings or before verbs.
+
+Example transformation (EN reference):
+- Before: "Take a breath."
+- After: "When you're ready, take a slow breath in."
+
+PRIORITY 2: Sensory anchoring
+Add concrete sensory descriptors:
+- "softly", "gently", "with care"
+- "slowly", "naturally"
+- specific body locations ("at the back of the throat", "between the shoulder blades")
+- temperature, weight, texture references where relevant
+
+Example:
+- Before: "Feel your breath."
+- After: "Feel your breath, soft and full, at the tip of the nose."
+
+PRIORITY 3: Permission language
+Make the listener's sovereignty explicit:
+- "you don't need to change anything"
+- "let it be exactly as it is"
+- "there's no need to force"
+- "you're allowed to"
+
+Example:
+- Before: "Notice the tension."
+- After: "Notice the tension, without needing to release it just yet."
+
+PRIORITY 4: Bridging awareness phrases
+Make the noticing explicit:
+- "notice what happens when…"
+- "see what happens if…"
+- "bringing attention to…"
+- "feeling into…"
+
+Example:
+- Before: "Breathe in."
+- After: "Breathe in, noticing how the breath fills you."
+
+PRIORITY 5: Internal pauses via ellipsis (...)
+If text is already richer but slot still has time, distribute breathing space INSIDE the text:
+- Each `...` becomes ~0.5s of natural pause in TTS
+- Place at natural breathing points (between phrases, before key words)
+- Don't put more than 2-3 ellipsis per sentence
+
+Example:
+- Before: "Breathe in deeply and feel the air filling you."
+- After: "Breathe in... deeply... and feel the air filling you... completely."
+
+==== STRICT RULES ====
+
+DO NOT use any of these filler patterns:
+- "really", "very", "quite", "kind of", "sort of"
+- "just" (in the sense of "just relax")
+- "actually", "basically"
+- artificial repetition of the same idea
+- meaningless adverbs
+
+DO NOT:
+- Change the core meaning of the original
+- Add new instructions or information not in the original
+- Make the tone more grandiose or promising
+- Lose the natural rhythm of the target language
+- Switch to formal address (always informal: du/tu/ty/sen)
+
+DO:
+- Stay within ±10% of TARGET LENGTH
+- Maintain the meditative/grounded tone throughout
+- Use natural target-language constructions
+- Preserve any existing `...` or `—` markers in original
+- Add new `...` if it helps fill time naturally
+
+==== OUTPUT ====
+
+Output ONLY the expanded translation in {lang}. No commentary, no English, no quotation marks around the result.
 ```
 
----
+## Implementation notes for Synthesize workflow
 
-## Length sanity
+After receiving expansion output:
 
-Code-side check: the expansion should produce text longer than `current_translation` but not absurdly long. If Claude returns text shorter than the input or longer than `target_chars × 1.5`, reject the output and stop the expansion loop for this segment.
+1. Re-call TTS with new translation.
+2. Re-measure `real_duration_sec`.
+3. If new `real_duration <= en_duration_sec` → accept, write to Sheet.
+4. If new `real_duration > en_duration_sec` → REVERT to previous version (overshoot).
+5. If new `real_duration` still `< en_duration_sec * expansion_threshold` → try ONE more expansion attempt with stronger emphasis on adding sensory/permission patterns.
+6. After 2 attempts max, accept best version even if not perfect.
 
----
-
-## Output spec
-
-Single line of `{lang}` text. No JSON, no markdown, no surrounding quotes, no commentary. The Code node consumes the raw output, re-runs TTS at speed 1.0, and re-checks. If overshoot → revert; otherwise → write the new translation back and continue.
+Log in Sheet `localizations`:
+- `expansion_attempts`: how many times expansion ran
+- `expansion_strategy`: `"restoration"` | `"authentic_expansion"` (from Step 1)
