@@ -234,17 +234,23 @@ function parseLLMJson(raw) {
   return {};
 }
 
-// Coerce an LLM-returned cell value to a trimmed string. LLMs occasionally return
-// a non-string for a (segment_id, lang) cell — an object {text:"..."}, an array,
-// a number, or null — which would crash any downstream .trim() call. asStr unwraps
-// the common {text|value|<lang>} object shape, else stringifies primitives, else ''.
+// Coerce an LLM-returned cell value to a trimmed string. LLMs (especially the
+// retry-expand prompts) sometimes wrap the text in an object — observed shapes:
+// {expanded:"..."}, {text:"..."}, etc. — or return a number/null. asStr unwraps
+// the common single-text-key object shapes, stringifies primitives, else ''.
+// If unwrapping a known key fails but the object has exactly one string value,
+// use that (defensive against unanticipated wrapper keys).
 function asStr(v) {
   if (typeof v === 'string') return v.trim();
   if (v == null) return '';
   if (typeof v === 'number' || typeof v === 'boolean') return String(v).trim();
-  if (typeof v === 'object') {
-    const inner = v.text ?? v.value ?? v.translation ?? v.output;
+  if (typeof v === 'object' && !Array.isArray(v)) {
+    const inner = v.expanded ?? v.text ?? v.value ?? v.translation ?? v.output
+      ?? v.expansion ?? v.result ?? v.corrected ?? v.edited ?? v.fixed;
     if (typeof inner === 'string') return inner.trim();
+    // Fallback: object with a single string-valued property → use it.
+    const strVals = Object.values(v).filter(x => typeof x === 'string' && x.trim());
+    if (strVals.length === 1) return strVals[0].trim();
   }
   return '';
 }
