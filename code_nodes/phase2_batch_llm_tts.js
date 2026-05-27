@@ -249,6 +249,11 @@ function asStr(v) {
   return '';
 }
 
+// Diagnostics surfaced on the first emitted item's json.phase2_diag (visible in the
+// node Output panel — n8n Code console.log only reaches server stdout). Captures raw
+// retry-expand samples so we can see exactly what the retry LLM returns without server logs.
+const phase2Diag = { retryRawSamples: [], retryCoverage: [], retryNoTextTotal: 0 };
+
 // --- batch helpers ---
 const segmentEntries = Object.entries(candidates);
 function chunkSegments(entries, size) {
@@ -594,6 +599,13 @@ async function runRetryGroup(tasks, systemPrompt, charsMultiplier) {
       messages: [{ role: 'user', content: JSON.stringify(userMap, null, 2) }],
     };
     const raw = await callAnthropic.call(this, body);
+    if (phase2Diag.retryRawSamples.length < 3) {
+      phase2Diag.retryRawSamples.push({
+        sids: Object.keys(userMap),
+        rawLen: (raw || '').length,
+        rawHead: (raw || '').slice(0, 400),
+      });
+    }
     return parseLLMJson(raw);
   }
 
@@ -605,6 +617,7 @@ async function runRetryGroup(tasks, systemPrompt, charsMultiplier) {
   // signature of this.
   const expectedSids = [...new Set(tasks.map(t => t.sid))];
   const returnedSids = expectedSids.filter(s => expandRetryMap[s] && Object.keys(expandRetryMap[s]).length);
+  phase2Diag.retryCoverage.push({ returned: returnedSids.length, expected: expectedSids.length, missing: expectedSids.filter(s => !returnedSids.includes(s)) });
   if (returnedSids.length < expectedSids.length) {
     console.log(`Phase 2 retry expand coverage: ${returnedSids.length}/${expectedSids.length} segments returned (missing: ${expectedSids.filter(s => !returnedSids.includes(s)).join(', ')})`);
   }
@@ -632,6 +645,7 @@ async function runRetryGroup(tasks, systemPrompt, charsMultiplier) {
       reTtsRetryTasks.push({ sid: t.sid, lang: t.lang, newText: finalText, info: t.info });
     }
   }
+  phase2Diag.retryNoTextTotal += retryNoText;
   if (retryNoText > 0) console.log(`Phase 2 retry: ${retryNoText}/${tasks.length} cells got no retry text — kept attempt 1 result`);
 
   return await runReTtsTasks.call(this, reTtsRetryTasks);
@@ -766,5 +780,19 @@ for (const it of allItems) {
 
 console.log('Phase 2 FINAL outcomes:', JSON.stringify(finalOutcomeCounts));
 console.log(`Phase 2 emit: ${emitted.filter(e => e.json.has_binary).length} accepted (binary), ${emitted.filter(e => !e.json.has_binary && e.json.phase2_outcome).length} rejected candidates, ${passthroughCount} passthrough → ${emitted.length} total`);
+
+// Surface diagnostics on the first item so they're visible in the node Output panel
+// (n8n Code console.log only reaches server stdout). phase2_diag is NOT a mapped
+// Update Localizations column, so it never reaches the sheet — UI-only.
+if (emitted.length > 0) {
+  emitted[0].json.phase2_diag = JSON.stringify({
+    finalOutcomes: finalOutcomeCounts,
+    attempt1: outcomeCounts1,
+    attempt2: outcomeCounts2,
+    retryCoverage: phase2Diag.retryCoverage,
+    retryNoTextTotal: phase2Diag.retryNoTextTotal,
+    retryRawSamples: phase2Diag.retryRawSamples,
+  });
+}
 
 return emitted;
