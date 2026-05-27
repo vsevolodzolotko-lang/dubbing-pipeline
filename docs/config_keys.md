@@ -28,7 +28,9 @@ Every row has two columns: `key`, `value`. Missing keys fall back to the default
 | `max_borrow_per_segment_sec` | `2.0` | W3 Expand TTS Jobs (Synthesize v3) | Upper bound on breath-borrow: a single segment cannot extend more than this many seconds into the next gap, even if the natural gap is larger. Prevents micro-segments from eating all available silence. |
 | `silence_lead_ratio` | `0.2` | W3 Check Timing + Pad (Synthesize v3) | Fraction of padding silence placed BEFORE TTS audio (lead), with `1 − ratio` placed AFTER (tail). Only applied when natural EN lead gap = 0; otherwise full natural gap goes to lead and all padding goes to tail. The final lead is `min(padding × ratio, silence_lead_max_sec)`. |
 | `silence_lead_max_sec` | `0.05` | W3 Check Timing + Pad | Hard cap (seconds) on the breath-lead silence placed before TTS when natural EN gap = 0. Prevents word misalignment for short-content-long-tail segments (e.g. "I am here." with 5s of EN silence after). Default 0.05 ≈ half a syllable of breath; set to 0 for strict EN alignment, higher for more breath. |
-| `max_speed` | `1.15` | W3 Check Timing + Pad | Hard ceiling on TTS speed adjustment. Speed retries go 1.10 → 1.15 (capped here). Higher values sound artificial for meditation content. |
+| `max_speed_up_delta` | `0.15` | W3 Check Timing + Pad | Max speed-UP above this voice's configured `speed` (voices tab) for the shorten path. Cap = `voice.speed + delta`; steps `[voice.speed + delta·⅔, voice.speed + delta]`. For a 1.0 voice → ceiling 1.15 (unchanged); for a 0.8 voice → ceiling 0.95 (was jarringly forced to absolute 1.15). Replaces the old absolute `max_speed`. |
+| `max_slow_down_delta` | `0.15` | W3 Phase 2: Batch LLM+TTS | Max slow-DOWN below this voice's configured `speed` for the slowdown-to-fill lever. Floor = `voice.speed − delta`. After expansion, if a segment still leaves silence in its slot, the voice is slowed (toward this floor) to stretch the audio and reduce silence. For a 1.0 voice → floor 0.85; for a 0.8 voice → floor 0.65. |
+| `slowdown_min_gap_sec` | `0.5` | W3 Phase 2: Batch LLM+TTS | Only apply slowdown-to-fill when the remaining slot silence exceeds this. Avoids re-synthesizing for negligible gaps and keeps pacing even across segments. |
 | `short_seg_threshold_sec` | `2.0` | W3 Check Timing + Pad | Below this `en_duration_sec`, the segment is treated as "short" and may borrow into the trailing silence (`gap_after_sec - min_inter_segment_gap_sec`, capped at `max_borrow_per_segment_sec`) instead of being hard-truncated. Set to `0` to fully disable borrow (revert to strict alignment everywhere). |
 
 ## API keys & external services
@@ -75,7 +77,8 @@ Re-run `node scripts/analyze_cps.js <localizations.csv> [--segments=<segments.cs
 
 ## Dead keys to remove from your live sheet
 
-- `min_speed` — never wired up. Speed is always 1.0 baseline with 1.10 / 1.15 retry.
+- `min_speed` — never wired up. Slowdown now uses `max_slow_down_delta` (relative to voice.speed).
+- `max_speed` — superseded 2026-05-27 by `max_speed_up_delta` (relative to voice.speed). The old absolute value was documented as read by Check Timing but the code used hardcoded `1.10/1.15`; both are now gone. Safe to delete from the live sheet (code falls back to defaults regardless).
 
 ## Adding new keys
 

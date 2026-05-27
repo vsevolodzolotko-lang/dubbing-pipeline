@@ -76,6 +76,34 @@ for (const l of ['de','es','fr','pl','pt','it','tr']) {
   LANG_CPS[l] = parseFloat(configMap['cps_estimate_' + l]) || CPS_DEFAULTS[l];
 }
 
+// Slowdown-to-fill: after expansion, if accepted/kept audio still leaves silence in the
+// slot, slow the voice (down to voice.speed − MAX_SLOW_DOWN_DELTA) to stretch the audio
+// and reduce that silence. Secondary lever AFTER text expansion (text first, then stretch).
+// Only fires when remaining silence > SLOWDOWN_MIN_GAP_SEC (avoids uneven pacing on tiny gaps).
+const MAX_SLOW_DOWN_DELTA = parseFloat(configMap.max_slow_down_delta) || 0.15;
+const SLOWDOWN_MIN_GAP_SEC = parseFloat(configMap.slowdown_min_gap_sec) || 0.5;
+
+// Formality enforcement (mirrors the W2 Formality Lint). Phase 2 expand can re-introduce
+// formal address that the W2 lint — which ran before W3 — never sees. Same deterministic
+// detector + targeted fix, applied to accepted text BEFORE re-TTS so the audio is informal.
+const FR_FORMAL_IMPERATIVES = ['Faites','Prenez','Respirez','Inspirez','Expirez','Soufflez','Fermez','Ouvrez','Laissez','Imaginez','Commencez','Asseyez','Allongez','Gardez','Sentez','Restez','Continuez','Permettez','Posez','Ramenez','Observez','Écoutez','Répétez','Détendez','Relâchez','Installez','Portez','Dirigez','Visualisez','Concentrez','Relevez','Baissez','Tournez','Placez','Étirez','Bougez','Notez','Accueillez','Abandonnez','Lâchez'];
+function mkFormalRe(words, ci) { return new RegExp('(?<!\\p{L})(?:' + words.join('|') + ')(?!\\p{L})', ci ? 'iu' : 'u'); }
+const FORMAL_PATTERNS = {
+  fr: [mkFormalRe(['vous','votre','vos', ...FR_FORMAL_IMPERATIVES], true)],
+  de: [mkFormalRe(['Sie','Ihnen','Ihre','Ihrem','Ihren','Ihrer','Ihres'], false)],
+  es: [mkFormalRe(['usted','ustedes'], true)],
+  it: [mkFormalRe(['Lei','Suo','Suoi','Sua','Voi'], false)],
+  pl: [mkFormalRe(['Pan','Pani','Panowie','Panie','Pana','Panu','Panem','Państwo','Państwa'], false)],
+  pt: [mkFormalRe(['você','vocês'], true)],
+  tr: [mkFormalRe(['siz','sizi','sizin','size','sizden','sizinle'], true)],
+};
+function isFormal(lang, text) {
+  const pats = FORMAL_PATTERNS[lang];
+  return !!(text && pats && pats.some(re => re.test(text)));
+}
+const FORMALITY_FIX_SYSTEM = loadPrompt('formality_fix_system', {}, true) ||
+  `You convert formal-address meditation/wellness translations to INFORMAL SINGULAR.\nINPUT: JSON segment_id -> { en, <lang>: text } (only langs needing a fix per segment).\nRewrite each cell using informal singular address for THAT language, changing ONLY address/formality — pronouns, verb conjugation, possessives. Keep meaning, vocabulary, register, length and any "..." or "—" markers IDENTICAL. Each cell stays in its own language.\nTargets: DE du/dich/dein; ES Castilian tú/te/tu; FR tu/te/ton/ta + TU imperatives (Prends/Inspire/Laisse/Fais/Respire, never Prenez/Faites); IT tu/ti/tuo; PL ty-forms; PT European tu/te/teu; TR sen/seni/senin. If a cell is ALREADY informal, return it UNCHANGED.\nOUTPUT ONLY JSON segment_id -> { <lang>: corrected_text }, same keys as input. No preamble/markdown/fences. Start with { end with }.`;
+
 // Passthrough emit: every input row that is NOT an expansion candidate is still
 // emitted unchanged (has_binary=false) so the downstream full-audio + VTT chain —
 // which now runs AFTER this node completes — receives the COMPLETE 329-row set with
@@ -355,11 +383,26 @@ function buildWav(pcm) {
 async function reTtsOne(task) {
   const { sid, lang, info } = task;
   const newText = asStr(task.newText);
-  if (!newText || newText === asStr(info.current)) {
-    return { sid, lang, outcome: 'no_change' };
+  if (!newText) return { sid, lang, outcome: 'no_change' };
+
+  // Target the EXACT file duration Phase 1 produced (= the segment's slot). Keeps the
+  // concatenated full WAV EN-aligned (every segment fills its slot; all langs sum equal).
+  const lead = info.lead_silence;
+  const targetFileDur = info.phase1_final_duration > 0
+    ? info.phase1_final_duration
+    : (lead + info.en_duration);
+  const speechBudget = targetFileDur - lead;
+  const textChanged = newText !== asStr(info.current);
+
+  // Unchanged text: only re-synthesize when slowdown could meaningfully cut silence
+  // (Phase 1 real_duration tells us the gap without a wasted TTS call). Else keep Phase 1.
+  if (!textChanged) {
+    const p1Gap = speechBudget - (info.real_duration || 0);
+    if (p1Gap <= SLOWDOWN_MIN_GAP_SEC) return { sid, lang, outcome: 'no_change' };
   }
-  try {
-    const ttsResp = await this.helpers.httpRequest({
+
+  const ttsAt = async (speed) => {
+    const resp = await this.helpers.httpRequest({
       method: 'POST',
       url: ELEVENLABS_URL(info.voice_id),
       headers: { 'xi-api-key': elevenKey, 'content-type': 'application/json', accept: 'audio/pcm' },
@@ -370,57 +413,66 @@ async function reTtsOne(task) {
           stability: info.voice_stability,
           similarity_boost: info.voice_similarity,
           style: info.voice_style,
-          speed: info.voice_speed,
+          speed,
         },
       },
       encoding: 'arraybuffer',
       returnFullResponse: false,
     });
-    const newPcm = Buffer.from(ttsResp);
-    if (!newPcm || newPcm.length < 4410) {
-      return { sid, lang, outcome: 'tts_empty', pcmLen: newPcm?.length || 0 };
-    }
-    const newRealDur = newPcm.length / (SAMPLE_RATE * BPS);
+    return Buffer.from(resp);
+  };
 
-    // Target the EXACT file duration Phase 1 produced (= the segment's slot:
-    // lead + en_duration, or lead carved within en_duration for breath-lead segments).
-    // This keeps the concatenated full WAV EN-aligned — every segment occupies its
-    // slot exactly, so all languages sum to the same total (the EN timeline) and there
-    // is no drift. Using en_duration here (the old bug) made each accepted file short
-    // by `lead`, shifting everything after it earlier and desyncing languages.
-    const lead = info.lead_silence;
-    const targetFileDur = info.phase1_final_duration > 0
-      ? info.phase1_final_duration
-      : (lead + info.en_duration);
-    const speechBudget = targetFileDur - lead;
+  try {
+    let pcm = await ttsAt(info.voice_speed);
+    if (!pcm || pcm.length < 4410) return { sid, lang, outcome: 'tts_empty', pcmLen: pcm?.length || 0 };
+    let real = pcm.length / (SAMPLE_RATE * BPS);
+    let usedSpeed = info.voice_speed;
 
     // Overshoot: speech doesn't fit the slot's speech region → keep Phase 1 audio.
-    if (newRealDur > speechBudget) {
-      return { sid, lang, outcome: 'overshoot', newRealDur, speechBudget, targetFileDur, newText };
+    if (real > speechBudget) {
+      return { sid, lang, outcome: 'overshoot', newRealDur: real, speechBudget, targetFileDur, newText };
     }
 
-    const tail = targetFileDur - lead - newRealDur;
+    // Slowdown-to-fill (secondary lever, AFTER text expansion): if silence remains beyond
+    // the gap threshold, slow the voice to stretch the audio toward filling the slot,
+    // floored at voice.speed − MAX_SLOW_DOWN_DELTA. audio_len ∝ 1/speed, so the speed that
+    // stretches `real` to `speechBudget` is voice.speed × real/speechBudget; clamp to floor.
+    if (speechBudget - real > SLOWDOWN_MIN_GAP_SEC) {
+      const floor = info.voice_speed - MAX_SLOW_DOWN_DELTA;
+      const wanted = info.voice_speed * (real / speechBudget);
+      const slowSpeed = parseFloat(Math.max(floor, wanted).toFixed(3));
+      if (slowSpeed < info.voice_speed - 1e-6 && slowSpeed > 0) {
+        const slowPcm = await ttsAt(slowSpeed);
+        if (slowPcm && slowPcm.length >= 4410) {
+          const slowReal = slowPcm.length / (SAMPLE_RATE * BPS);
+          if (slowReal <= speechBudget) { pcm = slowPcm; real = slowReal; usedSpeed = slowSpeed; }
+        }
+      }
+    }
+
+    const tail = targetFileDur - lead - real;
     if (tail < 0) {
-      // Defensive — overshoot check above should already prevent this.
-      return { sid, lang, outcome: 'negative_tail', lead, newRealDur, targetFileDur };
+      return { sid, lang, outcome: 'negative_tail', lead, newRealDur: real, targetFileDur };
     }
     const leadBytes = Math.round(lead * SAMPLE_RATE) * BPS;
     const tailBytes = Math.round(tail * SAMPLE_RATE) * BPS;
     const fullPcm = Buffer.concat([
       leadBytes > 0 ? Buffer.alloc(leadBytes, 0) : Buffer.alloc(0),
-      newPcm,
+      pcm,
       tailBytes > 0 ? Buffer.alloc(tailBytes, 0) : Buffer.alloc(0),
     ]);
     const newWav = buildWav(fullPcm);
-    const finalDur = lead + newRealDur + tail;
+    const finalDur = lead + real + tail;
     return {
       sid, lang,
       outcome: 'accepted',
       newText,
-      newRealDur: parseFloat(newRealDur.toFixed(3)),
+      newRealDur: parseFloat(real.toFixed(3)),
       newTailSilence: parseFloat(tail.toFixed(3)),
       newLeadSilence: parseFloat(lead.toFixed(3)),
       newFinalDur: parseFloat(finalDur.toFixed(3)),
+      finalSpeed: usedSpeed,
+      slowed: usedSpeed !== info.voice_speed,
       wavBase64: newWav.toString('base64'),
       info,
     };
@@ -429,7 +481,38 @@ async function reTtsOne(task) {
   }
 }
 
+// Deterministic formality enforcement on accepted text, in place, BEFORE re-TTS.
+// Mutates task.newText for any cell whose text matches a formal-address marker.
+async function fixFormalityInTasks(tasks) {
+  const flagged = {};
+  const hits = [];
+  for (const t of tasks) {
+    if (isFormal(t.lang, t.newText)) {
+      if (!flagged[t.sid]) flagged[t.sid] = { en: candidates[t.sid]?.en || '' };
+      flagged[t.sid][t.lang] = t.newText;
+      hits.push(t);
+    }
+  }
+  if (hits.length === 0) return;
+  const byLang = {};
+  for (const h of hits) byLang[h.lang] = (byLang[h.lang] || 0) + 1;
+  console.log(`Phase 2 formality: ${hits.length} flagged cells, fixing before re-TTS`, JSON.stringify(byLang));
+  const body = {
+    model: 'claude-sonnet-4-5', max_tokens: 8000,
+    system: [{ type: 'text', text: FORMALITY_FIX_SYSTEM, cache_control: { type: 'ephemeral' } }],
+    messages: [{ role: 'user', content: JSON.stringify(flagged, null, 2) }],
+  };
+  const fixed = parseLLMJson(await callAnthropic.call(this, body));
+  let applied = 0;
+  for (const t of hits) {
+    const nf = asStr(fixed[t.sid]?.[t.lang]);
+    if (nf && nf !== t.newText) { t.newText = nf; applied++; }
+  }
+  console.log(`Phase 2 formality: applied ${applied} informal rewrites`);
+}
+
 async function runReTtsTasks(tasks) {
+  await fixFormalityInTasks.call(this, tasks);
   const results = [];
   for (let i = 0; i < tasks.length; i += ELEVENLABS_CHUNK) {
     const slice = tasks.slice(i, i + ELEVENLABS_CHUNK);
@@ -722,7 +805,7 @@ for (const [rk, o] of Object.entries(outcomes)) {
         borrowed_sec:                  0,
         expansion_attempts:            attempts,
         shorten_retries_in_synthesize: 0,
-        final_speed:                   info.voice_speed,
+        final_speed:                   (result.finalSpeed != null ? result.finalSpeed : info.voice_speed),
         needs_attention:               needsAttention,
         audio_drive_file_id:           info.audio_drive_file_id,
         phase2_outcome:                'accepted',

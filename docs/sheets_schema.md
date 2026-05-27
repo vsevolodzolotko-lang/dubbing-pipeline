@@ -92,13 +92,15 @@ See [`config_keys.md`](config_keys.md) for the full reference (defaults, owners,
 
 > **Optional CPS overrides**: `cps_estimate_de`, `cps_estimate_es`, `cps_estimate_fr`, `cps_estimate_it`, `cps_estimate_pl`, `cps_estimate_pt`, `cps_estimate_tr` — per-language characters-per-second estimates. If present, override the `CPS_DEFAULTS` baked into the W2/W3 code nodes. See [config_keys.md](config_keys.md#per-language-cps-overrides) and use `scripts/analyze_cps.js` after a W3 run to derive observed values from real data.
 >
-> **Dead key**: `min_speed` — never wired up, safe to delete.
+> **Dead keys**: `min_speed` (never wired) and `max_speed` (superseded 2026-05-27 by `max_speed_up_delta` / `max_slow_down_delta`, both relative to voice.speed) — safe to delete.
 
 | key | value | Notes |
 |-----|-------|-------|
 | active_langs | `de,es,fr,it,pl,pt,tr` | Comma-separated list processed by Synthesize |
 | max_adaptation_attempts | `3` | W2 adaptation loop upper bound |
-| max_speed | `1.15` | Speed ceiling before flagging needs_attention |
+| max_speed_up_delta | `0.15` | (v4) Max speed-up above voice.speed for W3 shorten path. Replaces absolute `max_speed`. |
+| max_slow_down_delta | `0.15` | (v4) Max slow-down below voice.speed for W3 Phase 2 slowdown-to-fill. |
+| slowdown_min_gap_sec | `0.5` | (v4) Only slow-fill when remaining slot silence exceeds this. |
 | min_inter_segment_gap_sec | `0.4` | Minimum silence between dubbed segments. Used symmetrically for steal-from-prev AND borrow-from-next buffer. |
 | max_borrow_per_segment_sec | `2.0` | (v3) Upper bound on breath-borrow per segment. |
 | expansion_threshold | `0.85` | (v3) Trigger expansion when `real_duration < en_duration × this`. |
@@ -142,6 +144,7 @@ Schema:
 | `w3_expand_batch_system` | `{{tov}}` | W3 Phase 2 Batch LLM+TTS — attempt 1 expansion |
 | `w3_expand_batch_retry_harder` | `{{tov}}` | (Optional, added 2026-05-26) W3 Phase 2 retry pass for `no_change` + `still_short` cells. If missing, Phase 2 runs single-pass. |
 | `w3_expand_batch_retry_shorter` | `{{tov}}` | (Optional, added 2026-05-26) W3 Phase 2 retry pass for `overshoot` cells. If missing, Phase 2 runs single-pass. |
+| `formality_fix_system` | — | (Optional, added 2026-05-27) W2 Formality Lint — rewrites formal-address cells to informal singular. Built-in default in the node; add this row only to override. |
 
 **Placeholder convention**: `{{name}}` — double curly braces, no spaces. If you accidentally write `{name}` or `{{ name }}`, substitution silently fails and the literal string appears in the rendered prompt. Always check via the `description` column which placeholders a row accepts.
 
