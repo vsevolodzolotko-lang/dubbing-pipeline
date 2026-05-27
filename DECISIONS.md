@@ -4,6 +4,20 @@
 
 ---
 
+### 2026-05-27 — PHASE2_SLOT_DURATION_DRIFT
+
+Context: User noticed full WAV lengths differed between languages and felt segments were drifting from their EN start positions. Root cause (present in Phase 2 since inception, only now caught by close alignment inspection): `reTtsOne` rebuilt accepted files to duration = `en_duration` instead of the segment's full slot = `lead_silence + en_duration`. The tail formula `tail = en_duration - lead - newRealDur` subtracts lead, so `finalDur = lead + real + tail = en_duration` — every accepted Phase 2 file was short by exactly its `lead_silence`. Phase 1 files correctly occupy the full slot (`lead + en_duration`), so a mix produced cumulative drift: each accepted segment shifted everything after it earlier by `lead`. Because languages have different counts of accepted segments with different leads, total shortfall differed per language (sleep2_end: de −0.56s, es −0.72s, it −0.24s, pl −0.32s) → unequal full lengths.
+
+Decision: Target the exact Phase 1 file duration. `reTtsOne` now uses `targetFileDur = info.phase1_final_duration` (already captured in the candidate, falls back to `lead + en_duration`), with `tail = targetFileDur - lead - newRealDur` and overshoot guard `newRealDur > (targetFileDur - lead)`. The rebuilt file equals the slot the Phase 1 file occupied, so concatenation stays EN-aligned and all languages sum to the identical EN-total length.
+
+Why phase1_final_duration is safe vs recomputing: it mirrors Phase 1 regardless of natural-lead vs breath-lead (naturalLead=0) segments, where the lead is carved *within* en_duration rather than added before it. Recomputing `lead + en_duration` would over-pad breath-lead segments. Phase 2 candidates never have borrow (`borrowed_sec>0` requires `real>en_dur`, but candidate filter requires `real<en_dur×0.85` — mutually exclusive), so phase1_final_duration always equals the clean slot with no borrow extension, and the borrow-trim logic in Build Full Audio is unaffected.
+
+Verification: after re-run, every `{lesson}_full_{lang}.wav` has the SAME duration across all 7 languages (= EN timeline, ~last_en_end − first_slot_start), ±sample-rounding. Each segment starts at its EN slot position. `final_duration_sec` for accepted Phase 2 rows now equals the slot (lead + en_duration), matching Phase 1 passthrough rows for the same segment.
+
+Rollback: revert this commit (reintroduces the per-segment `lead` shortfall and cross-language drift).
+
+---
+
 ### 2026-05-27 — PHASE2_MERGE_BRANCHES
 
 Context: The PHASE2_ORDERING_BARRIER fix (same day, earlier) gated the full-audio/VTT chain behind `Phase 2: Update Localizations`. But Update Localizations has TWO incoming connections (from `Phase 2: Drive Update` on the accepted/true branch, and from `Phase 2: Has Binary?` false branch). n8n executes a node once per incoming connection that delivers data, so Update Localizations fired TWICE — once with accepted items (~half), once with rejected+passthrough items (~half). When it was a terminal node this was a harmless idempotent double sheet-write. After the ordering-barrier fix hung Download→Build Full off it, each fire triggered a SEPARATE concat pass over a PARTIAL segment set. Result on sleep2_end: two full WAVs per language in the full folder (e.g. de 157 KB + 897 KB), each containing a different subset of segments in scrambled order, and the full audio not matching the per-segment output files.

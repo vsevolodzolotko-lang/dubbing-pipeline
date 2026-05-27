@@ -371,14 +371,27 @@ async function reTtsOne(task) {
     }
     const newRealDur = newPcm.length / (SAMPLE_RATE * BPS);
 
-    if (newRealDur > info.en_duration) {
-      return { sid, lang, outcome: 'overshoot', newRealDur, enDuration: info.en_duration, newText };
+    // Target the EXACT file duration Phase 1 produced (= the segment's slot:
+    // lead + en_duration, or lead carved within en_duration for breath-lead segments).
+    // This keeps the concatenated full WAV EN-aligned — every segment occupies its
+    // slot exactly, so all languages sum to the same total (the EN timeline) and there
+    // is no drift. Using en_duration here (the old bug) made each accepted file short
+    // by `lead`, shifting everything after it earlier and desyncing languages.
+    const lead = info.lead_silence;
+    const targetFileDur = info.phase1_final_duration > 0
+      ? info.phase1_final_duration
+      : (lead + info.en_duration);
+    const speechBudget = targetFileDur - lead;
+
+    // Overshoot: speech doesn't fit the slot's speech region → keep Phase 1 audio.
+    if (newRealDur > speechBudget) {
+      return { sid, lang, outcome: 'overshoot', newRealDur, speechBudget, targetFileDur, newText };
     }
 
-    const lead = info.lead_silence;
-    const tail = info.en_duration - lead - newRealDur;
+    const tail = targetFileDur - lead - newRealDur;
     if (tail < 0) {
-      return { sid, lang, outcome: 'negative_tail', lead, newRealDur, enDur: info.en_duration };
+      // Defensive — overshoot check above should already prevent this.
+      return { sid, lang, outcome: 'negative_tail', lead, newRealDur, targetFileDur };
     }
     const leadBytes = Math.round(lead * SAMPLE_RATE) * BPS;
     const tailBytes = Math.round(tail * SAMPLE_RATE) * BPS;
