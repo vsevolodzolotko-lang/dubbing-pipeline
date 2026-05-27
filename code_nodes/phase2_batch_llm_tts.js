@@ -599,31 +599,42 @@ async function runRetryGroup(tasks, systemPrompt, charsMultiplier) {
 
   const expandRetryMap = await runAllBatchesParallel.call(this, formattedBatches, runOneRetryExpand);
 
+  // Diagnostic: how many segment_ids did the retry expand actually return? If the
+  // retry LLM returns malformed JSON or omits sids, expandRetryMap is missing keys
+  // and every retry lang under that sid falls through. Whole-segment drops are the
+  // signature of this.
+  const expectedSids = [...new Set(tasks.map(t => t.sid))];
+  const returnedSids = expectedSids.filter(s => expandRetryMap[s] && Object.keys(expandRetryMap[s]).length);
+  if (returnedSids.length < expectedSids.length) {
+    console.log(`Phase 2 retry expand coverage: ${returnedSids.length}/${expectedSids.length} segments returned (missing: ${expectedSids.filter(s => !returnedSids.includes(s)).join(', ')})`);
+  }
+
   // Skip Verify, run Editor only
   const editorRetryMap = await runAllBatchesParallel.call(this,
     formattedBatches,
     function (b) { return runOneEditorBatch.call(this, b, expandRetryMap); }
   );
 
-  // Final text per task: editor → expand → fallback to prevText.
-  // Cells where retry LLM dropped output get a synthetic 'llm_dropped' result
-  // so attempt 2 outcome is explicit (rather than silently leaving attempt1's
-  // outcome as the final, which obscures that retry was attempted at all).
+  // Final text per task: editor → expand. If retry produced NO usable text for a cell,
+  // we do NOT emit a result for it — leaving outcomes[rk].attempt2 unset so pickFinal
+  // falls back to attempt 1. This is critical: a still_short cell had attempt1='accepted'
+  // (a real expansion), and a retry-drop must NOT clobber it down to Phase 1 audio.
+  // Dropped retries are logged, not surfaced as a worse outcome.
   const reTtsRetryTasks = [];
-  const droppedRetryResults = [];
+  let retryNoText = 0;
   for (const t of tasks) {
     const ed = asStr(editorRetryMap[t.sid]?.[t.lang]);
     const ex = asStr(expandRetryMap[t.sid]?.[t.lang]);
     const finalText = ed || ex || null;
     if (!finalText) {
-      droppedRetryResults.push({ sid: t.sid, lang: t.lang, outcome: 'llm_dropped' });
+      retryNoText++;  // skip → attempt 1 stands (no a2 recorded for this cell)
     } else {
       reTtsRetryTasks.push({ sid: t.sid, lang: t.lang, newText: finalText, info: t.info });
     }
   }
+  if (retryNoText > 0) console.log(`Phase 2 retry: ${retryNoText}/${tasks.length} cells got no retry text — kept attempt 1 result`);
 
-  const reTtsRetryRes = await runReTtsTasks.call(this, reTtsRetryTasks);
-  return [...reTtsRetryRes, ...droppedRetryResults];
+  return await runReTtsTasks.call(this, reTtsRetryTasks);
 }
 
 const [results2Harder, results2Shorter] = await Promise.all([
