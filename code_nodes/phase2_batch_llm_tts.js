@@ -76,6 +76,27 @@ for (const l of ['de','es','fr','pl','pt','it','tr']) {
   LANG_CPS[l] = parseFloat(configMap['cps_estimate_' + l]) || CPS_DEFAULTS[l];
 }
 
+// Formality enforcement (mirrors the W2 Formality Lint). Phase 2 expand can re-introduce
+// formal address that the W2 lint — which ran before W3 — never sees. Same deterministic
+// detector + targeted fix, applied to accepted text BEFORE re-TTS so the audio is informal.
+const FR_FORMAL_IMPERATIVES = ['Faites','Prenez','Respirez','Inspirez','Expirez','Soufflez','Fermez','Ouvrez','Laissez','Imaginez','Commencez','Asseyez','Allongez','Gardez','Sentez','Restez','Continuez','Permettez','Posez','Ramenez','Observez','Écoutez','Répétez','Détendez','Relâchez','Installez','Portez','Dirigez','Visualisez','Concentrez','Relevez','Baissez','Tournez','Placez','Étirez','Bougez','Notez','Accueillez','Abandonnez','Lâchez'];
+function mkFormalRe(words, ci) { return new RegExp('(?<!\\p{L})(?:' + words.join('|') + ')(?!\\p{L})', ci ? 'iu' : 'u'); }
+const FORMAL_PATTERNS = {
+  fr: [mkFormalRe(['vous','votre','vos', ...FR_FORMAL_IMPERATIVES], true)],
+  de: [mkFormalRe(['Sie','Ihnen','Ihre','Ihrem','Ihren','Ihrer','Ihres'], false)],
+  es: [mkFormalRe(['usted','ustedes'], true)],
+  it: [mkFormalRe(['Lei','Suo','Suoi','Sua','Voi'], false)],
+  pl: [mkFormalRe(['Pan','Pani','Panowie','Panie','Pana','Panu','Panem','Państwo','Państwa'], false)],
+  pt: [mkFormalRe(['você','vocês'], true)],
+  tr: [mkFormalRe(['siz','sizi','sizin','size','sizden','sizinle'], true)],
+};
+function isFormal(lang, text) {
+  const pats = FORMAL_PATTERNS[lang];
+  return !!(text && pats && pats.some(re => re.test(text)));
+}
+const FORMALITY_FIX_SYSTEM = loadPrompt('formality_fix_system', {}, true) ||
+  `You convert formal-address meditation/wellness translations to INFORMAL SINGULAR.\nINPUT: JSON segment_id -> { en, <lang>: text } (only langs needing a fix per segment).\nRewrite each cell using informal singular address for THAT language, changing ONLY address/formality — pronouns, verb conjugation, possessives. Keep meaning, vocabulary, register, length and any "..." or "—" markers IDENTICAL. Each cell stays in its own language.\nTargets: DE du/dich/dein; ES Castilian tú/te/tu; FR tu/te/ton/ta + TU imperatives (Prends/Inspire/Laisse/Fais/Respire, never Prenez/Faites); IT tu/ti/tuo; PL ty-forms; PT European tu/te/teu; TR sen/seni/senin. If a cell is ALREADY informal, return it UNCHANGED.\nOUTPUT ONLY JSON segment_id -> { <lang>: corrected_text }, same keys as input. No preamble/markdown/fences. Start with { end with }.`;
+
 // Passthrough emit: every input row that is NOT an expansion candidate is still
 // emitted unchanged (has_binary=false) so the downstream full-audio + VTT chain —
 // which now runs AFTER this node completes — receives the COMPLETE 329-row set with
@@ -429,7 +450,38 @@ async function reTtsOne(task) {
   }
 }
 
+// Deterministic formality enforcement on accepted text, in place, BEFORE re-TTS.
+// Mutates task.newText for any cell whose text matches a formal-address marker.
+async function fixFormalityInTasks(tasks) {
+  const flagged = {};
+  const hits = [];
+  for (const t of tasks) {
+    if (isFormal(t.lang, t.newText)) {
+      if (!flagged[t.sid]) flagged[t.sid] = { en: candidates[t.sid]?.en || '' };
+      flagged[t.sid][t.lang] = t.newText;
+      hits.push(t);
+    }
+  }
+  if (hits.length === 0) return;
+  const byLang = {};
+  for (const h of hits) byLang[h.lang] = (byLang[h.lang] || 0) + 1;
+  console.log(`Phase 2 formality: ${hits.length} flagged cells, fixing before re-TTS`, JSON.stringify(byLang));
+  const body = {
+    model: 'claude-sonnet-4-5', max_tokens: 8000,
+    system: [{ type: 'text', text: FORMALITY_FIX_SYSTEM, cache_control: { type: 'ephemeral' } }],
+    messages: [{ role: 'user', content: JSON.stringify(flagged, null, 2) }],
+  };
+  const fixed = parseLLMJson(await callAnthropic.call(this, body));
+  let applied = 0;
+  for (const t of hits) {
+    const nf = asStr(fixed[t.sid]?.[t.lang]);
+    if (nf && nf !== t.newText) { t.newText = nf; applied++; }
+  }
+  console.log(`Phase 2 formality: applied ${applied} informal rewrites`);
+}
+
 async function runReTtsTasks(tasks) {
+  await fixFormalityInTasks.call(this, tasks);
   const results = [];
   for (let i = 0; i < tasks.length; i += ELEVENLABS_CHUNK) {
     const slice = tasks.slice(i, i + ELEVENLABS_CHUNK);
