@@ -4,6 +4,31 @@
 
 ---
 
+### 2026-05-27 — W2_FORMALITY_LINT
+
+Context: sleep2_end produced `seg_003_fr = "Faites confiance à la nuit"` — a formal (vous) imperative, while every other FR segment used informal tu (Tu n'as pas besoin, Commence, tu peux rester). Non-deterministic: the same segment was correct ("Fais confiance") in prior runs. The existing defenses are all LLM-prompt-based (translate_system FORMALITY section, qa_verify_system R6.c CLASS 2 + dedicated FR scan) and therefore probabilistic. R6.c itself documents the failure: when only ONE segment in a batch violates, the LLM scan reads casually and misses it.
+
+Decision: Add a deterministic `Formality Lint` Code node to W2, placed AFTER all LLM passes (Adapt Translations) and BEFORE Update Sheet — so it catches anything that slipped through and fixes the source `{lang}_text` that W3 later reads. The node:
+1. Scans every {lang}_text for formal-address markers across all 7 langs (100% recall on known markers): FR vous/votre/vos + whitelisted formal imperatives (Faites/Prenez/Respirez…); DE Sie/Ihnen/Ihre; ES usted(es); IT Lei/Suo/Sua/Voi; PL Pan/Pani/Państwo…; PT você(s); TR siz…. Detection uses Unicode-aware boundaries `(?<!\p{L})…(?!\p{L})` with the /u flag (ASCII \b breaks around accented letters like você, Państwo, Écoutez). FR/ES/PT/TR markers are case-insensitive (wrong in any case); DE/IT/PL are case-sensitive (lowercase sie/lei/pan are legitimate she/she/noun).
+2. For flagged cells only, sends a single targeted Anthropic call (formality_fix_system prompt, with built-in default — optional Sheet override) that rewrites to informal singular changing ONLY address/formality, preserving meaning/length/pause markers. Returns text unchanged if already informal → false-positive detections are harmless, so detection can be generous.
+3. Replaces the flagged {lang}_text in place; passes all items through to Update Sheet (autoMap by segment_id).
+
+Decisions taken (via grill): action = detect + targeted LLM re-fix (not flag-only, not deterministic regex auto-fix — regex can't reliably do votre→ton/ta gender agreement or vous-object→te); scope = all 7 langs (markers already enumerated in qa_verify_r6c; same failure can hit any lang).
+
+Rationale: deterministic detection closes the recall gap of probabilistic LLM scans; the LLM does the linguistically-correct conversion (the failure was the model not NOTICING in a batch, not being unable to convert when told explicitly). The no-op-when-clean property makes detection safe to over-trigger.
+
+Trade-offs:
+- +1 Anthropic call per run only when ≥1 cell is flagged (rare); batched across all flagged cells.
+- The lint fixes the segments-tab source, so W3 (and any re-run) inherit the correction.
+- Detection whitelists (esp. FR imperatives) may miss an unlisted formal verb; add to FR_FORMAL_IMPERATIVES as found. vous/votre/vos catch most FR cases regardless.
+- `formality_fix_system` prompt is OPTIONAL (built-in default in the node); add the Sheet row only to tweak without re-import.
+
+Verification: re-run a lesson; any FR/DE/etc formal slip is auto-corrected in segments tab before W3. Console logs flagged count per lang and applied-fix count. A cell that still matches a marker after fix is logged (stillFormal) for follow-up.
+
+Rollback: remove the Formality Lint node (Adapt Translations → Update Sheet direct). Deterministic detection + node are self-contained.
+
+---
+
 ### 2026-05-27 — PHASE2_SLOT_DURATION_DRIFT
 
 Context: User noticed full WAV lengths differed between languages and felt segments were drifting from their EN start positions. Root cause (present in Phase 2 since inception, only now caught by close alignment inspection): `reTtsOne` rebuilt accepted files to duration = `en_duration` instead of the segment's full slot = `lead_silence + en_duration`. The tail formula `tail = en_duration - lead - newRealDur` subtracts lead, so `finalDur = lead + real + tail = en_duration` — every accepted Phase 2 file was short by exactly its `lead_silence`. Phase 1 files correctly occupy the full slot (`lead + en_duration`), so a mix produced cumulative drift: each accepted segment shifted everything after it earlier by `lead`. Because languages have different counts of accepted segments with different leads, total shortfall differed per language (sleep2_end: de −0.56s, es −0.72s, it −0.24s, pl −0.32s) → unequal full lengths.

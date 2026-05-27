@@ -142,6 +142,7 @@ Schema:
 | `w3_expand_batch_system` | `{{tov}}` | W3 Phase 2 Batch LLM+TTS — attempt 1 expansion |
 | `w3_expand_batch_retry_harder` | `{{tov}}` | (Optional, added 2026-05-26) W3 Phase 2 retry pass for `no_change` + `still_short` cells. If missing, Phase 2 runs single-pass. |
 | `w3_expand_batch_retry_shorter` | `{{tov}}` | (Optional, added 2026-05-26) W3 Phase 2 retry pass for `overshoot` cells. If missing, Phase 2 runs single-pass. |
+| `formality_fix_system` | — | (Optional, added 2026-05-27) W2 Formality Lint — rewrites formal-address cells to informal singular. Built-in default in the node; add this row only to override. |
 
 **Placeholder convention**: `{{name}}` — double curly braces, no spaces. If you accidentally write `{name}` or `{{ name }}`, substitution silently fails and the literal string appears in the rendered prompt. Always check via the `description` column which placeholders a row accepts.
 
