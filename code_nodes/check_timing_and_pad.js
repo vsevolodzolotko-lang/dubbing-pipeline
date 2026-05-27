@@ -72,6 +72,17 @@ const SHORT_SEG_THRESHOLD = parseFloat(configMap.short_seg_threshold_sec) || 2.0
 const isShortSeg          = enDur > 0 && enDur < SHORT_SEG_THRESHOLD && slot > enDur;
 const maxAllowed          = isShortSeg ? slot : enDur;
 
+// Dynamic speed-up ceiling for the shorten path, RELATIVE to this voice's configured
+// speed (replaces the old absolute 1.15 / dead max_speed config key). A 0.8-speed voice
+// previously jumped to an absolute 1.15 (+0.35, jarring); now it caps at 0.8+delta=0.95.
+// Default delta 0.15 keeps the 1.0 voice's ceiling at 1.15 (no change for default).
+const baseSpeed         = parseFloat(job.speed) || 1.0;
+const MAX_SPEED_UP_DELTA = parseFloat(configMap.max_speed_up_delta) || 0.15;
+const SPEED_UP_STEPS    = [
+  parseFloat((baseSpeed + MAX_SPEED_UP_DELTA * (2 / 3)).toFixed(3)),
+  parseFloat((baseSpeed + MAX_SPEED_UP_DELTA).toFixed(3)),
+];
+
 const inputItem = $input.first();
 const binaryData = inputItem.binary?.data;
 
@@ -309,7 +320,7 @@ for (let i = 0; i < 3 && pcmDuration(pcm) > maxAllowed; i++) {
   shortenRetries = i + 1;
 }
 
-for (const speed of [1.10, 1.15]) {
+for (const speed of SPEED_UP_STEPS) {
   if (pcmDuration(pcm) <= maxAllowed) break;
   const newPcm = await tts.call(this, text, speed);
   if (!newPcm) {

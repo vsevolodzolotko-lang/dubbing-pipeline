@@ -4,6 +4,33 @@
 
 ---
 
+### 2026-05-27 — DYNAMIC_SPEED_AND_SLOWDOWN_FILL
+
+Context: Goal — leave less silence in segments where the EN track is longer than the localization, and make the speed limits sane per-voice. Two problems: (1) the W3 shorten path used absolute speed steps `[1.10, 1.15]`, so a 0.8-speed voice (TR) was forced to an absolute 1.15 — a +0.35 jump that sounds artificial; (2) there was no slow-down lever at all — under-budget segments just got tail silence (Phase 2 only added text).
+
+Decision (settings confirmed with user: Δ=0.15, slowdown only AFTER an expansion attempt, separate config keys for up/down):
+
+1. **Dynamic speed-up cap (Phase 1, Check Timing + Pad).** Shorten retries now step relative to the voice's configured speed: `[voice.speed + Δ·⅔, voice.speed + Δ]`, cap `voice.speed + max_speed_up_delta` (default 0.15). A 1.0 voice keeps the 1.15 ceiling (no change); a 0.8 voice caps at 0.95.
+
+2. **Slowdown-to-fill (Phase 2, reTtsOne).** After the expansion text is chosen and synthesized at voice.speed, if the slot still has silence > `slowdown_min_gap_sec` (default 0.5), the voice is slowed toward `voice.speed − max_slow_down_delta` (default 0.15) to stretch the audio and reduce silence. Stretch speed = `voice.speed × real/speechBudget`, clamped to the floor; the slowed take is used only if it still fits the slot. Unchanged-text (no_change) cells are slowed too when their Phase 1 gap exceeds the threshold (re-synthesized at the slow speed) — but skipped without a wasted TTS call when the gap is small. Overshoot cells are never slowed (no silence). `final_speed` records the actual speed used.
+
+3. **Separate config keys** `max_speed_up_delta` / `max_slow_down_delta` (independent up/down limits) + `slowdown_min_gap_sec`. The old `max_speed` (absolute, actually unused — code hardcoded 1.10/1.15) and dead `min_speed` are removed from docs; safe to delete from the live sheet (code has fallback defaults).
+
+Order of levers: text expansion runs first (attempt 1, and retry for still-short), slowdown fills residual silence within each re-TTS. Slowdown can preempt a harder text retry when it already fills the gap — intentional: slowdown is safer (no hallucination/false-friend risk) and meditation-appropriate (calmer pace), so filling small gaps by stretching rather than inventing more text is preferred.
+
+Slot-alignment invariant preserved: every accepted file still equals `targetFileDur` (the Phase 1 slot); slowdown only shifts the split between speech and tail silence, never the total, so the cross-language EN-aligned length holds.
+
+Trade-offs:
+- More cells become has_binary=true (slowed no_change cells get new audio) → more Drive PATCHes; intended (that's how silence shrinks).
+- Mixed speeds across segments (some 1.0, some 0.85) — gated by `slowdown_min_gap_sec` so only meaningful gaps trigger it, keeping pacing reasonably even. Raise the gap or lower `max_slow_down_delta` if pacing feels uneven.
+- +1 TTS call per slowed cell (no LLM).
+
+Verification: re-run a lesson with under-filled segments. Expect reduced tail_silence on Phase 2 cells, `final_speed` < voice.speed on slowed ones, full-WAV length unchanged (slot invariant), and slow voices (TR 0.8) no longer hitting an absolute 1.15 on shorten.
+
+Rollback: revert this commit. Re-add `max_speed` only if reverting Phase 1 too.
+
+---
+
 ### 2026-05-27 — W2_FORMALITY_LINT
 
 Context: sleep2_end produced `seg_003_fr = "Faites confiance à la nuit"` — a formal (vous) imperative, while every other FR segment used informal tu (Tu n'as pas besoin, Commence, tu peux rester). Non-deterministic: the same segment was correct ("Fais confiance") in prior runs. The existing defenses are all LLM-prompt-based (translate_system FORMALITY section, qa_verify_system R6.c CLASS 2 + dedicated FR scan) and therefore probabilistic. R6.c itself documents the failure: when only ONE segment in a batch violates, the LLM scan reads casually and misses it.
