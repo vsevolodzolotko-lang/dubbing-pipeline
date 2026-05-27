@@ -4,6 +4,34 @@
 
 ---
 
+### 2026-05-27 — PHASE2_ORDERING_BARRIER
+
+Context: User reported that per-segment WAVs in the output Drive folder did not match the concatenated full-lesson WAV in the full folder — both in total duration AND in content (some segments in the full WAV were a different generation than the per-segment files). Root cause: a race condition in the W3 execution graph. `Read Localizations Fresh` fanned out to THREE parallel branches off a single output: [Phase 2: Batch LLM+TTS, Download Segment WAV, Build VTT Per Lang]. The original 2026-05-25 design assumed n8n would run the Phase 2 branch to completion first because it was listed first — but n8n does not guarantee branch execution order for a single fan-out. Phase 2 takes ~2 min (batch LLM + re-TTS + Drive PATCH); Download Segment WAV is fast. So Download Segment WAV downloaded per-segment files (Phase 1 audio) and Build Full Audio concatenated them BEFORE / concurrently with Phase 2: Drive Update overwriting those same files with expanded audio. Net: full WAV = Phase 1 audio, per-segment Drive files = Phase 2 audio. Mismatch by design flaw.
+
+Decision: Make the full-audio + VTT chain explicitly depend on Phase 2 completion instead of running in parallel. Rewired:
+- `Read Localizations Fresh` → now feeds ONLY `Phase 2: Batch LLM+TTS` (dropped the parallel Download/VTT edges).
+- `Phase 2: Update Localizations` → now feeds `Download Segment WAV` AND `Build VTT Per Lang`. Since Update Localizations is the terminal node of the Phase 2 chain (after Drive Update completes its PATCHes), the downstream concat chain starts only after all per-segment files are refreshed.
+
+To make this work without a 0-candidate dead-end, `Phase 2: Batch LLM+TTS` now emits ALL input rows, not just candidates:
+- Candidates: existing accept (binary) / reject (phase2_outcome) logic.
+- Non-candidates (already-fitting rows, needs_attention rows, structurally-impossible skips): emitted as passthrough via `makePassthrough()` — full row, has_binary=false, phase2_outcome=''. They route through Has Binary?[false] → Update Localizations (idempotent rewrite of values they already hold).
+- 0-candidate lesson: early-return now emits all rows as passthrough so the chain still runs and the full WAV is still built.
+
+This guarantees Update Localizations always fires with the complete 329-row set, which deterministically triggers Download → Build Full Audio with the full segment list and refreshed Drive content.
+
+Bonus: Build VTT Per Lang now reads post-Phase 2 text (it takes rows from Update Localizations output, which has the accepted expanded text), so subtitles align with the expanded audio. Previously VTT used pre-Phase 2 text from Read Localizations Fresh and could mismatch.
+
+Trade-offs:
+- Update Localizations now writes all ~329 rows every run (was: only candidates). appendOrUpdate batches into few API calls; ~5-15s extra. Idempotent — non-candidate rows rewrite identical values.
+- Phase 2: Batch LLM+TTS emit count goes from ~candidates to always 329. Memory: passthrough items carry no binary, so heap impact is small (the ~30 accepted items with WAV binary dominate memory, unchanged).
+- W3 wall-clock: the concat chain now runs strictly AFTER Phase 2 instead of overlapping it, so total time is Phase1 + Phase2 + concat (sequential) rather than Phase1 + max(Phase2, concat). Adds the concat duration (~1-2 min) to the critical path. Correctness over speed — the overlap was producing wrong output.
+
+Verification: re-run any lesson through W_Master. Per-segment files in output folder must byte-match the corresponding portions of the full WAV. Check a known Phase 2 accepted segment (e.g. one with phase2_outcome=accepted, expansion_attempts=2): its standalone WAV duration and content should equal what's heard at its slot in the full lesson WAV. Full WAV length ≈ sum(final_duration_sec) − sum(borrowed_sec), all from post-Phase 2 values.
+
+Rollback: revert this commit (restores the parallel fan-out and candidate-only emit). Note the original had the race condition — rollback reintroduces it.
+
+---
+
 ### 2026-05-26 — PHASE2_TUNING_POSTRETRY
 
 Context: First full W_Master run with Phase 2 retry pass + diagnostics (commit 48e8671) on sleep1_full revealed three issues in the CSV output:

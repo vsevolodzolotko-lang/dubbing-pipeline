@@ -76,6 +76,44 @@ for (const l of ['de','es','fr','pl','pt','it','tr']) {
   LANG_CPS[l] = parseFloat(configMap['cps_estimate_' + l]) || CPS_DEFAULTS[l];
 }
 
+// Passthrough emit: every input row that is NOT an expansion candidate is still
+// emitted unchanged (has_binary=false) so the downstream full-audio + VTT chain —
+// which now runs AFTER this node completes — receives the COMPLETE 329-row set with
+// refreshed audio_drive_file_id. Without this, Download Segment WAV would only see
+// candidate rows and Build Full Audio would drop ~300 segments. Passthrough rows
+// route through Has Binary?[false] → Update Localizations (idempotent rewrite of
+// values they already hold; phase2_outcome stays empty = not_candidate).
+function makePassthrough(j) {
+  const enDur = parseFloat(j.en_duration_sec) || 0;
+  return {
+    json: {
+      row_key:                       j.row_key,
+      segment_id:                    j.segment_id,
+      lang:                          j.lang,
+      lesson_id:                     j.lesson_id || (j.segment_id || '').split('_seg_')[0],
+      text_translated:               j.text_translated,
+      en_start_sec:                  parseFloat(j.en_start_sec) || 0,
+      en_duration_sec:               enDur,
+      real_duration_sec:             parseFloat(j.real_duration_sec) || 0,
+      lead_silence_sec:              parseFloat(j.lead_silence_sec) || 0,
+      slot_start_sec:                parseFloat(j.slot_start_sec) || 0,
+      slot_end_sec:                  parseFloat(j.slot_end_sec) || 0,
+      tts_budget_sec:                parseFloat(j.tts_budget_sec) || enDur,
+      tail_silence_sec:              parseFloat(j.tail_silence_sec) || 0,
+      final_duration_sec:            parseFloat(j.final_duration_sec) || enDur,
+      borrowed_sec:                  parseFloat(j.borrowed_sec) || 0,
+      expansion_attempts:            parseFloat(j.expansion_attempts) || 0,
+      shorten_retries_in_synthesize: parseFloat(j.shorten_retries_in_synthesize) || 0,
+      final_speed:                   parseFloat(j.final_speed) || 1.0,
+      needs_attention:               (j.needs_attention === true || j.needs_attention === 'TRUE' || j.needs_attention === 'true'),
+      audio_drive_file_id:           j.audio_drive_file_id,
+      phase2_outcome:                '',
+      file_name:                     `${j.segment_id}_${j.lang}.wav`,
+      has_binary:                    false,
+    },
+  };
+}
+
 // --- collect candidates ---
 const allItems = $input.all();
 const candidates = {};  // { segment_id: { en, langs: { [lang]: { ... } } } }
@@ -141,8 +179,8 @@ let totalCells = 0;
 for (const data of Object.values(candidates)) totalCells += Object.keys(data.langs).length;
 
 if (totalSegments === 0) {
-  console.log('Phase 2: no expansion candidates — branch terminates with 0 items');
-  return [];
+  console.log('Phase 2: no expansion candidates — emitting all rows as passthrough so the full-audio/VTT chain still runs');
+  return allItems.map(it => makePassthrough(it.json));
 }
 console.log(`Phase 2: ${totalSegments} segments / ${totalCells} cells to expand`);
 
@@ -675,7 +713,18 @@ for (const [rk, o] of Object.entries(outcomes)) {
   }
 }
 
+// Emit passthrough for every input row that was NOT a candidate (non-candidates,
+// needs_attention rows, structurally-impossible skips). Ensures downstream chain
+// receives all 329 rows, not just the candidates.
+const candidateRowKeys = new Set(Object.keys(outcomes));
+let passthroughCount = 0;
+for (const it of allItems) {
+  if (candidateRowKeys.has(it.json.row_key)) continue;
+  emitted.push(makePassthrough(it.json));
+  passthroughCount++;
+}
+
 console.log('Phase 2 FINAL outcomes:', JSON.stringify(finalOutcomeCounts));
-console.log(`Phase 2 emit: ${emitted.filter(e => e.json.has_binary).length} accepted (with binary), ${emitted.filter(e => !e.json.has_binary).length} skipped (no binary)`);
+console.log(`Phase 2 emit: ${emitted.filter(e => e.json.has_binary).length} accepted (binary), ${emitted.filter(e => !e.json.has_binary && e.json.phase2_outcome).length} rejected candidates, ${passthroughCount} passthrough → ${emitted.length} total`);
 
 return emitted;
