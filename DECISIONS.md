@@ -4,6 +4,29 @@
 
 ---
 
+### 2026-05-27 — PHASE2_MERGE_BRANCHES
+
+Context: The PHASE2_ORDERING_BARRIER fix (same day, earlier) gated the full-audio/VTT chain behind `Phase 2: Update Localizations`. But Update Localizations has TWO incoming connections (from `Phase 2: Drive Update` on the accepted/true branch, and from `Phase 2: Has Binary?` false branch). n8n executes a node once per incoming connection that delivers data, so Update Localizations fired TWICE — once with accepted items (~half), once with rejected+passthrough items (~half). When it was a terminal node this was a harmless idempotent double sheet-write. After the ordering-barrier fix hung Download→Build Full off it, each fire triggered a SEPARATE concat pass over a PARTIAL segment set. Result on sleep2_end: two full WAVs per language in the full folder (e.g. de 157 KB + 897 KB), each containing a different subset of segments in scrambled order, and the full audio not matching the per-segment output files.
+
+Decision: Insert a `Phase 2: Merge Branches` node (n8n-nodes-base.merge, typeVersion 3, mode=append, 2 inputs) to recombine the IF branches into a single stream before Update Localizations:
+- Has Binary? [true] → Drive Update → Merge[input 0]
+- Has Binary? [false] → Merge[input 1]
+- Merge → Update Localizations → Download Segment WAV + Build VTT Per Lang
+
+Update Localizations now has exactly ONE incoming connection (from Merge), so it fires once with all ~329 rows. Download → Build Full Audio then runs once over the complete, sorted segment set → one full WAV per language, concatenated from the actual current Drive files (Phase 2 audio for accepted cells, Phase 1 for the rest — matching the output folder).
+
+Item pairing (`$('Phase 2: Batch LLM+TTS').item.json.X` in Update Localizations column mappings) survives the Merge append — n8n preserves pairedItem linkage, so each row still resolves back to its Batch LLM+TTS source even though Drive Update output is a Drive API response shape.
+
+Trade-offs / known edge:
+- Merge "append" waits for both inputs. In the normal case both have data (there are always passthrough non-candidates on the false branch, and usually ≥1 accepted on the true branch). The rare 0-accepted lesson leaves Merge input 0 empty; recent n8n proceeds with the available input, but if a future 0-accepted lesson hangs at Merge, that's the place to look.
+- User must delete the duplicate full WAVs from the bad sleep2_end run manually (Drive create-by-name doesn't overwrite).
+
+Verification: re-run a lesson. Exactly ONE `{lesson}_full_{lang}.wav` per language in the full folder. Its content/length matches concatenating that language's per-segment output files (minus borrow trim). Lengths across languages converge to ≈ EN total (each segment padded to en_duration).
+
+Rollback: revert this commit (reintroduces double-fire) — not advisable. Prefer fixing forward.
+
+---
+
 ### 2026-05-27 — PHASE2_ORDERING_BARRIER
 
 Context: User reported that per-segment WAVs in the output Drive folder did not match the concatenated full-lesson WAV in the full folder — both in total duration AND in content (some segments in the full WAV were a different generation than the per-segment files). Root cause: a race condition in the W3 execution graph. `Read Localizations Fresh` fanned out to THREE parallel branches off a single output: [Phase 2: Batch LLM+TTS, Download Segment WAV, Build VTT Per Lang]. The original 2026-05-25 design assumed n8n would run the Phase 2 branch to completion first because it was listed first — but n8n does not guarantee branch execution order for a single fan-out. Phase 2 takes ~2 min (batch LLM + re-TTS + Drive PATCH); Download Segment WAV is fast. So Download Segment WAV downloaded per-segment files (Phase 1 audio) and Build Full Audio concatenated them BEFORE / concurrently with Phase 2: Drive Update overwriting those same files with expanded audio. Net: full WAV = Phase 1 audio, per-segment Drive files = Phase 2 audio. Mismatch by design flaw.

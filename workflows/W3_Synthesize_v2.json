@@ -788,6 +788,21 @@
       ],
       "id": "phase2-has-binary-if",
       "name": "Phase 2: Has Binary?"
+    },
+    {
+      "parameters": {
+        "mode": "append",
+        "numberInputs": 2,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "id": "phase2-merge-branches",
+      "name": "Phase 2: Merge Branches",
+      "position": [
+        37520,
+        13888
+      ]
     }
   ],
   "pinData": {},
@@ -1023,7 +1038,7 @@
       "main": [
         [
           {
-            "node": "Phase 2: Update Localizations",
+            "node": "Phase 2: Merge Branches",
             "type": "main",
             "index": 0
           }
@@ -1041,9 +1056,9 @@
         ],
         [
           {
-            "node": "Phase 2: Update Localizations",
+            "node": "Phase 2: Merge Branches",
             "type": "main",
-            "index": 0
+            "index": 1
           }
         ]
       ]
@@ -1058,6 +1073,17 @@
           },
           {
             "node": "Build VTT Per Lang",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Phase 2: Merge Branches": {
+      "main": [
+        [
+          {
+            "node": "Phase 2: Update Localizations",
             "type": "main",
             "index": 0
           }
