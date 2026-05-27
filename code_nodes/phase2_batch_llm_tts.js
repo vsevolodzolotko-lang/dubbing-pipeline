@@ -234,6 +234,21 @@ function parseLLMJson(raw) {
   return {};
 }
 
+// Coerce an LLM-returned cell value to a trimmed string. LLMs occasionally return
+// a non-string for a (segment_id, lang) cell — an object {text:"..."}, an array,
+// a number, or null — which would crash any downstream .trim() call. asStr unwraps
+// the common {text|value|<lang>} object shape, else stringifies primitives, else ''.
+function asStr(v) {
+  if (typeof v === 'string') return v.trim();
+  if (v == null) return '';
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v).trim();
+  if (typeof v === 'object') {
+    const inner = v.text ?? v.value ?? v.translation ?? v.output;
+    if (typeof inner === 'string') return inner.trim();
+  }
+  return '';
+}
+
 // --- batch helpers ---
 const segmentEntries = Object.entries(candidates);
 function chunkSegments(entries, size) {
@@ -267,8 +282,8 @@ async function runOneVerifyBatch(batch, srcMap) {
     if (!srcMap[sid]) continue;
     userMap[sid] = { en: data.en };
     for (const lang of Object.keys(data.langs)) {
-      const t = srcMap[sid][lang];
-      if (t && t.trim()) userMap[sid][lang] = t.trim();
+      const t = asStr(srcMap[sid][lang]);
+      if (t) userMap[sid][lang] = t;
     }
   }
   if (Object.keys(userMap).length === 0) return {};
@@ -288,7 +303,7 @@ async function runOneEditorBatch(batch, srcMap) {
     if (!srcMap[sid]) continue;
     userMap[sid] = { en: data.en };
     for (const lang of Object.keys(data.langs)) {
-      const text = srcMap[sid][lang];
+      const text = asStr(srcMap[sid][lang]);
       if (text) userMap[sid][lang] = text;
     }
   }
@@ -327,8 +342,9 @@ function buildWav(pcm) {
 }
 
 async function reTtsOne(task) {
-  const { sid, lang, newText, info } = task;
-  if (!newText || newText.trim() === info.current.trim()) {
+  const { sid, lang, info } = task;
+  const newText = asStr(task.newText);
+  if (!newText || newText === asStr(info.current)) {
     return { sid, lang, outcome: 'no_change' };
   }
   try {
@@ -422,10 +438,10 @@ for (const [sid, data] of segmentEntries) {
   if (!exp) continue;
   postVerify1Map[sid] = {};
   for (const lang of Object.keys(data.langs)) {
-    const expText = exp[lang];
-    if (!expText || !expText.trim()) continue;
-    const verText = verify1Map[sid]?.[lang];
-    postVerify1Map[sid][lang] = (verText && verText.trim()) ? verText.trim() : expText.trim();
+    const expText = asStr(exp[lang]);
+    if (!expText) continue;
+    const verText = asStr(verify1Map[sid]?.[lang]);
+    postVerify1Map[sid][lang] = verText || expText;
   }
 }
 console.log('Phase 2 verify attempt 1 complete');
@@ -440,10 +456,10 @@ for (const [sid, data] of segmentEntries) {
   if (!postVerify1Map[sid]) continue;
   final1TextMap[sid] = {};
   for (const lang of Object.keys(data.langs)) {
-    const pv = postVerify1Map[sid][lang];
+    const pv = asStr(postVerify1Map[sid][lang]);
     if (!pv) continue;
-    const ed = editor1Map[sid]?.[lang];
-    final1TextMap[sid][lang] = (ed && ed.trim()) ? ed.trim() : pv;
+    const ed = asStr(editor1Map[sid]?.[lang]);
+    final1TextMap[sid][lang] = ed || pv;
   }
 }
 console.log('Phase 2 editor attempt 1 complete');
@@ -583,9 +599,9 @@ async function runRetryGroup(tasks, systemPrompt, charsMultiplier) {
   const reTtsRetryTasks = [];
   const droppedRetryResults = [];
   for (const t of tasks) {
-    const ed = editorRetryMap[t.sid]?.[t.lang];
-    const ex = expandRetryMap[t.sid]?.[t.lang];
-    const finalText = (ed && ed.trim()) ? ed.trim() : ((ex && ex.trim()) ? ex.trim() : null);
+    const ed = asStr(editorRetryMap[t.sid]?.[t.lang]);
+    const ex = asStr(expandRetryMap[t.sid]?.[t.lang]);
+    const finalText = ed || ex || null;
     if (!finalText) {
       droppedRetryResults.push({ sid: t.sid, lang: t.lang, outcome: 'llm_dropped' });
     } else {
