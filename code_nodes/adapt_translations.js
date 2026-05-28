@@ -75,7 +75,7 @@ async function callClaude(userContent) {
         method: 'POST',
         url: ANTHROPIC_URL,
         headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-        body: { model: 'claude-sonnet-4-5', max_tokens: 500, system: SYSTEM_PROMPT, messages: [{ role: 'user', content: userContent }] },
+        body: { model: 'claude-sonnet-4-6', max_tokens: 500, system: SYSTEM_PROMPT, messages: [{ role: 'user', content: userContent }] },
         json: true,
       });
       return sanitizeClaudeOutput(resp.content?.[0]?.text || '');
@@ -89,45 +89,78 @@ async function callClaude(userContent) {
   return '';
 }
 
-const results = [];
-for (const item of $input.all()) {
+// Concurrency cap for the whole node, across ALL (segment × lang) cells — not
+// per-segment. The old code parallelized the 7 langs WITHIN a segment but ran
+// segments sequentially, so an N-segment lesson serialized into N waves and a
+// long lesson (~90 segments) blew past n8n's 300s task-runner timeout. We now
+// flatten every cell that needs shortening into one task list and run it with a
+// single global bound, so wall-clock scales with total over-budget cells / CONC
+// rather than with segment count. Overridable via config key w2_adapt_concurrency.
+const ADAPT_CONCURRENCY = parseFloat(configMap['w2_adapt_concurrency']) || 8;
+
+// Prefill one output object per segment, preserving the exact output shape that
+// Formality Lint + Update Sheet expect: each {lang}_text starts as the original
+// translation, {lang}_adaptation_attempts = 0. Tasks below overwrite only the
+// cells they touch, so segments/langs that fit budget pass through unchanged.
+const items = $input.all();
+const outputs = items.map((item) => {
   const { segment_id, en_text, en_duration_sec } = item.json;
   const budget = parseFloat(en_duration_sec) || 0;
+  const out = { segment_id, en_text, en_duration_sec: budget, adaptation_attempts: 0 };
+  for (const lang of LANGS) {
+    out[`${lang}_text`] = item.json[`${lang}_text`] || '';
+    out[`${lang}_adaptation_attempts`] = 0;
+  }
+  return out;
+});
 
-  // Parallelize 7 langs per segment via Promise.all. Each lang's 3-attempt shorten
-  // loop stays sequential inside its own async branch (each attempt refines the
-  // previous, so they're inherently dependent). Max 7 concurrent Claude requests
-  // at any moment — well below Sonnet Tier 1 RPM. The 5s/exponential backoff
-  // inside callClaude handles any rate-limit hits gracefully. Without this
-  // parallelization a 21-segment lesson can exceed n8n's default 300s task-runner
-  // timeout when many (segment × lang) pairs need shortening.
-  const langResults = await Promise.all(LANGS.map(async (lang) => {
-    let text = item.json[`${lang}_text`] || '';
-    let attempts = 0;
-    if (text && budget) {
-      for (let a = 0; a < MAX_ATTEMPTS; a++) {
-        const est = estimateDuration(text, lang);
-        if (est <= budget * BUDGET_FACTOR) break;
-        const minChars = Math.floor(text.length * MIN_RETAIN);
-        const shortened = await callClaude.call(this, ATTEMPT_PROMPTS[a](lang, budget.toFixed(1), est.toFixed(1), en_text, text, minChars));
-        // Length floor: reject Claude output that went below 60% of input length
-        if (shortened && shortened.length >= minChars) {
-          text = shortened;
-        }
-        attempts = a + 1;
-      }
+// Flatten to a task list of (segIdx, lang) pairs that actually need work:
+// non-empty translation AND a positive duration budget. Cells that fit on the
+// first estimate make 0 Claude calls (the loop breaks immediately) but are still
+// cheap to include; we keep them out to avoid useless task overhead.
+const tasks = [];
+items.forEach((item, segIdx) => {
+  const budget = parseFloat(item.json.en_duration_sec) || 0;
+  if (!budget) return;
+  for (const lang of LANGS) {
+    const text = item.json[`${lang}_text`] || '';
+    if (!text) continue;
+    if (estimateDuration(text, lang) <= budget * BUDGET_FACTOR) continue; // already fits
+    tasks.push({ segIdx, lang, en_text: item.json.en_text, budget });
+  }
+});
+
+async function runTask(task) {
+  const { segIdx, lang, en_text, budget } = task;
+  let text = outputs[segIdx][`${lang}_text`];
+  let attempts = 0;
+  for (let a = 0; a < MAX_ATTEMPTS; a++) {
+    const est = estimateDuration(text, lang);
+    if (est <= budget * BUDGET_FACTOR) break;
+    const minChars = Math.floor(text.length * MIN_RETAIN);
+    const shortened = await callClaude.call(this, ATTEMPT_PROMPTS[a](lang, budget.toFixed(1), est.toFixed(1), en_text, text, minChars));
+    // Length floor: reject Claude output that went below 60% of input length
+    if (shortened && shortened.length >= minChars) {
+      text = shortened;
     }
-    return { lang, text, attempts };
-  }));
+    attempts = a + 1;
+  }
+  outputs[segIdx][`${lang}_text`] = text;
+  outputs[segIdx][`${lang}_adaptation_attempts`] = attempts;
+}
 
-  const out = { segment_id, en_text, en_duration_sec: budget };
+// Bounded-concurrency drain via chunked Promise.all — same idiom as Verify/Editor.
+for (let i = 0; i < tasks.length; i += ADAPT_CONCURRENCY) {
+  await Promise.all(tasks.slice(i, i + ADAPT_CONCURRENCY).map(t => runTask.call(this, t)));
+}
+
+// Recompute the per-segment rollup (max attempts across its langs) after the pool.
+for (const out of outputs) {
   let maxAttempts = 0;
-  for (const { lang, text, attempts } of langResults) {
-    out[`${lang}_text`] = text;
-    out[`${lang}_adaptation_attempts`] = attempts;
-    if (attempts > maxAttempts) maxAttempts = attempts;
+  for (const lang of LANGS) {
+    if (out[`${lang}_adaptation_attempts`] > maxAttempts) maxAttempts = out[`${lang}_adaptation_attempts`];
   }
   out.adaptation_attempts = maxAttempts;
-  results.push({ json: out });
 }
-return results;
+
+return outputs.map(json => ({ json }));

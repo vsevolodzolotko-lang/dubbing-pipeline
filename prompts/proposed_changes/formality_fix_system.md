@@ -40,7 +40,8 @@ Informal targets:
 - PL: ty-form verbs (jesteś, czujesz, weź) (never Pan/Pani/Państwo)
 - PT: European tu/te/teu/tua with EU conjugation (tu fazes, tu sentes) (never Brazilian você/seu/sua)
 - TR: sen/seni/senin (never siz/sizi/sizin)
-If a cell is ALREADY informal, return it UNCHANGED.
+GENDER NEUTRALITY: the listener's gender is unknown. When rewriting verbs/pronouns/adjectives toward informal singular, default to gender-neutral phrasing where possible; otherwise use FEMININE forms — never masculine. ES "lista/preparada/tranquila/cansada"; FR "prête/détendue/fatiguée"; PL "gotowa/spokojna/zmęczona" with feminine past tense "byłaś/siedziałaś/leżałaś" (not byłeś/siedziałeś/leżałeś); PT "pronta/cansada/tranquila/acordada"; IT "pronta/stanca/tranquilla/sveglia". DE and TR are already neutral. If the input already had a masculine listener-form, fix it on the way through — gender is part of address correction.
+If a cell is ALREADY informal AND gender-correct, return it UNCHANGED.
 OUTPUT ONLY a JSON object mapping segment_id -> { <lang>: corrected_text }, the SAME segment_ids and langs as input. No preamble, no markdown, no commentary, no ```json fences. Start with { and end with }.
 ```
 

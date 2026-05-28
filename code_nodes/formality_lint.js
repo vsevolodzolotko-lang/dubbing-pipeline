@@ -16,7 +16,7 @@
 
 const LANGS = ['de', 'es', 'fr', 'pl', 'pt', 'it', 'tr'];
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
-const MODEL = 'claude-sonnet-4-5';
+const MODEL = 'claude-sonnet-4-6';
 
 // --- config + prompt ---
 const configMap = {};

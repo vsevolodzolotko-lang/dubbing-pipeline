@@ -4,6 +4,347 @@
 
 ---
 
+### 2026-05-28 — MODEL_UPGRADE_SONNET_4_6_AND_OPUS_ON_PHASE2
+
+Context: After the multi-day refactor stabilized — diff-first restoration, no-invention rule, batch-level diversity, gender-neutral defaults, speed-up branch — pipeline reasoning load is now concentrated on the Phase 2 Expand prompts. Those prompts carry the most complex multi-step instructions in the codebase: EN-vs-current diff analysis, conditional restoration vs decoration, intra-batch ToV diversity tracking, per-language gender enforcement. Sonnet 4.5 was the original model when most of those features were added one at a time; instruction-following on the now-stacked rule set is at Sonnet 4.5's ceiling. User confirmed appetite for selective upgrade after cost discussion (~+$3/lesson tradeoff for Phase 2-only Opus).
+
+Decision: Two-tier model upgrade:
+
+1. **Pipeline-wide: Sonnet 4.5 → Sonnet 4.6.** Free quality bump — same pricing, newer model. Touches every Anthropic call in W2 (Translate, Tone Analysis, Verify, Adapt, Formality Lint) and the non-Expand calls in W3 Phase 2 (Verify, Formality Fix). No behavior change expected beyond marginal instruction-following improvement.
+
+2. **W3 Phase 2 Expand-only: Sonnet 4.5/4.6 → Opus 4.7.** Targeted upgrade for the two model calls that drive Phase 2 reasoning: the primary expand (`runOneExpandBatch` using `w3_expand_batch_system`) and the retry expand (`runOneRetryExpand` inside `runRetryGroup`, used by both `_retry_harder` and `_retry_shorter`). The downstream Verify and Formality Fix calls within Phase 2 stay on Sonnet 4.6 — they don't carry the stacked-instruction load and Sonnet is sufficient.
+
+Phase 1 shorten retries in `check_timing_and_pad.js` already use Haiku 4.5 (`claude-haiku-4-5-20251001`) — mechanical shortening task, deliberately cheap and fast. Not changed.
+
+Cost modeling (rough per-lesson estimates assuming standard Anthropic pricing — Sonnet $3 input / $15 output / $0.30 cached input per MT; Opus $15 / $75 / $1.50; 5× markup):
+- All-Sonnet baseline (with caching across batches): ~$3.00 / lesson
+- Phase-2-Expand on Opus only: ~$6.00 / lesson (+$3 delta)
+- All-Opus alternative (rejected): ~$15 / lesson — Adapt is the biggest cost driver (~150 cells × shorten attempts), and Adapt is mechanical enough that Sonnet 4.6 suffices. Paying 5× on Adapt for no quality benefit is wasteful.
+
+Files changed:
+- `code_nodes/phase2_batch_llm_tts.js`: 4 model strings — line 315 (Expand primary) → Opus 4.7, line 336 (Verify) → Sonnet 4.6, line 527 (Formality Fix) → Sonnet 4.6, line 711 (Retry Expand) → Opus 4.7.
+- `code_nodes/adapt_translations.js`, `formality_lint.js`, `prepare_tone_analysis.js`, `prepare_and_expand.js`: each had a single Sonnet 4.5 reference → Sonnet 4.6.
+- `workflows/W2_Translate_v2.json`: 5 occurrences of `claude-sonnet-4-5` in embedded jsCode → Sonnet 4.6 (all of them).
+- `workflows/W3_Synthesize_v2.json`: 4 occurrences in embedded phase2 jsCode — positionally edited to match the .js file (2 Opus, 2 Sonnet 4.6).
+- `code_nodes/check_timing_and_pad.js`: unchanged (Haiku 4.5, intentional).
+
+Caching: every cache_control: ephemeral block in the pipeline keeps working on Opus 4.7. Cached input pricing is 10% of base on both Sonnet and Opus, so cache amortizes large system prompts (~5K tokens) across batches in either model. First batch of each Phase 2 stage pays full input cost; subsequent batches in the same Code node execution hit cache (cache TTL is 5 min — fits within a typical lesson's W3 wall-clock).
+
+Latency: Opus is roughly 3× slower per call than Sonnet. Phase 2 sits on W3's critical path. Expected wall-clock increase: ~30-60s on a 47-segment lesson, ~60-120s on a 90-segment lesson. Acceptable given quality benefit; if latency becomes an issue on long lessons, downgrade Phase 2 Expand back to Sonnet 4.6 — single-line change.
+
+Rate limits: Opus tier limits are stricter than Sonnet. The Phase 2 CHUNK=6 parallel batches should fit within Tier 2 limits; if 429s appear, reduce CHUNK via `w2_llm_chunk` config (also affects W2 Verify, so cross-impact). No code change needed for fallback — existing backoff in `callAnthropic` (3 retries, 2s/4s/8s) handles transient 429s.
+
+Rationale: Concentration of complexity. The diff-first / no-invention / diversity / gender / restoration rule stack on Phase 2 Expand has grown to 4 critical sections per prompt plus a tone-of-voice reference. Sonnet 4.5 follows these adequately ~85% of the time; the misses produce the regressions we've been chasing (invention, repetition, masculine defaults). Opus 4.7 follows stacked instructions more reliably — expected to push first-pass success rate from ~85% to ~95%, reducing retry frequency and tail silence outliers. Sonnet 4.6 is a free upgrade on the rest — no reason to skip.
+
+Trade-offs:
+- +$3/lesson cost — bounded and predictable.
+- +30-60s W3 wall-clock — bounded, on critical path.
+- Two-model dependency in one Code node (Sonnet for Verify/Formality, Opus for Expand) — slight complexity, but unified through the existing `callAnthropic(body)` helper which takes the body verbatim, so no architectural change. The model is named per-call in each body object.
+- If Opus 4.7 instruction-following on these prompts is materially better than projected, we could remove some of the explicit anti-patterns (BATCH-LEVEL DIVERSITY's "self-check before output", NO INVENTION's anti-examples) that exist primarily to discipline Sonnet's known failure modes. Out of scope here; would need an A/B run.
+- If Opus output ever diverges in JSON-shape from Sonnet (different escaping, different field-name conventions) — existing `asStr()` and `parseLLMJson()` helpers normalize most variants. No issues anticipated.
+
+Verification: re-run sleep2_end. Expect (a) lower frequency of invention regressions and "when you're ready" templating (the failure modes Sonnet 4.5 produced), (b) restoration coverage stable on seg_004 et al (Opus shouldn't drop content), (c) gender-neutral compliance higher (Opus follows tabular rules better), (d) W3 wall-clock +30-60s, (e) `phase2_diag` console output shows higher attempt-1 accept rate. If accept rate doesn't improve materially after a few lessons, the Opus upgrade isn't pulling its weight — downgrade Phase 2 Expand to Sonnet 4.6.
+
+Rollback: 4-line change in `code_nodes/phase2_batch_llm_tts.js` (lines 315, 336, 527, 711). Set all four back to `claude-sonnet-4-6` for pure-Sonnet operation, or `claude-sonnet-4-5` for full pre-2026-05-28 baseline. Workflow JSONs need matching edits to stay in sync if rolling back.
+
+---
+
+### 2026-05-28 — W2_GENDER_NEUTRAL_PIPELINE_WIDE
+
+Context: The Phase 2 gender neutrality fix (`W3_GENDER_NEUTRAL_FEMININE_FALLBACK`, earlier the same day) added a feminine-default rule to the three W3 expand prompts. That covers Phase 2 only — masculine forms could still enter the pipeline from W2's initial translation (`translate_system`) and survive through Verify / Editor / Adapt because none of those prompts had a gender rule. Since Phase 2 only fires on cells where `real_duration < en_duration × threshold` (about 30-50% of cells per lesson), the W3-only fix leaves a large fraction of segments with whatever gender form W2 generated. User confirmed scope expansion: "так, давай фіксити одразу все".
+
+Decision: Add the same two-tier gender rule (PREFERRED neutral phrasing → FALLBACK feminine, never masculine) to all five W2 prompts that generate or modify natural text. Same per-language vocab tables and same severity (STRICT default, never acceptable to pass masculine through). Per-prompt integration shape:
+
+1. **`translate_system`** — gender block inserted after the existing informal-address rule, before the `=== TONE OF VOICE ===` block. Single-paragraph form (this prompt is dense; a multi-section structure would dilute the JSON-only instruction recency).
+
+2. **`qa_verify_system`** — new `CLASS 4: GENDER DEFAULT` section inserted between CLASS 3 (semantic register) and "NOT YOUR JOB", parallel to CLASS 1/2/3 structure. Declared severity: "A passed-through masculine form referring to the listener is a verification failure of the same severity as a CLASS 1 false friend" — so it's treated as a real semantic error, not a style preference.
+
+3. **`editor_system`** — new `CLASS E: GENDER DEFAULT` section after CLASS D (typos/diacritics). Includes explicit override of Editor's usual "default unchanged" rule: "This is the one place where Editor takes precedence over 'default unchanged' — masculine-listener forms ALWAYS get corrected." Without that override, Editor's conservative default would let masculine forms slip through under the "if it sounds native, leave it alone" rule.
+
+4. **`adapt_shorten_system`** — new `=== GENDER DEFAULT — never shorten via masculine forms ===` block inside the existing CRITICAL TRAPS section. Adapt is the most likely false-positive vector: masculine adjectives are often 1-2 chars shorter than feminine (Sp. "listo" 5 vs "lista" 5 — equal; "preparado" 9 vs "preparada" 9 — equal; but FR "prêt" 4 vs "prête" 5; PL past tense "byłeś" 5 vs "byłaś" 5 — equal; IT "stanco" 6 vs "stanca" 6 — equal), so Adapt could substitute under tight slot pressure. The rule explicitly forbids this with the same fallback-to-original logic the existing CRITICAL TRAPS use. Adds a positive case: "If a neutral rephrasing is shorter than either form, prefer the neutral form — best of both worlds."
+
+5. **`formality_fix_system`** — gender clause inserted inline with the informal-target list. Since formality fixes already rewrite pronouns/verbs/possessives, gender correction is a natural extension of the same surgical pass. Critical wording: "If the input already had a masculine listener-form, fix it on the way through — gender is part of address correction." Also tightens the unchanged-return condition: "If a cell is ALREADY informal AND gender-correct, return it UNCHANGED" (was just "ALREADY informal").
+
+Rationale: Pipeline-wide consistency. Every prompt that touches natural-language text now enforces the same gender default. Each prompt enforces it differently per its specialization — Translate generates correctly; Verify catches semantic errors; Editor catches what slipped past; Adapt protects under length pressure; Formality Lint catches deterministic regex-flagged cases. The W3 Phase 2 prompts (already done) catch any masculine forms that retry-expansion would otherwise reintroduce.
+
+Trade-offs:
+- Total prompt size grew ~+5-15% per prompt. All system prompts cached via `cache_control: ephemeral` so per-call overhead negligible after first batch in each stage.
+- Slight risk of over-correction on rare segments where masculine is semantically required (e.g. a hypothetical translation of "your father is here" — but meditation/wellness scripts essentially never have such cases, and if they did, the speaker is addressing the listener with imperative/2nd-person forms, not 3rd-person about other people).
+- DE and TR have no special handling — confirmed grammatically gender-neutral in 2nd-person address. If a future content type required gendered DE/TR forms, the rule wouldn't cover them; not relevant for current scope.
+- Compounding from multiple gender-defending stages may occasionally produce minor wording variation between runs (Translate picks "cuando quieras", Verify accepts; next run Translate picks "cuando estés lista", Verify accepts — both correct, both feminine-default). Diversity is the goal, not stability — both outcomes are acceptable brand voice.
+
+Verification: re-run a lesson through full W2 + W3. Expect (a) no masculine adjectives/participles referring to the listener anywhere in `text_translated` for ES/FR/PL/PT/IT, (b) about a 50/50 split between neutral-rephrasing and feminine-fallback (depending on what fits best in each context), (c) DE and TR unchanged, (d) no regression in any other quality dimension (false friends, formality, register). Spot-check a sample of 10-15 cells across the lesson; if any masculine listener-form survives, identify which prompt let it through.
+
+Rollback: delete the gender block from each of the five W2 prompt rows in Sheets. Each is a self-contained inserted block — clean removal. The earlier W3 gender entries remain (independent rows). Could roll back W2 only and keep W3, or vice versa, depending on which layer surfaces issues.
+
+---
+
+### 2026-05-28 — W3_GENDER_NEUTRAL_FEMININE_FALLBACK
+
+Context: A run on sleep2_end after the NO_INVENTION fix surfaced a different quality concern — gender agreement defaulting to masculine across Romance + Polish translations. `seg_004` restoration of "when you're ready" landed as:
+- ES: "cuando estés listo" (masculine)
+- FR: "quand tu seras prêt" (masculine)
+- PL: "kiedy będziesz gotowy" (masculine)
+- PT: "quando estiveres pronto" (masculine)
+- IT: "quando sarai pronto" (masculine)
+
+DE ("wenn du bereit bist") and TR ("hazır olduğunda") are grammatically gender-neutral in 2nd-person address and are fine. The 5 affected langs all defaulted to the masculine adjective despite the listener's gender being unknown. For a meditation/wellness brand whose audience is heterogeneous and skews female in many markets, masculine-default is both off-brand and exclusionary.
+
+Decision: Add a `GENDER NEUTRALITY (CRITICAL)` section to all three Phase 2 prompts (`w3_expand_batch_system`, `w3_expand_batch_retry_harder`, `w3_expand_batch_retry_shorter`) with a two-tier rule:
+
+1. **PREFERRED — rephrase to gender-neutral whenever possible.** Use lang-specific constructions that avoid agreement entirely:
+   - ES: "cuando quieras", "cuando lo sientas", "si te apetece"
+   - FR: "quand tu le souhaites", "quand cela te conviendra"
+   - PL: "kiedy zechcesz", "kiedy poczujesz"
+   - PT: "quando quiseres", "quando sentires"
+   - IT: "quando vorrai", "quando lo sentirai"
+
+2. **FALLBACK — when neutral phrasing is awkward, default to FEMININE.** Per-lang vocab tables embedded in each prompt:
+   - ES: lista, preparada, tranquila, cansada, despierta
+   - FR: prête, détendue, fatiguée (calme is already neutral)
+   - PL: gotowa, spokojna, zmęczona; past-tense verbs feminine (byłaś, siedziałaś, leżałaś)
+   - PT: pronta, cansada, tranquila, acordada
+   - IT: pronta, stanca, tranquilla, sveglia
+
+The rule is declared as a STRICT default — masculine forms are never acceptable for the listener.
+
+For `retry_shorter` specifically: an additional clause says "if `previous_attempt` contained masculine forms, FIX them on the way through; do not preserve them just because rewriting feminine costs extra chars." This catches stale masculine forms from prior Phase 2 outputs that earlier runs put in the sheet.
+
+DE and TR have no special handling (already neutral by grammar).
+
+Rationale: The brand voice document does not currently encode this rule, so the LLM defaults to whichever gender form is morphologically simplest — masculine in Romance + Polish. The fix lives at the Phase 2 prompt layer because that's where Phase 2 introduces new gendered text (restored EN clauses like "when you're ready"). Out of scope for this change: W2's `translate_system` and `qa_verify_system` — they may produce masculine forms in the initial Phase 1 translation, which then become the `current` Phase 2 sees. If the rule needs to apply pipeline-wide (recommended for full consistency), the same `GENDER NEUTRALITY` block should be added to W2's prompts in a follow-up — strictly orthogonal to this Phase 2 fix.
+
+Trade-offs:
+- Some lang-specific neutral phrasings are slightly longer than masculine adjective forms. Net effect on char count is ≤5% per affected clause — within the existing length tolerance bands.
+- LLM compliance on default-feminine is not 100%. Sonnet may still occasionally produce masculine; if observed, a deterministic post-process lint (similar to `Formality Lint` from 2026-05-27) could be added in a future iteration. Not done now — see how prompt-only fix performs first.
+- Neutral phrasings can change the connotation slightly ("when you're ready" → "when you want to") — the feminine-fallback path preserves connotation faithfully but enforces the gender default.
+
+Verification: re-run sleep2_end. Expect (a) seg_004 ES/FR/PL/PT/IT to use either neutral phrasing or feminine adjective ("cuando quieras" or "cuando estés lista", "kiedy zechcesz" or "kiedy będziesz gotowa", etc.), (b) no masculine adjectives in any segment referring to the listener, (c) DE and TR unchanged. Spot-check a sample of 5-10 cells across the lesson for any leaked masculine forms.
+
+Rollback: delete the `GENDER NEUTRALITY` section from each of the three prompt rows in the Sheets `prompts` tab.
+
+---
+
+### 2026-05-28 — W3_EXPAND_BATCH_LEVEL_DIVERSITY
+
+Context: After NO_INVENTION shipped and seg_001_pl/seg_002_es invention regressions were fixed, the next sleep2_end run revealed a different repetition pattern: 5 of 7 langs in seg_001 added the SAME ToV phrase — "when you're ready" / "cuando estés listo" / "quand tu es prêt" / "kiedy będziesz gotowy" / "quando estiveres pronto" / "hazır olduğunda". This wasn't invention (PRIORITY 1's first listed example is exactly "when you're ready"), but it's a templating problem at lesson scale: a meditation track where most segments start with "when you're ready..." sounds robotic, not brand-voiced. User identified this correctly as LLM primacy bias — the model reaches for the first example in any list when prompted for diversity.
+
+Diagnosis: The retry_harder / primary prompts listed PRIORITY 1 as `"when you're ready", "if it feels comfortable", "if it feels right", "allowing yourself to", "without forcing"` — 5 examples, first one is the most recognizable Spirio signature phrase. The LLM, processing each segment independently within a batch, defaults to the most prototypical example for each. Without an explicit cross-segment diversity rule, the model has no signal that across-segment variety is part of brand voice quality.
+
+Decision: Three coordinated changes to `w3_expand_batch_system` and `w3_expand_batch_retry_harder`:
+
+1. **Expand PRIORITY 1 pool from 5 → ~16 candidate phrases.** Adds variants like "when it feels right", "if it feels good", "in your own time", "at your own pace", "as you settle in", "as you arrive", "without rushing", "letting yourself", "with kind attention", "softly, in your own way". Includes explicit "Do NOT default to 'when you're ready' — it is one option among many." Notes that the full inspiration pool is the `{{tov}}` content at the top of the prompt, not the 8-line pool list.
+
+2. **New `BATCH-LEVEL DIVERSITY (CRITICAL)` section** inserted between PRIORITY 5 and LANGUAGE ISOLATION. Four explicit rules:
+   - No phrase repeats within a batch (scan earlier segments in current response before finalizing later ones).
+   - Vary PRIORITY type across segments (if seg_X gets PRIORITY 1, prefer 2/3/4/5 for seg_Y).
+   - Skip ToV when `current`/`previous_attempt` already has it.
+   - Self-check: treat the whole JSON response as the unit of variety, not each individual segment.
+   The section explicitly frames diversity as "part of brand voice quality" — not just a stylistic preference.
+
+3. **PRIORITY 5 (ellipsis) flagged as safest fill.** The diversity section notes that PRIORITY 5 is the LEAST content-adding lever and often the safest choice — explicitly nudging the model toward timing-only fills when no clear content variation is needed.
+
+`retry_shorter` NOT updated for diversity — it's a condense path, fires per-cell on overshoot, doesn't add new ToV.
+
+Rationale: Pool expansion alone halves first-example probability (from ~60% with 5 entries to ~30% with 16) but still leaves ~30% of batch segments using "when you're ready". The anti-repetition rule converts that probabilistic distribution into a hard intra-batch constraint. Per-priority diversification further reduces clustering. The combination should drop "when you're ready" frequency from ~5/7 langs per segment to ~1-2 per batch (≤8 segments) — a 10-15× reduction at lesson scale.
+
+Trade-offs:
+- LLM instruction-following on intra-batch diversity is imperfect (Sonnet 4.5 is better than older models but not 100%). Expected to substantially reduce repetition, not eliminate. Cross-batch repetition can still occur because batches don't see each other; mitigated by the natural variation of per-batch random sampling.
+- The prompts grew ~+25% chars. Cached via `cache_control: ephemeral` so per-batch overhead negligible after batch 1.
+- If repetition persists despite the prompt fix, the next lever is code-level enforcement: post-LLM check counts repeated phrases across the batch and triggers re-roll with explicit blacklist. Not done now — see prompt-only effect first.
+
+Verification: re-run sleep2_end. Expect (a) "when you're ready" / lang-equivalent appearing on AT MOST 1-2 segments per batch (vs 5-7 in the previous run), (b) varied ToV patterns across seg_001 / seg_002 / etc., (c) some segments getting just PRIORITY 5 ellipsis fill with no PRIORITY 1 modifier, (d) no regression on seg_004 restoration (the diff-first logic is unchanged). Anecdote-check by reading the seg_001 langs aloud — they should sound varied, not templated.
+
+Rollback: revert the three changes to each prompt row in the Sheets `prompts` tab. Diversity rules are additive; removing them returns to the prior repetition-prone behavior.
+
+---
+
+### 2026-05-28 — W3_RETRY_HARDER_NO_INVENTION
+
+Context: After the speed-up branch shipped (same day), a clean re-run on sleep2_end (fresh W2 + new Phase 2 code) showed seg_004 fully restored on all 7 langs and most segments fitting their slots. But two cells revealed a new quality issue:
+- `seg_001_pl` (attempts=2, speed=1.10): "...To wystarczy większości, by poczuć zmianę... **małą przestrzeń spokoju**." ("...a small space of calm") — invented metaphor not present in EN.
+- `seg_002_es` (attempts=2, speed=1.15): "...si tu mente sigue activa... **dejando que se vaya calmando a su propio ritmo**." ("...letting it calm at its own pace") — invented elaboration not present in EN.
+
+Both cells went through `_retry_harder` and landed in the speed-up step at 1.10/1.15. With both restoration AND speed-up working, retry_harder had license to add chars, and its PRIORITY 6 explicitly permitted "Light meaningful elaborations of source content" with example: "If EN says 'Sleep is powerful', expand WHY: 'Sleep is one of nature's most powerful tools... a quiet way your body finds restoration.'" The model interpreted this license as freedom to add poetic flourishes — exactly the failure mode the diff-first rewrite was meant to prevent on the restoration side, now sneaking back via the elaboration path. Verify and Editor (downstream of expansion) did not flag either, because the added content was grammatically clean and tonally on-brand — only a strict EN-vs-output comparison catches it.
+
+Diagnosis: PRIORITY 6 was the only retry_harder lever that allowed adding concept-bearing content beyond what EN already says. PRIORITIES 1-5 are pure ToV patterns (modifiers, sensory anchoring, permission language, bridging awareness, ellipsis pauses) — they decorate without inventing. PRIORITY 6 invited invention by design, with a self-referential example showing the LLM exactly the failure shape to reproduce.
+
+Decision: Remove PRIORITY 6 from `w3_expand_batch_retry_harder`. Restored EN clauses (Step 2) + ToV patterns 1-5 (Step 3) are now the only expansion levers. If they cannot reach `target_chars × 0.95`, the output ships under-target; the pipeline's slowdown-to-fill handles the remaining silence via voice-speed adjustment, which is reversible audio engineering — invented content is not.
+
+Implementation:
+1. Deleted the PRIORITY 6 block from the prompt body. Replaced with an explicit "NOTE — there is no PRIORITY 6" paragraph naming the observed failures ("a small space of calm", "letting it calm at its own pace", "a quiet way your body finds restoration") so future maintainers see why the lever was removed.
+2. Sharpened the existing "DO NOT" rule from "Add new instructions or claims not in EN" → "Add new instructions, claims, **metaphors, images, or concepts** not present in EN — even as brief poetic elaboration." Names the specific seg_001_pl / seg_002_es phrases as anti-examples.
+3. Relaxed the LENGTH HARD CONSTRAINT: `target_chars × 0.95 ≤ output_chars ≤ target_chars × 1.10` now reads "aim for [band], under-target is acceptable if restoration + ToV 1-5 cannot reach the band without invention". Pairs with new HARD CONSTRAINT `NO INVENTION` declaring under-target the correct answer when invention would be the alternative.
+4. Primary `w3_expand_batch_system` and `_retry_shorter` unchanged. The primary never had PRIORITY 6 (only 5 ToV patterns); retry_shorter is a condense pass, no invention pressure.
+
+Rationale: This closes the last LLM-side lever for content invention in Phase 2. The two-attempt pipeline (primary + harder/shorter retry) is now end-to-end restoration-only: every char added beyond `current` must trace to either an EN clause (restoration) or a recognized ToV pattern (decoration). The remaining tail-silence risk migrates fully to slowdown-to-fill at the audio layer, which is the right place for it — the audio lever cannot fabricate content, only stretch what's been said.
+
+Trade-offs:
+- Cells where restoration + ToV 1-5 can't fill the slot will land under-target with visible tail silence after slowdown. This will surface real CPS calibration gaps (e.g. seg_001_es / seg_001_pt showing 1.9s tails at slowdown floor) as observable signal in the CSV, not as silently invented content. Right place for that signal.
+- Some accepted cells may switch from `accepted with invention` to `accepted with tail`. Tail is honest; invention is a quiet quality liability.
+- If a lesson consistently shows large tails at slowdown floor on the same lang (ES/PT especially), that's a CPS calibration trigger — run `scripts/analyze_cps.js` and consider lowering `cps_estimate_<lang>`. Not done here; the prompt fix is orthogonal.
+
+Verification: re-run sleep2_end. Expect (a) seg_001_pl no longer contains "małą przestrzeń spokoju" or equivalent invented imagery, (b) seg_002_es no longer contains "dejando que se vaya calmando a su propio ritmo" or equivalent, (c) any cell that previously inherited invented content now lands accepted with tail or accepted at slowdown floor — both acceptable, (d) no new regression on seg_004 langs (those passed via primary prompt, not retry_harder).
+
+Rollback: revert this commit / restore the deleted PRIORITY 6 block in the Sheet's `w3_expand_batch_retry_harder` row. Only the retry path is affected; everything else continues to work.
+
+---
+
+### 2026-05-28 — W3_PHASE2_SPEED_UP_ON_OVERSHOOT
+
+Context: After the diff-first prompts (`w3_expand_batch_system`, `w3_expand_batch_retry_harder`) and the clause-protected `w3_expand_batch_retry_shorter` shipped, a re-run on sleep2_end showed seg_004_de stuck in `phase2_outcome=overshoot` with both attempts rejected. Manual math confirmed the cause is structural, not LLM creativity: en_dur=3.643s, lead=0.24s, speechBudget=3.403s. The correct restored DE text "Morgen bin ich wieder hier... wenn du bereit bist." (50 chars) at voice.speed=1.0 produces ~3.5s of audio — about 100ms over speechBudget. `reTtsOne` in [`phase2_batch_llm_tts.js`](../code_nodes/phase2_batch_llm_tts.js) returned `overshoot` immediately on `real > speechBudget` with no speed-up retry, so Phase 1 audio (with the original short clause-dropping translation) was kept. Net effect: a clause-complete translation generated by the new prompts could not reach the listener because the TTS at default speed was 3% too long. Same pattern would hit any content-dense short slot in any language.
+
+Mirror: Phase 1 (Check Timing + Pad) has had a relative speed-up schedule since 2026-05-27 (DYNAMIC_SPEED_AND_SLOWDOWN_FILL): when initial TTS overshoots, retry at `[voice.speed + Δ·⅔, voice.speed + Δ]` with cap `voice.speed + MAX_SPEED_UP_DELTA` (default Δ=0.15). Phase 2's `reTtsOne` lacked this branch — it had a slowdown-to-fill lever for the silence-remaining direction but no speed-up lever for the overshoot direction.
+
+Decision: Mirror Phase 1's speed-up retry in `reTtsOne`. On `real > speechBudget` after initial TTS at voice.speed, try the same two-step schedule `[voice.speed + Δ·⅔, voice.speed + Δ]` using the existing `max_speed_up_delta` config key. If any step lands `real ≤ speechBudget`, accept that speed; otherwise return `overshoot` as before.
+
+Implementation:
+1. Added `MAX_SPEED_UP_DELTA = parseFloat(configMap.max_speed_up_delta) || 0.15` to module scope alongside the existing `MAX_SLOW_DOWN_DELTA`.
+2. Replaced the immediate `overshoot` return with a speed-up retry loop. Each step calls `ttsAt(speedTry)`, checks `real ≤ speechBudget`, accepts and updates `pcm`/`real`/`usedSpeed` on first success, else continues. Final overshoot return preserved when both steps fail.
+3. `final_speed` in the accepted result captures the speed actually used (1.10 or 1.15 for a 1.0 voice, scaled relative to voice.speed otherwise) → visible in localizations CSV.
+4. Branch placed BEFORE the slowdown-to-fill block. The two are mutually exclusive: overshoot → speed-up, silence-remaining → slowdown. A successful speed-up step lands `real ≤ speechBudget` (often `≈ speechBudget`), so the slowdown gap check (`speechBudget − real > 0.5s`) won't trigger.
+5. `max_speed_up_delta` config key documentation updated in `docs/config_keys.md` to list both Phase 1 and Phase 2 readers.
+
+Rationale: Phase 1 already accepts that some texts need 1.10-1.15 speed to fit the EN-aligned slot — meditation pace at 1.10 is well within natural range and was validated previously. Phase 2 was rejecting the exact same situation despite having access to the same lever; this was an inconsistency between the two paths that surfaced only after the diff-first prompts started producing clause-complete texts that consistently sat right at the slot boundary. Mirroring the existing accepted behavior is lower risk than tightening prompts further or relaxing the overshoot check (which would let actually-too-long texts ship).
+
+Trade-offs:
+- +1–2 ElevenLabs TTS calls per Phase-2 overshoot cell. The retry runs only when the initial TTS overshoots — frequency depends on prompt quality and segment density. On the sleep2_end run that motivated this change, ≤5 cells/lesson would touch the new branch. Bounded by `ELEVENLABS_CHUNK=5` parallelism — no rate-limit risk.
+- Cells that previously fell back to Phase 1 audio (with the original short translation) will now sometimes ship Phase 2 audio at 1.10-1.15 speed instead. This is the intended outcome: clause-complete content at slightly elevated pace, rather than clause-missing content at base pace.
+- Mixed pacing within a lesson can creep further: a few cells at 1.10 (speed-up to fit overshoot) alongside cells at 0.85 (slowdown to fill silence). Both gates are intentional and bounded; if pacing feels uneven, lower `max_speed_up_delta` and/or raise `slowdown_min_gap_sec`.
+
+Verification: re-run sleep2_end with this change AND a fresh W2 run first (to clear sheet contamination from prior diff-first iterations — the localizations sheet had `info.current` = previous Phase 2 outputs, polluting Phase 1 inputs). Expect:
+- seg_004_de `text_translated` to contain both EN clauses ("Morgen bin ich wieder hier... wenn du bereit bist." or equivalent), `phase2_outcome=accepted`, `final_speed≈1.10–1.15`, `tail_silence_sec` small.
+- Any other content-dense short slot (seg_001 langs where Phase 1 hit `final_speed=1.10` already) to either pass through unchanged OR get Phase 2 expansion that lands at the speed-up step.
+- No regression on segments that previously fit at voice.speed — the new branch only fires when `real > speechBudget`.
+
+Rollback: revert this commit. `max_speed_up_delta` config key remains in use for Phase 1; only Phase 2's secondary reader is removed.
+
+---
+
+### 2026-05-28 — W3_RETRY_SHORTER_PROTECT_RESTORATION
+
+Context: After the diff-first rewrite of `w3_expand_batch_system` and `w3_expand_batch_retry_harder` (earlier the same day), a re-run on sleep2_end with `expansion_threshold` raised 0.85 → 0.95 produced two clear regressions on seg_004:
+- `seg_004_de`: final text "Ich bin morgen wieder genau hier." — second clause "wenn du bereit bist" dropped. `expansion_attempts=2`, `accepted`, `final_speed=0.9`.
+- `seg_004_it`: final text "Domani sarò di nuovo qui." — second clause "quando sarai pronto" dropped. `expansion_attempts=2`, `accepted`, `needs_attention=TRUE`, ratio 0.497.
+
+Diagnosis: attempt 1 (`w3_expand_batch_system`, now diff-first) correctly restored both EN clauses on these langs ("Morgen bin ich wieder hier... wenn du bereit bist." — 50 chars, real ≈3.5s). speechBudget = en_dur − lead = 3.643 − 0.24 = 3.403s, so even small TTS jitter over 3.5s landed the cell in **overshoot** territory. The retry classifier routed overshoot cells to `w3_expand_batch_retry_shorter`, which was NOT updated as part of the earlier diff-first rewrite. The old retry-shorter prompt treated `previous_attempt` as freely condensable text, with HARD CONSTRAINT `NEVER exceed target_chars`. Faced with previous_attempt that contained restored EN content but no spare ToV decoration to remove, the LLM hit the chars ceiling by dropping a restored clause — exactly the failure mode the primary prompt was rewritten to prevent. Net effect: a still-short-but-incomplete-content audio was emitted as `accepted`, silently losing source meaning.
+
+Root cause class: the diff-first principle was applied only on the EXPAND side (attempts 1 and harder retry) but not on the CONDENSE side. Any cell whose restored attempt-1 slightly overshot got cleaned up by an unaligned retry that didn't know about clause protection.
+
+Decision: Rewrite `w3_expand_batch_retry_shorter` around the same EN-clause-protection principle, mirroring the diff-first structure of the expand-side prompts:
+
+1. **Step 1 — mandatory EN-vs-previous_attempt diff.** Enumerate EN clauses, identify which are present in `previous_attempt`. That set becomes the **PROTECTED SET** — output MUST include every protected clause (verbatim or minor stylistic variation).
+
+2. **Step 2 — trim only ToV decoration.** Anything in `previous_attempt` BEYOND the protected clauses is fair game for cutting: stacked modifiers, multiple ellipsis, elaborations, bridging phrases. Restored EN content is off-limits.
+
+3. **Worked example** of the exact seg_004_de regression embedded in the prompt: RIGHT keeps both clauses with minimal punctuation compression ("Morgen bin ich wieder hier, wenn du bereit bist."); WRONG drops clause 2 to hit target_chars ("Ich bin morgen wieder genau hier.").
+
+4. **HARD CONSTRAINTS swap precedence**: RESTORATION wins over LENGTH. The old `NEVER exceed target_chars` strict ceiling is relaxed — overshoot up to target × 1.10 is acceptable when needed to keep all protected clauses. Rationale: an overshoot at the prompt level becomes overshoot at re-TTS, the pipeline already rejects overshoot TTS and keeps Phase 1 audio — a recoverable outcome. A silently-dropped clause is invisible content loss.
+
+Rationale: The condense path was the last unaligned link in the diff-first chain. With this fix, every Phase 2 LLM stage (primary expand, retry-harder, retry-shorter) shares the same clause-preservation discipline. The trade-off (slightly more overshoot → more rejected attempts → more Phase 1 audio retained) is intentional and correct: it surfaces structurally-unfixable content overshoot as observable tail silence in the CSV rather than hiding it behind clean-looking truncated translations.
+
+Trade-offs:
+- More cells will land in `phase2_outcome=overshoot` when both attempts overshoot. Those reuse Phase 1 audio (current Phase-1 text, with the original short translation that triggered Phase 2 in the first place). User sees the gap honestly in CSV → can decide whether to investigate (slowdown range, CPS calibration, segmentation).
+- Slight chars-overshoot at the LLM stage may produce TTS audio that is exactly at the slot boundary; reTtsOne's overshoot check is strict (`real > speechBudget`), so borderline cases still get accepted. Net effect: cells where restoration was possible AND TTS happened to fit will succeed; cells where restoration genuinely cannot fit get rejected cleanly and Phase 1 audio is preserved.
+- A separate code-level improvement (not done here) would be to try slowdown-to-fit when re-TTS overshoots, before rejecting. That would convert more overshoot rejections into accepted-but-slow audio. Out of scope for this change; deferred until next investigation if overshoot rate climbs.
+
+Verification: re-run sleep2_end. Expect (a) `seg_004_de` and `seg_004_it` text_translated to contain both EN clauses, (b) some cells may flip from `accepted` to `overshoot` if both attempts overshoot — that's the correct fallback, not a regression, (c) no cell with `accepted` outcome should have a missing EN clause vs the EN source. Check a sample of accepted cells: every EN clause must appear in the translation.
+
+Rollback: revert `prompts/proposed_changes/w3_expand_batch_retry_shorter.md` and re-paste the old prompt row in Sheets `prompts` tab. Pipeline code is unchanged.
+
+---
+
+### 2026-05-28 — W3_EXPAND_DIFF_FIRST_RESTORATION
+
+Context: On the most recent lessons, even segments that passed Phase 2 with `phase2_outcome=accepted` still produced noticeable tail silence — i.e. the expansion ran, was accepted, but the resulting text was still well short of the slot. Concrete pattern observed on seg_004 ES: EN had two clauses ("I'll be here again tomorrow... when you're ready."), `current` had only the first ("Mañana volveré a estar aquí."), and Phase 2 attempt 1 either returned `current` unchanged or added ToV decoration ("suavemente, …") without restoring the missing second clause. The downstream `final_speed` slowdown-to-fill can only shave ~0.5–1s of silence; it can't compensate for a missing EN clause worth ~1.5s of speech. So acceptance with low ratio was masking a content-completeness failure.
+
+Root cause in the prompt: `w3_expand_batch_system` framed clause restoration as an OPTIONAL Step 1 — "If ORIGINAL EN contains content that's MISSING from current → restoration case. Restore the cut content first." Sonnet, faced with a clean-looking `current` and a long ToV priority list, frequently took the "authentic expansion" branch (decorate `current` with ToV) instead of doing the EN-vs-current diff. ToV patterns deliver fewer chars than restored EN clauses, hence accepted-but-short outcomes.
+
+Decision: Rewrite `w3_expand_batch_system` and `w3_expand_batch_retry_harder` around a **diff-first** structure:
+
+1. **Step 1 — Mandatory EN-vs-current DIFF.** Explicitly require the model to enumerate EN clauses (separators: commas/semicolons/ellipses + standalone modifiers like "when you're ready"), then mark which are present in `current` vs missing. The prompt calls out that a clean-sounding `current` does NOT mean it's complete — short translations almost always drop a clause.
+
+2. **Step 2 — RESTORATION as PRIMARY lever.** For every missing clause, generate its target-language equivalent and integrate it. Restored EN content is ALWAYS preferred over decorative ToV of equivalent length. A worked seg_004-style example is embedded in the prompt with an explicit "WRONG" counter-example (decoration without restoration).
+
+3. **Step 3 — ToV expansion CONDITIONAL on length after restoration.** ToV priorities 1–5 are kept (inviting modifiers, sensory anchoring, permission language, bridging awareness, ellipsis) but framed as secondary: stop the moment output is within ±10% of `target_chars`. Length-trimming, when needed, removes ToV decoration first — never restored EN content.
+
+4. **Retry-harder** carries the same diff structure plus an explicit diagnosis paragraph: "the most likely cause of attempt-1 failure is that the diff was skipped or shallow." The diff for retry compares EN against BOTH `current` AND `previous_attempt`, so clauses missing from both are the restoration set. Hard constraint: returning `previous_attempt` unchanged or adding ToV decoration without restoring any missing EN clause is declared a FAILURE of the retry.
+
+5. **Retry-shorter unchanged.** Its job is condensation of overshoot, not restoration.
+
+6. **`expansion_threshold` left at 0.85.** Raising it (proposed 0.85 → 0.90) was rejected: if current-prompt accepted-cells still have ratio <0.9, more cells under the threshold just means more under-expanded acceptances, not better fill. The fix is prompt quality, not coverage. If after this change accepted-cells consistently reach ratio ≥0.95, the threshold can stay; if they still cluster under 0.85 the next investigation is per-voice CPS estimate vs reality, not threshold.
+
+Rationale: The failure mode is content-completeness, not LLM creativity headroom. Moving restoration from optional Step 1 to mandatory Step 1+2 with a worked example targets the exact decision point where Sonnet was branching wrong. ToV stays available but is gated behind length, so decoration can never crowd out restored EN.
+
+Trade-offs:
+- Prompts are longer (~+30% chars). Cached via `cache_control: ephemeral` so per-batch overhead negligible after batch 1.
+- If a `current` translation is genuinely already content-complete and just naturally short (TR especially), the diff step finds nothing to restore and falls through to ToV — same outcome as before for that case.
+- `retry_harder` is now stricter: it explicitly forbids returning `previous_attempt` unchanged. If a retry genuinely cannot restore (rare), it falls through to ToV-only toward target × 1.10, same as previous behavior.
+
+Verification: re-run a lesson where prior runs had accepted-but-short cells. Expect (a) `text_translated` for those cells now contains restored EN clauses, not just ToV padding, (b) `real_duration_sec / en_duration_sec` ≥ 0.90 on most accepted cells (was clustering 0.70–0.85), (c) `tail_silence_sec` materially smaller on accepted Phase 2 rows, (d) `needs_attention=true` (ratio < 0.70) count drops. If accepted ratios still cluster <0.85, the next lever is per-voice CPS calibration, not the prompt.
+
+Rollback: revert `prompts/proposed_changes/w3_expand_batch_system.md` and `w3_expand_batch_retry_harder.md`, re-paste the old prompt rows in the Sheets `prompts` tab. The pipeline code is unchanged.
+
+---
+
+### 2026-05-27 — FULL_AUDIO_BORROW_COMPENSATION_SOURCE_FIX
+
+Context: On sleep1_full the concatenated full-lesson WAVs drifted and the 7 languages came out at different total lengths, with the divergence starting at seg_036. Diagnosis from localizations CSV: `borrowed_sec > 0` only at seg_035/036/037 (the 4-7-8 breathing words — short audio that breath-borrows into the following pause). seg_035 is the first borrow of the whole lesson, so everything after it shifts late. Expected full length (EN-aligned) = `slot_end_047 − slot_start_001` = 412.905s for ALL langs; observed lengths were 412.905 + per-lang total borrow (de/tr ~1.10s … es ~0.36s), i.e. **borrow compensation in Build Full Audio was not firing**.
+
+Root cause: `build_full_audio_per_lang.js` read `borrowed_sec` / `lead_silence_sec` from the per-item json (`e.json`). Build Full's input chain is `Phase 2: Update Localizations (Sheets) → Download Segment WAV (Drive) → Build Full`; those nodes coerce/drop the fields, so `parseFloat(undefined)||0 = 0` → `prevBorrow` always 0 → no lead trim. The values were still correct in the sheet (Phase 1 wrote them) but absent at runtime in the build.
+
+Decision: read the authoritative values from the **localizations sheet** via `$('Read Localizations Fresh').all()`, keyed `${segment_id}_${lang}`, and use those for the trim (with `e.json` as a fallback). Values are in seconds → format-independent, and avoids inferring duration from PCM byte length (rejected: would hardcode 22050/mono/16-bit assumptions for a quantity we can read directly). The only remaining time→bytes conversion is the existing `trimBytes = round(trimSec·SR)·BPS`, unavoidable for slicing PCM.
+
+Verification: re-run a lesson with a breath-borrow section; all 7 `*_full_*.wav` should be ~equal (≈412.9s, not 413.3–414.0), `trimmed_lead_total_sec` ≈ per-lang total borrow, and dubbed audio stays in sync past seg_035. Applies to all pipeline versions (independent of the W3 TTS parallelization).
+
+Rollback: revert this commit (restores reading borrow/lead from `e.json`).
+
+---
+
+### 2026-05-27 — W3_TTS_PARALLELIZATION
+
+Context: W3 Phase 1 synthesized every (segment × lang) cell strictly one at a time. The `Loop Over Items` SplitInBatches ran at `batchSize=1`, so the body `ElevenLabs TTS (HTTP) → Check Timing + Pad → Save to Drive → Update Localizations → Rate Limit Guard` serialized over all 329 cells (47 segs × 7 langs for sleep1_full), and `Rate Limit Guard` waited 1.5s PER cell → ~8 min of pure waiting. An 11-min lesson (~630 cells) made this untenable. User is on ElevenLabs Scale tier and wanted 7 parallel TTS.
+
+Decision (architecture + rate-guard confirmed with user):
+
+1. **Initial TTS moved into the `Check Timing + Pad` Code node.** The separate `ElevenLabs TTS` HTTP node was removed; the node's existing `tts()` helper (already used for shorten/speed retries, with its own 4-try exponential backoff) now also does the initial synth. This drops the n8n-binary round-trip (`getBinaryDataBuffer`, `failureDiag` binary plumbing) — the buffer comes straight back from `tts()`.
+
+2. **Batch-parallel synthesis.** The node was refactored from single-job (`$('Expand TTS Jobs').item`) to a batch processor: per-job logic lives in `async function synthOne(job)`; the body runs `await Promise.all($input.all().map(j => synthOne(j)))` and returns one item per input job. Output json/binary shape is byte-identical to before, so Save to Drive / Prepare Localization Row / Update Localizations are unaffected.
+
+3. **`Loop Over Items` batchSize 1 → 7.** Concurrency = batchSize: ≤7 `synthOne` run at once → ≤7 simultaneous ElevenLabs calls (retries within a job stay sequential). Memory bounded to ~7 WAVs live at a time (vs holding all 329 if we had dropped the loop). The knob is the node's batchSize, not a config key — raise it (e.g. 14) on a high tier, lower toward 1 to throttle. The `Loop [done] → Read Localizations Fresh` Phase 2 trigger and node layout are preserved.
+
+4. **`Rate Limit Guard` 1.5s → 0.2s.** With concurrency already bounded at 7 and Scale-tier limits, the per-batch wait drops to ~9s total over 47 batches (was ~8 min over 329 items). Kept as a node (not removed) so it stays a tunable safety valve.
+
+Why bounded-loop over a single all-jobs Code node: matches the codebase concurrency idiom (Phase 2 `runReTtsTasks` chunked `Promise.all`) while capping peak memory — a single node returning all 329 (or 630) base64 WAVs risked OOM on long lessons.
+
+Out of scope: parallelizing Save to Drive / Update Localizations (Drive uploads stay sequential within each batch — a separate, smaller bottleneck). Phase 2 re-TTS already bounded-concurrent (`ELEVENLABS_CHUNK=5`).
+
+Verification: `node --check` (wrapped) on `check_timing_and_pad.js`; `JSON.parse` + connection audit on W3 JSON (no node references the removed `ElevenLabs TTS`; `Loop[main#1] → Check Timing + Pad`; `Loop[main#0] → Read Localizations Fresh` intact). Re-import W3 → re-run sleep1_full: Phase 1 wall-clock collapses, slot-alignment invariant holds (each file = lead + en_duration, cross-lang lengths match), `needs_attention` only on genuine TTS failures. Then the 11-min lesson: no task-runner timeout, stable memory (7 WAVs/batch).
+
+Rollback: revert this commit. To throttle without reverting: lower `Loop Over Items` batchSize toward 1 and/or raise `Rate Limit Guard` in the n8n UI.
+
+---
+
+### 2026-05-27 — W2_PARALLELIZATION
+
+Context: A W2 run on sleep1_full (47 segments) takes ~8 min. The bottleneck is Adapt Translations — a single Code node whose OUTER loop over segments was sequential (the 7 langs within a segment were already parallel, but segments serialized into N waves). On an 11-min lesson (~90 segments) this would exceed n8n's **300s task-runner timeout**, which applies specifically to Code nodes. Raising the timeout is a band-aid; the fix is to make each Code node finish fast via bounded-concurrency parallelism — the pattern already used in Verify/Editor/Phase 2.
+
+Decision (Tier 1+2; concurrency 8, CHUNK 6, both config-driven — confirmed with user):
+
+1. **Adapt Translations → global (segment×lang) task-pool.** Prefill one output object per segment (preserving the exact downstream shape: `segment_id`, `en_text`, `en_duration_sec`, 7×`{lang}_text` = original, 7×`{lang}_adaptation_attempts` = 0). Flatten every over-budget cell (non-empty text, positive budget, estimate > budget×1.05) into one task list; drain it with a single global bound `w2_adapt_concurrency` (default 8) via chunked `Promise.all`. Each task runs the existing self-contained 3-attempt shorten loop and writes its cell back. Then recompute the per-segment `adaptation_attempts = max(per-lang)`. Wall-clock now scales with `over-budget-cells / 8`, not segment count. Output bytes identical to the old code for the same inputs.
+
+2. **Verify + Gemini Editor CHUNK 3 → config (default 6).** `const CHUNK = 3` (Tier-1 era) became `parseFloat(configMap.w2_llm_chunk) || 6` in both nodes (and the orphaned OpenAI Editor, for consistency — all three already build `configMap`). Halves their wall-clock on Tier 2.
+
+3. **Config keys** `w2_adapt_concurrency` (8) and `w2_llm_chunk` (6), both optional with code fallbacks — no live-sheet edit needed to benefit. Set `w2_adapt_concurrency=1` to revert Adapt to effectively sequential.
+
+Out of scope (Tier 3, deferred): converting Claude Translate + Tone Analysis (httpRequest nodes) to parallel Code nodes. They're slow (~75s + ~20s) but NOT task-runner-bound, so they don't cause the node timeout. Worth doing for >15-min videos later.
+
+Verification: `node --check` (wrapped) on both JS mirrors + `JSON.parse` on W2 JSON. Re-run sleep1_full → expect total W2 ~8min → ~3-4min, Adapt well under 300s, segments tab equivalent to a sequential run (modulo LLM nondeterminism). Then the 11-min lesson: every Code node stays under the task-runner timeout.
+
+Rollback: revert this commit. Concurrency is config-gated, so `w2_adapt_concurrency=1` also reverts Adapt without code changes.
+
+---
+
 ### 2026-05-27 — DYNAMIC_SPEED_AND_SLOWDOWN_FILL
 
 Context: Goal — leave less silence in segments where the EN track is longer than the localization, and make the speed limits sane per-voice. Two problems: (1) the W3 shorten path used absolute speed steps `[1.10, 1.15]`, so a 0.8-speed voice (TR) was forced to an absolute 1.15 — a +0.35 jump that sounds artificial; (2) there was no slow-down lever at all — under-budget segments just got tail silence (Phase 2 only added text).

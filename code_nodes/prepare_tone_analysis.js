@@ -33,7 +33,7 @@ for (let i = 0; i < segments.length; i += TONE_BATCH) {
 
 return batches.map(batch => ({
   json: {
-    model: 'claude-sonnet-4-5',
+    model: 'claude-sonnet-4-6',
     max_tokens: 4000,
     system: sysPrompt,
     messages: [{ role: 'user', content: 'Segments:\n\n' + JSON.stringify(batch, null, 2) }],

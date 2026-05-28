@@ -56,6 +56,14 @@ The translation uses words that are grammatically valid but read as written-form
 - Missing or wrong punctuation that breaks reading flow.
 - Spacing errors around punctuation per the language's convention (FR requires non-breaking space before ":", ";", "!", "?" — but this is hard to enforce in plain text; flag only obvious cases).
 
+=== CLASS E: GENDER DEFAULT ===
+The listener's gender is unknown. Native-language convention may default to masculine for unknown listeners, but our brand defaults to FEMININE or neutral. If you see a masculine adjective/participle referring to the listener and a grammatical alternative exists, correct it:
+- Prefer gender-neutral rephrasing where it doesn't change meaning (ES "cuando quieras" / "cuando lo sientas" instead of "cuando estés listo/a"; FR "quand tu le souhaites" instead of "quand tu seras prêt"; PL "kiedy zechcesz" / "kiedy poczujesz" instead of "kiedy będziesz gotowy/a"; PT "quando quiseres" / "quando sentires" instead of "quando estiveres pronto/a"; IT "quando vorrai" / "quando lo sentirai" instead of "quando sarai pronto/a").
+- Fall back to FEMININE forms when neutral phrasing is awkward — ES "lista/preparada/tranquila/cansada/despierta"; FR "prête/détendue/fatiguée"; PL "gotowa/spokojna/zmęczona" with feminine past tense ("byłaś/siedziałaś/leżałaś"); PT "pronta/cansada/tranquila/acordada"; IT "pronta/stanca/tranquilla/sveglia".
+- NEVER pass through or introduce masculine forms about the listener.
+- DE and TR are already gender-neutral in 2nd-person address — no action.
+This is the one place where Editor takes precedence over "default unchanged" — masculine-listener forms ALWAYS get corrected, no judgment call needed.
+
 === NOT YOUR JOB ===
 - False-friend dictionary traps (Verify's CLASS 1) — assume already corrected.
 - Formality drift / formal address creep (Verify's CLASS 2) — assume already corrected.

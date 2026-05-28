@@ -93,11 +93,15 @@ See [`config_keys.md`](config_keys.md) for the full reference (defaults, owners,
 > **Optional CPS overrides**: `cps_estimate_de`, `cps_estimate_es`, `cps_estimate_fr`, `cps_estimate_it`, `cps_estimate_pl`, `cps_estimate_pt`, `cps_estimate_tr` — per-language characters-per-second estimates. If present, override the `CPS_DEFAULTS` baked into the W2/W3 code nodes. See [config_keys.md](config_keys.md#per-language-cps-overrides) and use `scripts/analyze_cps.js` after a W3 run to derive observed values from real data.
 >
 > **Dead keys**: `min_speed` (never wired) and `max_speed` (superseded 2026-05-27 by `max_speed_up_delta` / `max_slow_down_delta`, both relative to voice.speed) — safe to delete.
+>
+> **W3 TTS concurrency is NOT a config key**: it's the `batchSize` on W3's `Loop Over Items` node (default 7). The initial TTS now runs inside `Check Timing + Pad` (the `ElevenLabs TTS` HTTP node was removed), which synthesizes each batch in parallel. `Rate Limit Guard` wait is now 0.2s. See [config_keys.md](config_keys.md#w3-synthesis-concurrency-not-a-config-key).
 
 | key | value | Notes |
 |-----|-------|-------|
 | active_langs | `de,es,fr,it,pl,pt,tr` | Comma-separated list processed by Synthesize |
 | max_adaptation_attempts | `3` | W2 adaptation loop upper bound |
+| w2_adapt_concurrency | `8` | (v4) Global concurrency cap for W2 Adapt across all (segment×lang) cells. Prevents 300s task-runner timeout on long lessons. |
+| w2_llm_chunk | `6` | (v4) Parallel batch count for W2 Verify + Gemini Editor (was hardcoded 3). |
 | max_speed_up_delta | `0.15` | (v4) Max speed-up above voice.speed for W3 shorten path. Replaces absolute `max_speed`. |
 | max_slow_down_delta | `0.15` | (v4) Max slow-down below voice.speed for W3 Phase 2 slowdown-to-fill. |
 | slowdown_min_gap_sec | `0.5` | (v4) Only slow-fill when remaining slot silence exceeds this. |

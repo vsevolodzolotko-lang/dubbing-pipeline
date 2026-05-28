@@ -61,8 +61,8 @@ for (let i = 0; i < items.length; i += QA_BATCH_SIZE) batches.push(items.slice(i
 // Bounded-concurrent batch processing: process CHUNK batches in parallel via
 // Promise.all, sequential between chunks. Avoids n8n's 300s task-runner timeout
 // on big lessons (GPT-5 is ~30s/batch, 7 batches sequential = 210s).
-// Cap=3 respects OpenAI Tier 1 (~30K TPM on GPT-5).
-const CHUNK = 3;
+// Cap default 6 (Anthropic/Gemini Tier 2); overridable via config w2_llm_chunk.
+const CHUNK = parseFloat(configMap.w2_llm_chunk) || 6;
 const corrections = {};
 async function runOneGeminiBatch(batch) {
   const userMap = {};

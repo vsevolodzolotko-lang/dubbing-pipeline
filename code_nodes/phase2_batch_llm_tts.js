@@ -82,6 +82,12 @@ for (const l of ['de','es','fr','pl','pt','it','tr']) {
 // Only fires when remaining silence > SLOWDOWN_MIN_GAP_SEC (avoids uneven pacing on tiny gaps).
 const MAX_SLOW_DOWN_DELTA = parseFloat(configMap.max_slow_down_delta) || 0.15;
 const SLOWDOWN_MIN_GAP_SEC = parseFloat(configMap.slowdown_min_gap_sec) || 0.5;
+// Speed-up to fit (mirrors Phase 1 shorten path): when expanded text slightly overshoots
+// speechBudget at voice.speed, try faster speeds before giving up. Same relative cap as
+// Phase 1 — see DECISIONS 2026-05-27 DYNAMIC_SPEED_AND_SLOWDOWN_FILL. Allows clause-
+// preserving expansions whose char count is right but TTS at default speed lands ~5-10%
+// over the slot (e.g. seg_004_de restoration that needs ~3.5s in a 3.4s speechBudget).
+const MAX_SPEED_UP_DELTA = parseFloat(configMap.max_speed_up_delta) || 0.15;
 
 // Formality enforcement (mirrors the W2 Formality Lint). Phase 2 expand can re-introduce
 // formal address that the W2 lint — which ran before W3 — never sees. Same deterministic
@@ -306,7 +312,7 @@ async function runOneExpandBatch(batch, systemPrompt, charsMultiplier) {
     }
   }
   const body = {
-    model: 'claude-sonnet-4-5',
+    model: 'claude-opus-4-7',
     max_tokens: 8000,
     system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content: JSON.stringify(userMap, null, 2) }],
@@ -327,7 +333,7 @@ async function runOneVerifyBatch(batch, srcMap) {
   }
   if (Object.keys(userMap).length === 0) return {};
   const body = {
-    model: 'claude-sonnet-4-5',
+    model: 'claude-sonnet-4-6',
     max_tokens: 8000,
     system: [{ type: 'text', text: QA_SYSTEM, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content: JSON.stringify(userMap, null, 2) }],
@@ -428,9 +434,29 @@ async function reTtsOne(task) {
     let real = pcm.length / (SAMPLE_RATE * BPS);
     let usedSpeed = info.voice_speed;
 
-    // Overshoot: speech doesn't fit the slot's speech region → keep Phase 1 audio.
+    // Speed-up retry: speech at voice.speed slightly overshoots speechBudget. Try faster
+    // speeds (relative to voice.speed) before giving up — mirrors Phase 1 shorten path's
+    // [voice.speed + Δ·⅔, voice.speed + Δ] schedule. Lets clause-preserving expansions fit
+    // when restored text is right by chars but lands ~5-10% over slot at default speed.
     if (real > speechBudget) {
-      return { sid, lang, outcome: 'overshoot', newRealDur: real, speechBudget, targetFileDur, newText };
+      const speedUpSteps = [
+        info.voice_speed + MAX_SPEED_UP_DELTA * (2 / 3),
+        info.voice_speed + MAX_SPEED_UP_DELTA,
+      ];
+      for (const speedTry of speedUpSteps) {
+        const fastPcm = await ttsAt(speedTry);
+        if (!fastPcm || fastPcm.length < 4410) continue;
+        const fastReal = fastPcm.length / (SAMPLE_RATE * BPS);
+        if (fastReal <= speechBudget) {
+          pcm = fastPcm;
+          real = fastReal;
+          usedSpeed = parseFloat(speedTry.toFixed(3));
+          break;
+        }
+      }
+      if (real > speechBudget) {
+        return { sid, lang, outcome: 'overshoot', newRealDur: real, speechBudget, targetFileDur, newText };
+      }
     }
 
     // Slowdown-to-fill (secondary lever, AFTER text expansion): if silence remains beyond
@@ -498,7 +524,7 @@ async function fixFormalityInTasks(tasks) {
   for (const h of hits) byLang[h.lang] = (byLang[h.lang] || 0) + 1;
   console.log(`Phase 2 formality: ${hits.length} flagged cells, fixing before re-TTS`, JSON.stringify(byLang));
   const body = {
-    model: 'claude-sonnet-4-5', max_tokens: 8000,
+    model: 'claude-sonnet-4-6', max_tokens: 8000,
     system: [{ type: 'text', text: FORMALITY_FIX_SYSTEM, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content: JSON.stringify(flagged, null, 2) }],
   };
@@ -682,7 +708,7 @@ async function runRetryGroup(tasks, systemPrompt, charsMultiplier) {
       }
     }
     const body = {
-      model: 'claude-sonnet-4-5',
+      model: 'claude-opus-4-7',
       max_tokens: 8000,
       system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
       messages: [{ role: 'user', content: JSON.stringify(userMap, null, 2) }],

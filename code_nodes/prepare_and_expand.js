@@ -60,7 +60,7 @@ return batches.map((batch, bIdx) => {
       batch_size: batch.length,
       batch_segments: batchInfo,
       claude_body: {
-        model: 'claude-sonnet-4-5',
+        model: 'claude-sonnet-4-6',
         max_tokens: 8000,
         system: systemBlocks,
         messages: [{ role: 'user', content: JSON.stringify(userMap, null, 2) }],

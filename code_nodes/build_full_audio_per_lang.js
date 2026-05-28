@@ -12,6 +12,22 @@ $('Read Config').all().forEach(i => { if (i.json.key) configMap[i.json.key] = i.
 const activeLangs = (configMap.active_langs || 'de,es,fr,it,pl,pt,tr')
   .split(',').map(s => s.trim()).filter(Boolean).sort();
 
+// Authoritative borrow/lead source = the localizations SHEET (Read Localizations Fresh),
+// keyed by `${segment_id}_${lang}`. The per-item json flowing through
+// Phase 2 Update Localizations → Download Segment WAV (Drive) loses/zeros these fields,
+// which silently disabled borrow compensation → the full track drifted from the first
+// breath-borrow segment onward. Values here are in SECONDS (format-independent), so this
+// also avoids inferring duration from PCM byte length.
+const locMap = {};
+$('Read Localizations Fresh').all().forEach(i => {
+  const j = i.json || {};
+  if (!j.segment_id || !j.lang) return;
+  locMap[`${j.segment_id}_${j.lang}`] = {
+    borrowed_sec:     parseFloat(j.borrowed_sec) || 0,
+    lead_silence_sec: parseFloat(j.lead_silence_sec) || 0,
+  };
+});
+
 const items = $input.all();
 if (!items.length) throw new Error('No items — Download Segment WAV must run first');
 
@@ -75,8 +91,9 @@ for (const lang of activeLangs) {
       continue;
     }
     let pcm = wavBuf.subarray(44);
+    const loc = locMap[`${e.json.segment_id}_${e.json.lang}`] || {};
     if (prevBorrow > 0) {
-      const leadSec   = parseFloat(e.json.lead_silence_sec) || 0;
+      const leadSec   = loc.lead_silence_sec ?? (parseFloat(e.json.lead_silence_sec) || 0);
       const trimSec   = Math.min(prevBorrow, leadSec);
       const trimBytes = Math.round(trimSec * SAMPLE_RATE) * BPS;
       if (trimBytes > 0 && trimBytes < pcm.length) {
@@ -85,7 +102,7 @@ for (const lang of activeLangs) {
       }
     }
     pcmChunks.push(pcm);
-    prevBorrow = parseFloat(e.json.borrowed_sec) || 0;
+    prevBorrow = loc.borrowed_sec ?? (parseFloat(e.json.borrowed_sec) || 0);
   }
 
   const fullPcm = Buffer.concat(pcmChunks);

@@ -54,6 +54,16 @@ The translation literally means a different thing than the EN intends. Restore m
 - Affirmation rendered as bare imperative without sensation: EN "let your shoulders drop" → translation "RELAX SHOULDERS!" — restore the invitation register.
 - Urgency words inserted where EN was pacing: "immediately", "ya mismo", "tout de suite", "sofort" — meditation never urges. Remove or soften.
 
+=== CLASS 4: GENDER DEFAULT ===
+The listener's gender is unknown — translations MUST default to FEMININE forms when grammatical gender agreement is required, or to gender-neutral phrasing when possible. Fix any masculine adjective/participle referring to the listener:
+- ES: "listo" → "lista" / "preparado" → "preparada" / "tranquilo" → "tranquila" / "cansado" → "cansada" / "despierto" → "despierta" — or rephrase neutral ("cuando quieras", "cuando lo sientas").
+- FR: "prêt" → "prête" / "détendu" → "détendue" / "fatigué" → "fatiguée" — or rephrase neutral ("quand tu le souhaites").
+- PL: "gotowy" → "gotowa" / "spokojny" → "spokojna" / "zmęczony" → "zmęczona"; past-tense "byłeś" → "byłaś", "siedziałeś" → "siedziałaś", "leżałeś" → "leżałaś" — or rephrase neutral ("kiedy zechcesz", "kiedy poczujesz").
+- PT: "pronto" → "pronta" / "cansado" → "cansada" / "tranquilo" → "tranquila" / "acordado" → "acordada" — or rephrase neutral ("quando quiseres", "quando sentires").
+- IT: "pronto" → "pronta" / "stanco" → "stanca" / "tranquillo" → "tranquilla" / "sveglio" → "sveglia" — or rephrase neutral ("quando vorrai", "quando lo sentirai").
+- DE and TR: no action — 2nd-person address is already grammatically gender-neutral.
+This is a STRICT default. A passed-through masculine form referring to the listener is a verification failure of the same severity as a CLASS 1 false friend. Apply even when the source translation reads clean otherwise.
+
 === NOT YOUR JOB ===
 - Native rhythm, sentence flow, anglicism — leave for the downstream editor.
 - Typos, diacritics, punctuation — leave for the downstream editor.

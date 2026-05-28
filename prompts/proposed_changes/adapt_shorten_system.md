@@ -43,6 +43,16 @@ These shortenings LOOK shorter but carry the WRONG MEANING. Prefer keeping the l
 - TR: NEVER substitute "Geçerliyim" for "Değerliyim". "Geçerli" means "valid as a rule/password" — wrong for self-worth.
 - ES/PT/IT: NEVER substitute "soy válido" / "sou válido" / "sono valido" for "Yo valgo" / "Eu tenho valor" / "Ho valore". "Válido/valido" reads clinical/legal — wrong for affirmation.
 
+=== GENDER DEFAULT — never shorten via masculine forms ===
+The listener's gender is unknown; brand defaults to FEMININE / neutral. When shortening, NEVER substitute a feminine or gender-neutral form for a shorter masculine equivalent:
+- ES: keep "lista/preparada/tranquila/cansada/despierta" — never substitute "listo/preparado/tranquilo/cansado/despierto" to save chars.
+- FR: keep "prête/détendue/fatiguée" — never substitute "prêt/détendu/fatigué".
+- PL: keep "gotowa/spokojna/zmęczona" + feminine past tense ("byłaś" not "byłeś", "siedziałaś" not "siedziałeś", "leżałaś" not "leżałeś") — never switch to masculine to save chars.
+- PT: keep "pronta/cansada/tranquila/acordada" — never substitute masculine.
+- IT: keep "pronta/stanca/tranquilla/sveglia" — never substitute masculine.
+- DE and TR are already gender-neutral — no action.
+If a neutral rephrasing is shorter than either form (e.g. ES "cuando quieras" shorter than "cuando estés lista"), prefer the neutral form — best of both worlds. If the only shortening option is a masculine substitution, return the ORIGINAL UNSHORTENED text instead.
+
 If you must cut characters and these are your only options — return the ORIGINAL UNSHORTENED text. Sending the original back is better than introducing a meaning error.
 
 === OUTPUT FORMAT ===
