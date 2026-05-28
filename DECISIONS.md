@@ -4,6 +4,373 @@
 
 ---
 
+### 2026-05-28 — W_REGEN_DRIVE_DEDUPE_ON_SAVE
+
+Context: First W_Regen design called `Save Full to Drive` and `Save VTT to Drive` (cloned from W3) to upload regenerated full WAV / VTT files. The n8n googleDrive Upload node, by default, creates a NEW file every time — Google Drive does not auto-overwrite by name, so a folder accumulates duplicates: `sleep1_full_full_de.wav`, `sleep1_full_full_de (1).wav`, `sleep1_full_full_de (2).wav` and so on after each regen run.
+
+For W_Regen this is unacceptable: the whole point is to publish a fixed audio bundle to a known location. The content editor expects the canonical file at the canonical path. Duplicates also break any downstream consumer that picks "the file by name" (course platform, Slack share link, etc).
+
+The original DECISIONS 2026-05-10 DRIVE_OVERWRITE_NOT_SUPPORTED noted this gap and deferred the fix to "Week 4: auto Search → Delete → Upload". This entry lands that fix, scoped to W_Regen first.
+
+Decision: Insert a `Pre-Save Cleanup` Code node between each Build/Save pair in W_Regen. The Cleanup node uses Drive API directly via `httpRequestWithAuthentication` (with the `googleDriveOAuth2Api` credential) to:
+
+1. For each input item, infer target folder from file extension: `.wav` → `drive_output_full_folder_id`, `.vtt` → `drive_output_vtt_folder_id` (with fallback to `drive_output_folder_id` if the dedicated folder keys are missing).
+2. List Drive files with `name = '<file_name>'` in that parent folder (`trashed = false`).
+3. For each match: HTTP DELETE (hard delete, not trash) via `/drive/v3/files/{id}`.
+4. Pass input items through unchanged so the downstream Save node uses the original binary.
+
+Two instances added to W_Regen:
+- `Pre-Save Cleanup Full` between `Build Full Audio Per Lang` and `Save Full to Drive`.
+- `Pre-Save Cleanup VTT` between `Build VTT Per Lang` and `Save VTT to Drive`.
+
+Both reference the same `code_nodes/predelete_drive_files.js` source. The folder selection is based on the item's `file_name` extension, so one shared code path handles both. `executeOnce: true` mirrors the Build/Save nodes — fires once after all per-row updates.
+
+Per-segment WAVs (`{segment_id}_{lang}.wav` in `drive_output_folder_id`) are NOT affected by this change — they're already overwritten in place via Drive PATCH against `audio_drive_file_id` (no duplicate possible because the file_id is the address).
+
+Implementation notes:
+- The single-quote escape (`fileName.replace(/'/g, "\\'")`) in the Drive `q` query handles file names containing apostrophes (rare in lesson IDs but safe).
+- `supportsAllDrives=true` + `includeItemsFromAllDrives=true` cover both My Drive and shared drives.
+- `httpRequestWithAuthentication.call(this, 'googleDriveOAuth2Api', ...)` is the n8n Code-node helper for OAuth-credentialed HTTP calls; same credential type the Save nodes use, so no separate credential setup needed.
+
+Rationale: Drive API doesn't have native upsert-by-name. The two alternatives — storing file IDs in a sidecar sheet and PATCHing by ID, or building a conditional IF-create-else-update graph — both add either persistence layers or multiple new HTTP nodes per save. The search-delete-create approach in a single Code node is the smallest delta and lives entirely inside W_Regen.
+
+Trade-offs:
+- Brief window between Delete and Create where the file doesn't exist (~1-2s). A consumer hitting the folder at exactly that moment would see "file not found" temporarily. Acceptable for editor-driven manual regen; not a high-throughput service.
+- If `Save` fails after `Delete` succeeded, the file is lost until next regen. The downstream Save node has its own error surfacing in n8n; operator sees the failure and can re-run W_Regen. Original file content survives if it's referenced anywhere (e.g. cached in CDN); but the Drive copy is gone.
+- This change is W_Regen-only. W3 normal run still creates duplicates on re-run. Out of scope for this commit; can apply same pattern to W3's Save Full / Save VTT in a follow-up.
+- Hard delete (not trash). Operator can't recover from Drive Trash. Acceptable because the canonical content is being replaced immediately; if Save fails, operator just re-runs.
+
+Verification: re-run W_Regen twice on the same lesson with one row flagged each time. Expect (a) the Drive full/ and vtt/ folders contain exactly one file per (lesson_id, lang, file_type) — no `(1).wav` or `(2).vtt` duplicates, (b) console logs `Pre-Save Cleanup: deleted 1 existing files, 0 errors` on the second run (and `deleted 0` on the first if folder was empty), (c) the new file has a fresh `file_id` (because we deleted-and-created, not patched), (d) consumers reading by file name still find one canonical file.
+
+Rollback: remove the two Cleanup nodes from W_Regen, rewire Build → Save directly. The Cleanup is purely additive; removing it returns to the duplicate-creating behavior. Code file `code_nodes/predelete_drive_files.js` can stay (unused) or be deleted.
+
+---
+
+### 2026-05-28 — W_REGEN_MANUAL_CELL_REGENERATION
+
+Context: For production launch (28 videos/month, content editor as primary operator), there must be a low-friction way to fix individual cells without re-running the full W_Master → W2 → W3 pipeline (which takes ~15-25 minutes per lesson and costs ~$6 in API calls). Pre-launch the only "fix" was: edit the text in the segments tab and re-run W_Master end-to-end. For a content editor reviewing ~280 cells per lesson and finding maybe 3-10 to fix, that's prohibitively expensive in both time and money.
+
+User explicitly asked for a manual-trigger workflow where editor selects what to regen via sheet flags then clicks a button to execute. Also asked about adding "comments" to influence the regeneration. Decision below splits the editor flow into MVP (ships now) and v2 (LLM-driven rewrite from comments, defers).
+
+Decision: Build a new standalone workflow `W_Regen — Manual cell regeneration` with the following shape:
+
+**Schema additions to `localizations` sheet** (operator must add columns before first use):
+- `needs_retts` (TRUE/FALSE) — editor's regen flag.
+- `regen_comment` (text) — editor's note. Audit-only in MVP; not consumed by pipeline.
+- `last_regen_at` (ISO timestamp) — bookkeeping, set by W_Regen.
+
+**Editor flow:**
+1. Open localizations sheet, find row(s) to fix.
+2. Edit `text_translated` (and any other content fields).
+3. Set `needs_retts=TRUE`. Optionally add `regen_comment`.
+4. Open W_Regen in n8n, click **Execute Workflow**.
+
+**Workflow architecture (15 nodes):**
+
+```
+Manual Trigger
+ → Read Config → Read Voices → Read Localizations Initial
+ → Get Params (Code: resolves single lesson_id from flagged rows, errors if multi-lesson, prepends sentinel item with lesson_id for Build Full/VTT)
+ → Regen Engine (Code: filters needs_retts=TRUE, per-row ElevenLabs TTS, Phase 1-style timing — speed-up retry on overshoot + slowdown-to-fill on residual silence — bounded parallel via `regen_concurrency` config)
+ → Has Audio? IF
+   ├── [true]  → Drive PATCH (overwrite per audio_drive_file_id) → Merge Branches
+   └── [false] → Merge Branches
+ → Update Localizations Row (Sheets appendOrUpdate by row_key; writes new metrics, clears needs_retts, sets last_regen_at, preserves regen_comment for audit)
+ → Read Localizations Fresh (executeOnce — single re-read after all updates)
+ → Build Full Audio Per Lang (cloned from W3, executeOnce, reads lesson_id via Get Params sentinel) → Save Full to Drive
+ → Build VTT Per Lang (cloned, executeOnce) → Save VTT to Drive
+```
+
+**Key design choices:**
+
+1. **Manual trigger, not polling.** User explicitly chose this — editor controls when regen fires. Operationally simpler than polling cron + scheduler maintenance, and instant feedback on errors (operator sees error in n8n UI immediately).
+
+2. **Single-lesson constraint per run.** Get Params throws if flagged rows span multiple lessons. Build Full and VTT need a single `lesson_id` to filter what to concatenate. If editor needs cross-lesson regen, run W_Regen separately per lesson. Acceptable MVP trade-off; covers 95% of expected use (editor reviews one lesson at a time).
+
+3. **Get Params sentinel pattern.** Existing W3 code (Build Full / Build VTT) reads `$('Get Params').first().json.lesson_id`. Rather than rewriting that code, W_Regen's Get Params prepends a synthetic item carrying `lesson_id` so the W3 read pattern works unchanged. Other downstream nodes see the sentinel as a regular item but filter it out (no `needs_retts`).
+
+4. **Inline Drive PATCH (per-item HTTP), not Loop+Update batch.** Each flagged cell's audio_drive_file_id flows through Drive PATCH HTTP node, which iterates items by default. Same pattern as Phase 2's Drive Update. Sequential (n8n default for HTTP nodes) at ~1-2 calls/sec — fine for 5-10 cells per run.
+
+5. **Auto rebuild Full Audio + VTT after regen.** `executeOnce: true` on Read Localizations Fresh + Build Full + Save Full + Build VTT + Save VTT ensures these fire ONCE after all per-row Updates complete (not once per item). Operator gets fully-rebuilt lesson audio + VTT in one click.
+
+6. **Phase 1-style timing in Regen Engine.** Mirrors `check_timing_and_pad.js` synth logic: initial TTS at voice.speed, speed-up retry `[+Δ⅔, +Δ]` if overshoot, slowdown-to-fill toward `voice.speed - max_slow_down_delta` if remaining silence > `slowdown_min_gap_sec`. Targets `phase1_final_duration` as exact slot length so the rebuilt full WAV stays EN-aligned across all langs.
+
+7. **`needs_attention` re-evaluated on regen.** If regen output is `ratio < 0.70` of `en_duration`, flag is re-raised. Editor can then re-edit + re-flag if needed. Mirrors Phase 2 acceptance threshold.
+
+8. **`regen_comment` deferred.** User wanted "comment" mechanism to influence regeneration. MVP saves it for audit (visible in sheet) but doesn't process. Three reasons: (a) 90% of editor fixes are direct text edits (add "...", fix typo, change word, fix gender) — no LLM needed; (b) LLM-rewrite from comment is a substantial feature that needs its own prompt + testing; (c) shipping MVP without it now is better than blocking on comment-rewrite. V2 can add an LLM "Apply Comment" stage between Get Params and Regen Engine.
+
+**New code files:**
+- `code_nodes/regen_synthesize.js` — Regen Engine logic (TTS + pad + WAV build per row, with bounded parallelism via `regen_concurrency` config, default 5).
+
+**Reused code (cloned from W3):**
+- Read Config / Read Voices / Read Localizations Fresh — Sheets read configs.
+- Phase 2: Drive Update → Drive PATCH (URL template uses `$json.audio_drive_file_id`).
+- Phase 2: Update Localizations → Update Localizations Row (column mapping rewritten to use `$json.X` instead of `$('Phase 2: Batch LLM+TTS').item.json.X`; added new columns `needs_retts`, `last_regen_at`, `regen_comment`).
+- Build Full Audio Per Lang + Save Full to Drive — concat + upload.
+- Build VTT Per Lang + Save VTT to Drive — subtitles + upload.
+
+**New config key (optional):**
+- `regen_concurrency` (default 5) — bounded parallelism for per-row TTS calls in Regen Engine. Tune up on Scale tier, down for throttling.
+
+**Cost per regen run:**
+- ElevenLabs: N × (1-3 TTS calls per cell, depending on speed-up retries) — ~$0.01-0.05 per cell.
+- Sheets: ~3-4 API calls per cell + 2 full reads.
+- Drive: 1 PATCH per cell + 2× saves (full WAV + VTT).
+- Total: ~$0.05-0.20 per regen of 5 cells. Negligible.
+
+**Wall-clock per regen run** (10 cells in a 47-segment lesson):
+- TTS: ~10 cells × ~3-5s with speed-up = ~30-50s (parallelized at concurrency=5).
+- Drive PATCH: ~10 × ~1s = ~10s.
+- Sheet updates: ~10 × ~0.5s = ~5s.
+- Full rebuild: ~30-60s (concat + VTT + Drive uploads).
+- Total: ~75-130s, well under 300s task-runner limit.
+
+Trade-offs:
+- Single-lesson constraint adds friction for multi-lesson cross-fixes (rare; documented).
+- `regen_comment` deferred means editor can't use natural-language instructions for now — must directly edit text. Acceptable workaround documented.
+- W_Regen workflow JSON is 15 nodes — added to repo as `workflows/W_Regen.json`. Operator must import once.
+- Operator must add 3 new columns (`needs_retts`, `regen_comment`, `last_regen_at`) to the live localizations sheet before first use — one-time setup, documented in `docs/sheets_schema.md`.
+
+Verification: dry-run by setting `needs_retts=TRUE` on one row in a test lesson, click Execute on W_Regen. Expect: (a) the row's Drive WAV gets overwritten in place (same file ID, new content), (b) row's `real_duration_sec` / `tail_silence_sec` / `final_speed` updated, (c) `needs_retts` cleared, (d) `last_regen_at` populated, (e) `{lesson_id}_full_{lang}.wav` and `.vtt` files in Drive's full folder rebuilt with the regenerated cell.
+
+Rollback: delete `workflows/W_Regen.json` and the 3 new sheet columns. The rest of the pipeline (W1 / W2 / W3 / W_Master) is unchanged — W_Regen is purely additive.
+
+---
+
+### 2026-05-28 — W3_PHASE2_FALSE_FRIEND_LINT
+
+Context: After the LLM_REFUSAL_DETECTION fix shipped, the sleep1_full run's `seg_019_es` showed another class of cross-cell contamination that LLM-level safeguards (`LANGUAGE ISOLATION` section in expand prompts, Verify CLASS 1 false-friend rules, Editor CLASS A anglicism) had failed to catch:
+
+> "...sino porque es essencial. Recuerda lo primeiro que te dicen cuando estás ansiosa..."
+
+- "essencial" is the **Portuguese** spelling (double-s) of "essential"; Spanish uses "esencial" (single-s).
+- "primeiro" is the **Portuguese** word for "first"; Spanish uses "primero".
+
+Both leaked from the PT cell of the same segment in Opus's batched JSON output. The defenses in place — `LANGUAGE ISOLATION` block in `w3_expand_batch_system` warning Opus not to bleed Romance spellings, plus Verify's CLASS 1 false-friend check on Sonnet — are prompt-based and probabilistically miss one-cell-per-batch slips, exactly the failure shape the project's DECISIONS log has documented before (R6.c, PHASE2_TUNING_POSTRETRY, formality_lint introduction).
+
+The pattern from Formality Lint (2026-05-27) applies here directly: deterministic regex detector + targeted LLM fix, run at the synthesis gate. 100% recall on listed markers; false-positives are harmless because the fix prompt returns text unchanged when already clean.
+
+Decision: Add a `False-Friend Lint` deterministic pass in `phase2_batch_llm_tts.js`, called from `runReTtsTasks` BEFORE `fixFormalityInTasks` (so formality detector sees post-fix text). Three new components:
+
+1. **`FALSE_FRIEND_PATTERNS`** — per-target-language regex arrays focused on Romance cross-contamination (ES, PT, IT, FR). Patterns chosen for HIGH PRECISION — they never match valid target-language text:
+   - **ES** (Spanish): `[ãõ]` (PT diacritics), `\bessenc` (PT "essencial"), `\bprimeir[oa]\b` (PT word), `\bnecessári[oa]\b` (PT spelling), `\bmissão\b`, `\banche\b` (IT), `\bmolto\b` (IT).
+   - **PT** (Portuguese): `[ñ]` (ES letter), `\besencial\b`, `\bprimer[oa]\b`, `\bnecesari[oa]\b`.
+   - **IT** (Italian): `[ãõçñ]` (PT/ES/FR diacritics), `\bessenc` (IT uses essenz-), `\bprimer[oa]\b`, `\bmuy\b`, `\bahora\b`.
+   - **FR** (French): `[ñãõ]`, `\bnecessary\b` (EN), `\besenci`.
+   - DE/PL/TR: distance from Romance large enough that cross-leak is rare. Empty for now; add patterns if observed.
+
+2. **`hasFalseFriend(lang, text)`** — single-match-any boolean. Used by the lint loop to mark cells for fix.
+
+3. **`fixFalseFriendsInTasks(tasks)`** — mirrors `fixFormalityInTasks` exactly: collects flagged cells per (sid, lang), sends them in one batched Anthropic call (`claude-sonnet-4-6`, cached system prompt), applies returned corrections in place on task.newText. Logs flagged count per lang + applied fix count + stillContaminated count (cells where fix didn't clear the marker, for follow-up).
+
+4. **`false_friend_fix_system`** prompt — optional Sheets row, with built-in default. Default lists common contaminations per direction (PT→ES, ES→PT, ES/PT→IT, EN/ES→FR) and explicit substitution rules. Returns text UNCHANGED when target lang is already clean — so over-flagging is harmless.
+
+Integration in `runReTtsTasks`: `fixFalseFriendsInTasks` runs FIRST (cross-lang first), then `fixFormalityInTasks` (formality second, sees post-fix text). Both run before any re-TTS call, so the audio synthesized always reflects post-fix text.
+
+Test coverage (synthetic + real, 9/9 pass):
+- ✓ Real seg_019_es ("essencial" + "primeiro") → detected
+- ✓ Normal ES translation → not flagged
+- ✓ Normal PT translation (with proper ã/õ) → not flagged
+- ✓ PT contamination with ñ → detected
+- ✓ IT contamination with "essenc" → detected
+- ✓ Normal IT ("essenziale") → not flagged
+- ✓ IT contamination with "ahora" → detected
+- ✓ Normal FR ("essentiel") → not flagged
+- ✓ ES with PT proper noun "João" → detected (edge case; could whitelist if needed for proper nouns)
+
+Rationale: The false-friend leak class is exactly what Formality Lint already addresses for formal-address creep — same architectural pattern (deterministic detector + targeted LLM fix) is reused here. The two lints together cover ~all known categorical leaks in Phase 2 output before re-TTS.
+
+Trade-offs:
+- +1 batched Anthropic call per Phase 2 iteration when at least one cell is flagged (rare). Cost negligible. Cached system prompt → ~$0.001-$0.005 per fix-call.
+- Proper-noun edge case: a PT name like "João" appearing inside an ES translation triggers the `[ãõ]` pattern. The LLM fix prompt is smart enough to keep proper nouns (it's instructed to preserve meaning/length), but if observed false-positive correction, can whitelist via a "do not change inside quoted spans" rule in the prompt.
+- DE/PL/TR are not currently covered. Romance contamination of DE/PL/TR is structurally unlikely (different alphabets/grammar), but if observed in production, add per-lang pattern lists.
+- Some legitimate cross-lang technical terms (e.g. Sanskrit "prana" — appears in DE/ES/PT/IT/FR alike) are NOT in the pattern lists, so unaffected.
+
+Verification: re-run sleep1_full lesson. Expect (a) seg_019_es text rewritten to "esencial"/"primero" — observe in localizations sheet, (b) console logs `Phase 2 false-friend: 1 flagged cells, fixing before re-TTS {"es":1}` followed by `applied 1 fixes`, (c) no new false-positive corrections on the other ~570 cells, (d) `phase2_outcome=accepted` for the affected cell with the corrected text.
+
+Rollback: revert this commit. Lint is non-invasive — removing it returns to pre-fix behavior. Patterns and fix prompt are self-contained in the Phase 2 node; no other workflow nodes depend on it.
+
+---
+
+### 2026-05-28 — W3_PHASE2_LLM_REFUSAL_DETECTION
+
+Context: First full sleep1_full lesson run on the patched W3 stack (Opus 4.7 on Phase 2 Expand + diff-first + diversity + gender prompts + SplitInBatches loop) surfaced a critical production failure: `seg_020_fr` shipped with `text_translated` set to an English meta/refusal message:
+
+> "You're absolutely right to flag this. I cannot complete this task as written because the "CURRENT TRANSLATION" input doesn't correspond to the "ORIGINAL EN TEXT" at all."
+
+Opus 4.7 detected what it considered a mismatch between EN source and the `current` French translation, and instead of doing the requested expansion it "broke character" and emitted English refusal text. This text passed through `Verify` (Sonnet 4.6) and `Editor` (Gemini Flash) unchanged — both prompts target language-quality and semantic correction, not LLM-meta detection — and reached `reTtsOne`, which synthesized it via ElevenLabs. The resulting audio is English refusal text spoken in a French voice, shipped to production Drive.
+
+For a content editor doing minimal-effort review (the production launch operator model), this slip would be hard to catch from sheet skim alone: the row has `phase2_outcome=accepted`, no `needs_attention` flag, `final_speed` looks normal. Only a deep text-level audit catches it.
+
+Decision: Add deterministic refusal detection in `phase2_batch_llm_tts.js`, applied right before each re-TTS task batch is built (both attempt 1 and the retry path). Output text matching English refusal/meta patterns is rejected; the cell falls back to Phase 1 audio.
+
+Implementation:
+
+1. **`REFUSAL_PATTERNS` array** — 9 high-precision regexes covering common LLM refusal/meta phrasings:
+   - `\bI (?:cannot|can'?t|am unable to|will not|won'?t|need to|have to|should not|shouldn'?t)\b`
+   - `\bYou(?:'re| are)\s+(?:absolutely\s+)?right\b`
+   - `^Note:\s` (multiline, catches `Note:` preambles)
+   - `\b(?:input|task|translation|output|CURRENT|ORIGINAL EN|prompt)\b[^.\n]*\b(?:doesn'?t|does not|cannot|can'?t|won'?t)\b`
+   - `\bI(?:'ll| will)\s+(?:need|have)\s+to\b`
+   - `\bSorry,?\s`
+   - `\bAs an AI\b`
+   - `\bI apologize\b`
+   - `\bThis (?:translation|text|input|task) (?:doesn'?t|does not|is not|isn'?t)\b`
+
+2. **`looksLikeRefusal(text)` function** — early-returns false for short text (<20 chars), else returns true on any pattern match. Single-match sufficient (chose high precision; observed real-world refusal matched 3+ patterns).
+
+3. **Attempt 1 integration** — in the `reTts1Tasks` build loop, after `final1TextMap[sid][lang]` is constructed (post-Verify + post-Editor), check `looksLikeRefusal(newText)`. If true: push synthetic outcome `{ sid, lang, outcome: 'llm_refusal' }` to `droppedResults1`, log to console, store sample (up to 5) in `phase2Diag.refusalsAttempt1`. The cell is excluded from re-TTS; `pickFinal` will fall through to attempt 2 (if accepted) or Phase 1 audio.
+
+4. **Retry integration** — in `runRetryGroup`'s `reTtsRetryTasks` build loop, same check. If retry text is a refusal: don't add to retry tasks, don't record attempt 2 (so attempt 1 stands if it was accepted). Log + sample tracked in `phase2Diag.refusalsRetry`.
+
+5. **No retry of refusal cells from attempt 1** — refused attempt 1 outcomes are NOT pushed into `harderTasks` (the retry classifier only pulls `no_change`, `still_short`, `overshoot`). Intentional: if Opus refused once, retry-harder is unlikely to succeed on the same input. Phase 1 audio fallback is the safe answer.
+
+6. **Diagnostics** — `phase2Diag.refusalsAttempt1` and `phase2Diag.refusalsRetry` arrays capture up to 5 samples each (sid, lang, first 200 chars of refusal). Surfaced on first emitted item's `json.phase2_diag`.
+
+Test coverage (synthetic + real samples, 8/8 pass):
+- ✓ Real seg_020_fr refusal text → detected (true)
+- ✓ Normal FR, ES, DE translations → not flagged (false)
+- ✓ Short IT phrase ("Sì.") → not flagged (length guard)
+- ✓ ES translation containing 'no puedo' → not flagged (Spanish phrase, not English refusal)
+- ✓ Apologize variant → detected
+- ✓ `Note:` meta → detected
+
+Rationale: Refusal-output detection is one of the few classes of LLM failure that's hard for content editors to catch from a sheet skim — the row looks "accepted", text is grammatically clean (just in the wrong language), and the failure manifests only in the audio. A deterministic regex check at the synthesis gate is the right safety net: it converts a silent quality failure into a visible `phase2_outcome=llm_refusal` flag + Phase 1 audio fallback. Phase 1 audio for these cells contains the W2 translation (not Opus), which by construction doesn't refuse.
+
+Trade-offs:
+- False positives: rare but possible. A legitimate translation containing English quoted speech could trigger. In meditation/wellness content, English quotes are virtually never in target translations, so risk is low. If observed, extend `looksLikeRefusal` to require quote-context absence.
+- False negatives: if Opus refuses in target language, English-only patterns miss. Empirically Opus refuses in English even when target is non-English. If observed, extend with per-lang refusal phrasing.
+- Refusal cells lose Phase 2 improvement (restoration, ToV decoration, gender fix). Phase 1 W2 translation kept instead. Acceptable — Phase 1 text is content-correct, just shorter.
+
+Verification: re-run sleep1_full. Expect (a) seg_020_fr (and similar) emit with `phase2_outcome=llm_refusal`, `text_translated` reverted to Phase 1 W2 translation, (b) audio in Drive unchanged from Phase 1, (c) console logs `Phase 2 attempt 1: LLM refusal detected for X_Y`, (d) `phase2_diag.refusalsAttempt1` lists samples, (e) zero new false-positive refusals on rest of lesson's cells.
+
+Rollback: revert this commit. Detection is non-invasive — removing it returns to pre-fix behavior.
+
+---
+
+### 2026-05-28 — W2_ACTIVE_LANGS_GATE
+
+Context: `active_langs` historically gated only W3 — translation/QA/editor/adapt always ran on all 7 langs regardless. Single-lang dry-runs (e.g. test a new ToV with just `de`) still paid the full Claude/Gemini bill (~$0.05–0.10 per lesson on W2 alone). The cost is dominated by output tokens on Translate + input+output on Verify/Editor/Adapt, all of which scale linearly with lang count.
+
+Decision: Push the `active_langs` filter into every W2 stage. Implementation:
+
+- **Prepare and Expand** — reads `configMap.active_langs`; when restricted, prepends a per-batch user-content instruction (`"IMPORTANT: For this batch, output translations ONLY for these language codes: de"`) so Claude emits only the requested lang keys. System prompt (in the `prompts` sheet) is untouched — user-level override is sufficient and avoids prompts-sheet edits. Also emits `active_langs` on each batch item for downstream debugging.
+- **Extract Translations** — `REQUIRED_LANGS` narrows to active set; output items carry `*_text` only for active langs. Inactive lang columns in `segments` are preserved because `Update Sheet` uses `autoMapInputData` (writes only columns present in items, never blanks absent ones).
+- **Verify Translations / Gemini Editor / OpenAI Editor / Adapt Translations / Formality Lint** — all narrow their `LANGS` array via the same `(configMap.active_langs || '').trim().split(',').filter(l => ALL_LANGS.includes(l))` snippet; `userMap` builds and iteration loops only include active langs.
+
+Failure mode: empty/invalid `active_langs` after filter (e.g. `active_langs=xx`) → each node throws fast with "active_langs filter produced empty lang list — check config" rather than silently translating to zero langs.
+
+Cost impact (single-lang dry-run, `active_langs=de`):
+- W2 Claude Translate output tokens: −85% (one lang in output instead of seven)
+- W2 Verify + Gemini Editor input+output: −85% (six langs not sent in userMap)
+- W2 Adapt: −85% wall-clock + Claude calls (six langs of cells never enter the task list)
+- W2 Formality Lint: −85% scan surface
+- W3 TTS: −85% (gate already existed)
+- Estimated total per lesson: ~$0.02–0.04 instead of ~$0.10–0.25
+
+Sync tooling: `scripts/sync_w2_jscode.js` mirrors `code_nodes/*.js` → corresponding `parameters.jsCode` strings in `workflows/W2_Translate_v2.json`. Idempotent. Verify Translations lives only inline in the workflow JSON (no reference file under `code_nodes/`); its `jsCode` was patched directly.
+
+Re-run cost: re-running W2 with a wider `active_langs` later does NOT re-translate already-populated lang columns — Read Pending Segments filters on `status`/translation completeness. To regenerate a specific lang, clear that cell in the segments sheet first.
+
+---
+
+### 2026-05-28 — W3_PHASE2_SPLIT_IN_BATCHES
+
+Context: Immediately after `W2_ADAPT_SPLIT_IN_BATCHES` shipped, the same 300s task-runner timeout hit `Phase 2: Batch LLM+TTS` on the 82-segment lesson. Phase 2 is significantly more work-dense than W2 Adapt:
+
+- LLM stages: Expand (Opus 4.7, ~3x slower than Sonnet) → Verify (Sonnet) → Editor (Gemini) — each parallelized via `CHUNK=6`, ~30-60s total
+- Re-TTS: every accepted candidate gets a base TTS call + optional speed-up retry (1-2 extra calls if overshoot) + optional slowdown retry (1 extra if silence remains). For 100 accepted cells = ~150-300 ElevenLabs calls.
+- Retry pass (attempt 2): full pipeline again on a subset (still_short, overshoot, no_change cells).
+
+Wall-clock for 82-segment lesson: estimated ~250-400s including Opus latency + speed-up TTS explosions. Hit ceiling.
+
+Same architectural answer as W2 Adapt: wrap in `SplitInBatches` so each iteration runs under 300s. But Phase 2 has more downstream complexity — its emit fans through `Has Binary?` → `Drive Update`/direct → `Merge Branches` → `Update Localizations`, which is then read by `Download Segment WAV` + `Build VTT Per Lang`.
+
+Decision: Wrap the entire Phase 2 chain (Batch LLM+TTS → Has Binary? → Drive Update → Merge → Update Localizations) in a `SplitInBatches` loop, with sheet roundtrip to persist state across iterations. Two new W3 nodes:
+
+1. **`Loop Phase 2`** (`n8n-nodes-base.splitInBatches` v3, batchSize=105) — placed between `Read Localizations Fresh` and `Phase 2: Batch LLM+TTS`. batchSize=105 because Phase 2 input is per-row (segment×lang), and 15 segments × 7 langs = 105 rows fits the "~15 segments per batch" target that worked for W2. Each iteration runs the full attempt-1 + attempt-2 + emit chain.
+
+2. **`Read Localizations Fresh 2`** — cloned config from existing `Read Localizations Fresh`. Reads the localizations tab AFTER all Phase 2 iterations complete, giving Download + Build VTT the fully-updated row set (all 574 rows with their post-Phase-2 audio_drive_file_id, phase2_outcome, text_translated, etc).
+
+Wiring change:
+- `Read Localizations Fresh` → `Loop Phase 2` (was: → Phase 2 directly)
+- `Loop Phase 2[output 1, body]` → `Phase 2: Batch LLM+TTS` → Has Binary? → Drive Update → Merge → `Phase 2: Update Localizations` → `Loop Phase 2` (loop-back)
+- `Loop Phase 2[output 0, done]` → `Read Localizations Fresh 2` → `Download Segment WAV` + `Build VTT Per Lang` (parallel fan-out, was directly from Phase 2: Update Localizations)
+
+Wiring NOT changed:
+- Has Binary? / Drive Update / Merge Branches / Update Localizations connection topology — they all stay in the loop body.
+- Update Localizations explicit field mappings using `$('Phase 2: Batch LLM+TTS').item.json.X` — pairedItem chain is preserved within each iteration.
+
+Code change to `phase2_batch_llm_tts.js`: **none**. Same as W2 Adapt — it reads `$input.all()` and emits per row, works on any batch size. The `passthrough` emit logic correctly handles partial input (each batch's non-candidates are emitted as passthrough; across all iterations, the full 574-row set still reaches Update Localizations and via sheet roundtrip).
+
+Math: 15 segments × 7 langs = 105 rows per batch. Typical candidates per batch: ~30 cells. Per-batch wall-clock:
+- LLM (Expand Opus + Verify Sonnet + Editor Gemini, CHUNK=6 parallel): ~30-60s
+- Re-TTS attempt 1 (~30 cells × avg 6s with speed-up/slowdown, ELEVENLABS_CHUNK=5 parallel): ~40-80s
+- Retry pass (~5-10 cells subset): ~20-40s
+- Sheet write (Update Localizations appendOrUpdate, ~105 rows): ~5-10s
+- Per-batch total: ~95-190s. Comfortable buffer under 300s.
+
+For an 82-segment lesson (6 batches): ~10-19 min total Phase 2 wall-clock. For 90-seg lesson (6 batches): ~12-20 min. Same scaling as pre-fix but without ceiling risk.
+
+Rationale: Mirrors the W2 Adapt fix one-for-one and matches W3 Phase 1's existing `Loop Over Items` pattern. The sheet roundtrip at the end is identical to what Read Localizations Fresh already does upstream — symmetry. The decision to use TWO separate reads (original + 2) instead of re-firing the first is for explicit dataflow: Read Loc Fresh kicks off Phase 2, Read Loc Fresh 2 confirms post-Phase-2 state for downstream concat.
+
+Trade-offs:
+- Sequential outer batches (n8n SplitInBatches default): we lose intra-Phase-2 parallelism that previously ran all batches in one Code-node execution with `CHUNK=6` parallel. Wall-clock total is similar (sum of sequential batches ≈ original parallel-then-serial work) but without the ceiling risk.
+- +1 sheet read per lesson (Read Loc Fresh 2 instead of zero). Minimal cost.
+- Sheet writes happen per outer batch instead of all-at-once. Operator watching the sheet live sees incremental progress — actually a UX improvement.
+- More nodes on canvas (27 → 27, technically +2 since we removed nothing). Slightly busier visual but correct.
+
+Verification: re-run the failing 82-segment lesson on the patched W3 workflow. Expect (a) Phase 2 no longer times out, (b) each `Loop Phase 2` iteration <200s wall-clock, (c) total W3 wall-clock approximately matches pre-fix expectation, (d) localizations sheet's final state identical (Phase 2 output by row_key is the same content per cell, just persisted in N writes instead of one), (e) full audio + VTT output match the per-segment Drive files.
+
+Rollback: revert this workflow JSON commit. The `phase2_batch_llm_tts.js` code is unchanged. Re-import original W3 JSON restores pre-loop topology.
+
+---
+
+### 2026-05-28 — W2_ADAPT_SPLIT_IN_BATCHES
+
+Context: W2 Adapt Translations hit n8n's hardcoded 300s task-runner timeout twice on a real 82-segment lesson, and again on a 47-segment lesson after `w2_adapt_concurrency` was bumped from 8 to 20. The 2026-05-27 W2_PARALLELIZATION work (global task-pool with bounded `Promise.all`) was supposed to keep wall-clock under 300s by scaling with `over_budget_cells / concurrency`, but two compounding factors broke that assumption:
+
+1. **Prompt growth**: `adapt_shorten_system` grew with the 2026-05-28 GENDER NEUTRALITY block (~+15% chars). Per-call Claude latency ticked up.
+2. **Wave-synchronization inefficiency in current code**: `for (i; i < tasks.length; i += CONC) { await Promise.all(slice.map(...)) }` waits for the SLOWEST task in each wave before starting the next. One pathological cell with 3 attempts + Anthropic 429 backoff (2s+4s+8s) can stretch a wave to 25-30s, multiplied across 8-10 waves → over 300s.
+
+The 300s ceiling is hardcoded by n8n's task runner — no concurrency knob inside a single Code node can guarantee staying under it as inputs grow. The architectural answer is to split work across multiple Code-node executions via n8n's native `SplitInBatches` loop pattern, mirroring W3 Phase 1's `Loop Over Items` setup.
+
+Decision: Wrap `Adapt Translations` in a `SplitInBatches` loop (`Loop Adapt`, batchSize=15) with intermediate sheet persistence so processed text accumulates across iterations. Three new W2 nodes:
+
+1. **`Loop Adapt`** (`n8n-nodes-base.splitInBatches` v3, batchSize=15) — placed between `Gemini Editor` and `Adapt Translations`. Splits the editor's output into batches of 15 segments. Each iteration runs the loop body; when input is exhausted, fires `done` output.
+
+2. **`Save Adapt Batch`** (Google Sheets `appendOrUpdate` on segments tab by `segment_id`) — cloned config from existing `Update Sheet`. Persists each iteration's Adapt output to the segments tab so the post-Adapt `{lang}_text` survives across Code-node executions. Idempotent.
+
+3. **`Read Segments Fresh`** (Google Sheets read on segments tab) — cloned config from `Read Pending Segments`. Re-reads the segments tab after the loop completes, giving Formality Lint the post-Adapt text (not the original pre-Adapt input that `SplitInBatches.done` would emit by default).
+
+Wiring:
+- `Gemini Editor` → `Loop Adapt`
+- `Loop Adapt[output 1, body]` → `Adapt Translations` → `Save Adapt Batch` → `Loop Adapt` (loop-back to main input)
+- `Loop Adapt[output 0, done]` → `Read Segments Fresh` → `Formality Lint` → `Update Sheet` (terminal, existing)
+
+Existing `Formality Lint` → `Update Sheet` connection preserved.
+
+Math: 15 segments × 7 langs = 105 cells max per batch. Even worst case (100% over-budget × 3 attempts × 4s = 1260 call-seconds), with `w2_adapt_concurrency=20` and the current `for + Promise.all` pattern: 1260 / 20 ≈ 63s per batch. 4x headroom under 300s. For a 90-segment lesson: 6 batches × 60s = ~6 min total wall-clock — same scaling as pre-fix but with no ceiling risk.
+
+Code change to `adapt_translations.js`: **none**. The existing implementation reads `$input.all()` and emits `outputs.map(json => ({ json }))` — works on whatever slice it receives.
+
+Rationale: `SplitInBatches` is the n8n-idiomatic pattern for scaling Code-node work past 300s, already used in W3 Phase 1's TTS loop. The sheet round-trip mirrors W3's `Update Localizations` → `Read Localizations Fresh` pattern (DECISIONS 2026-05-25 PHASE2_BATCHED_EXPANSION inception). Compared to alternatives:
+- **Worker-pool refactor in code**: improves wave-sync efficiency but still subject to 300s ceiling on pathological inputs.
+- **Higher concurrency**: helps up to a point, doesn't solve the architectural ceiling.
+- **External service**: over-engineered.
+
+Trade-offs:
+- +2 sheet writes per lesson (intermediate Save Adapt Batch fires N/15 times). Each is `appendOrUpdate` batched into few API calls. Acceptable cost.
+- Slight wall-clock overhead for the loop-back signal in n8n (~100-200ms per iteration). Negligible.
+- `Save Adapt Batch` writes adaptation_attempts and {lang}_text incrementally — visible in segments tab mid-run if operator watches. Cosmetic, idempotent.
+- `Read Segments Fresh` filter inherits from `Read Pending Segments` clone — reads the same scope. If pending-filter excludes already-adapted rows, Formality Lint would see partial set. **Verify**: confirm Read Pending Segments returns the same set as Read Segments Fresh on a re-read, otherwise adjust filter to fetch the lesson's full segment set.
+
+Verification: re-run the failing lesson (82 segments) with the patched workflow. Expect (a) Adapt no longer times out, each batch <70s wall-clock, (b) total W2 wall-clock similar to expected (~5-8 min for 82-segment lesson), (c) `localizations`-tab output unchanged in content (Adapt's per-cell processing is identical, just chunked execution), (d) Formality Lint receives post-Adapt text correctly.
+
+Rollback: revert this workflow JSON commit. The `adapt_translations.js` was not modified, so no code revert needed. The intermediate `Save Adapt Batch` writes are idempotent and don't pollute the sheet if reverted.
+
+---
+
 ### 2026-05-28 — MODEL_UPGRADE_SONNET_4_6_AND_OPUS_ON_PHASE2
 
 Context: After the multi-day refactor stabilized — diff-first restoration, no-invention rule, batch-level diversity, gender-neutral defaults, speed-up branch — pipeline reasoning load is now concentrated on the Phase 2 Expand prompts. Those prompts carry the most complex multi-step instructions in the codebase: EN-vs-current diff analysis, conditional restoration vs decoration, intra-batch ToV diversity tracking, per-language gender enforcement. Sonnet 4.5 was the original model when most of those features were added one at a time; instruction-following on the now-stacked rule set is at Sonnet 4.5's ceiling. User confirmed appetite for selective upgrade after cost discussion (~+$3/lesson tradeoff for Phase 2-only Opus).

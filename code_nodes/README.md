@@ -2,7 +2,7 @@
 
 Reference copies of JavaScript bodies that live inside n8n **Code** nodes. The authoritative source is the `jsCode` field inside each workflow JSON — these `.js` files mirror that code so it's diff-friendly in PRs and readable in editors with JS support.
 
-If you change a Code node in n8n, sync the corresponding file here (and vice versa).
+If you change a Code node in n8n, sync the corresponding file here (and vice versa). For W2, `scripts/sync_w2_jscode.js` does the file → workflow direction automatically (run after editing any `code_nodes/*.js` file listed in its `NODE_FILE_MAP`).
 
 | File | Lives in workflow | Node name | Purpose |
 |---|---|---|---|

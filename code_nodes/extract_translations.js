@@ -4,7 +4,20 @@
 // R3.a: dropped segments (translator silently missed them) cause a hard throw
 // at end of processing with full segment_id list. This is the defense against
 // the silent-drop bug class that bit us on test4_seg_002. Re-run W2 to recover.
-const REQUIRED_LANGS = ['de', 'es', 'fr', 'pl', 'pt', 'it', 'tr'];
+//
+// active_langs gate: when set, REQUIRED_LANGS narrows to that subset so partial
+// translator output is not flagged as "dropped" for inactive langs, and emitted
+// items only carry *_text for active langs (autoMapInputData on Update Sheet
+// then leaves inactive lang columns untouched in the segments sheet).
+const ALL_LANGS = ['de', 'es', 'fr', 'pl', 'pt', 'it', 'tr'];
+const configMap = {};
+$('Read Config').all().forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });
+const activeRaw = (configMap.active_langs || '').trim();
+const REQUIRED_LANGS = activeRaw
+  ? activeRaw.split(',').map(s => s.trim().toLowerCase()).filter(l => ALL_LANGS.includes(l))
+  : ALL_LANGS.slice();
+if (REQUIRED_LANGS.length === 0) throw new Error('active_langs filter produced empty lang list — check config');
+
 const preparedItems = $('Prepare and Expand').all();
 const claudeItems = $input.all();
 const results = [];
@@ -39,18 +52,13 @@ for (let i = 0; i < claudeItems.length; i++) {
       console.warn(`Extract Translations: ${seg.segment_id} missing langs: ${missing.join(',')}`);
       partial.push({ segment_id: seg.segment_id, missing });
     }
-    results.push({ json: {
+    const out = {
       segment_id:      seg.segment_id,
       en_text:         seg.en_text || '',
       en_duration_sec: seg.en_duration_sec || 0,
-      de_text: translations.de || '',
-      es_text: translations.es || '',
-      fr_text: translations.fr || '',
-      pl_text: translations.pl || '',
-      pt_text: translations.pt || '',
-      it_text: translations.it || '',
-      tr_text: translations.tr || '',
-    }});
+    };
+    for (const lang of REQUIRED_LANGS) out[`${lang}_text`] = translations[lang] || '';
+    results.push({ json: out });
   }
 }
 

@@ -1,5 +1,5 @@
 const LANG_CPS = { de: 12, es: 15, fr: 15, pl: 14, pt: 16, it: 14, tr: 14 };
-const LANGS = ['de', 'es', 'fr', 'pl', 'pt', 'it', 'tr'];
+const ALL_LANGS = ['de', 'es', 'fr', 'pl', 'pt', 'it', 'tr'];
 const BUDGET_FACTOR = 1.05;
 const MAX_ATTEMPTS = 3;
 const MIN_RETAIN = 0.60;  // never accept shortening below 60% of input
@@ -10,6 +10,14 @@ const configMap = {};
 configItems.forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });
 const apiKey = configMap['anthropic_api_key'] || '';
 if (!apiKey) throw new Error('anthropic_api_key missing from config sheet');
+
+// active_langs gate — when set, narrow the adapt loop to those langs only.
+// Empty/missing → all 7.
+const activeRaw = (configMap.active_langs || '').trim();
+const LANGS = activeRaw
+  ? activeRaw.split(',').map(s => s.trim().toLowerCase()).filter(l => ALL_LANGS.includes(l))
+  : ALL_LANGS.slice();
+if (LANGS.length === 0) throw new Error('active_langs filter produced empty lang list — check config');
 
 // Per-language CPS — defaults tuned against real ElevenLabs output; overridable via
 // config keys cps_estimate_de, cps_estimate_es, …, cps_estimate_tr. Computed below.

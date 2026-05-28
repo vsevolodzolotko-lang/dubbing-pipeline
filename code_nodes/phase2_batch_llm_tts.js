@@ -110,6 +110,55 @@ function isFormal(lang, text) {
 const FORMALITY_FIX_SYSTEM = loadPrompt('formality_fix_system', {}, true) ||
   `You convert formal-address meditation/wellness translations to INFORMAL SINGULAR.\nINPUT: JSON segment_id -> { en, <lang>: text } (only langs needing a fix per segment).\nRewrite each cell using informal singular address for THAT language, changing ONLY address/formality — pronouns, verb conjugation, possessives. Keep meaning, vocabulary, register, length and any "..." or "—" markers IDENTICAL. Each cell stays in its own language.\nTargets: DE du/dich/dein; ES Castilian tú/te/tu; FR tu/te/ton/ta + TU imperatives (Prends/Inspire/Laisse/Fais/Respire, never Prenez/Faites); IT tu/ti/tuo; PL ty-forms; PT European tu/te/teu; TR sen/seni/senin. If a cell is ALREADY informal, return it UNCHANGED.\nOUTPUT ONLY JSON segment_id -> { <lang>: corrected_text }, same keys as input. No preamble/markdown/fences. Start with { end with }.`;
 
+// Cross-language false-friend detection (mirrors Formality Lint pattern). Phase 2 batch
+// expansion processes multiple langs side-by-side and Opus occasionally leaks vocabulary
+// or spelling between neighbor Romance langs (e.g. PT "essencial"/"primeiro" appearing in
+// ES text). Real observed example (sleep1_full seg_019_es):
+//   "...sino porque es essencial. Recuerda lo primeiro que te dicen..."
+// Both Verify (CLASS 1) and Editor (CLASS A) are prompt-based and occasionally miss such
+// cells, especially when only one cell in a batch is contaminated. Deterministic regex per
+// target lang catches every known marker with 100% recall on the listed patterns.
+//
+// Patterns are HIGH PRECISION — chosen to never match valid target-language text. A flagged
+// cell may be a true positive or a benign edge case; the targeted LLM fix returns text
+// unchanged when already correct, so over-flagging is harmless.
+const FALSE_FRIEND_PATTERNS = {
+  es: [
+    /[ãõ]/u,                    // PT diacritics (Spanish never uses these)
+    /\bessenc/iu,               // PT "essencial/essência" — ES uses "esenc"
+    /\bprimeir[oa]\b/iu,        // PT "primeiro/primeira" — ES uses "primero/primera"
+    /\bnecessári[oa]\b/iu,      // PT "necessário/a" — ES uses "necesario/a" (single 's')
+    /\bmissão\b/iu,             // PT "missão" — ES uses "misión"
+    /\banche\b/iu,              // IT "anche" — ES uses "también"
+    /\bmolto\b/iu,              // IT "molto" — ES uses "mucho"
+  ],
+  pt: [
+    /[ñ]/u,                     // ES letter (Portuguese never uses ñ)
+    /\besencial\b/iu,           // ES "esencial" — PT uses "essencial"
+    /\bprimer[oa]\b/iu,         // ES "primero/primera" — PT uses "primeiro/a"
+    /\bnecesari[oa]\b/iu,       // ES "necesario/a" — PT uses "necessário/a"
+  ],
+  it: [
+    /[ãõçñ]/u,                  // PT/ES/FR diacritics (Italian never uses these)
+    /\bessenc/iu,               // ES/PT "essencial/essência" — IT uses "essenziale" (no "essenc-" words in IT)
+    /\bprimer[oa]\b/iu,         // ES word
+    /\bmuy\b/iu,                // ES word
+    /\bahora\b/iu,              // ES word — IT uses "ora"
+  ],
+  fr: [
+    /[ñãõ]/u,                   // ES/PT diacritics (French never uses these)
+    /\bnecessary\b/iu,          // EN word
+    /\besenci/iu,               // ES spelling — FR uses "essentiel"
+  ],
+  // DE, PL, TR — distance from Romance large enough that cross-leak is rare. Add here if observed.
+};
+function hasFalseFriend(lang, text) {
+  const pats = FALSE_FRIEND_PATTERNS[lang];
+  return !!(text && pats && pats.some(re => re.test(text)));
+}
+const FALSE_FRIEND_FIX_SYSTEM = loadPrompt('false_friend_fix_system', {}, true) ||
+  `You fix cross-language contamination in meditation/wellness translations.\nINPUT: JSON segment_id -> { en, <lang>: text } (only langs needing a fix per segment). The text contains a word or spelling from a NEIGHBORING language (e.g. Portuguese spelling in Spanish text, Spanish word in Italian text).\nRewrite each cell so it uses ONLY the target language's vocabulary and spelling, changing as little as possible. Keep meaning, register, length and any "..." or "—" pause markers IDENTICAL. Each cell stays in its own language.\n\nCommon cross-Romance contaminations to fix:\n- ES (Spanish): never use ã/õ; replace PT spellings "essencial→esencial", "primeiro/a→primero/a", "necessário/a→necesario/a", "missão→misión"; replace IT words "anche→también", "molto→mucho".\n- PT (Portuguese): never use ñ; replace ES spellings "esencial→essencial", "primero/a→primeiro/a", "necesario/a→necessário/a".\n- IT (Italian): never use ã/õ/ç/ñ; replace ES/PT words "essencial→essenziale", "primero/a→primo/a", "muy→molto", "ahora→ora".\n- FR (French): never use ñ/ã/õ; replace EN "necessary→nécessaire", ES "esencial→essentiel".\n\nIf a cell is ALREADY clean for the target language, return it UNCHANGED.\nOUTPUT ONLY JSON segment_id -> { <lang>: corrected_text }, same keys as input. No preamble, no markdown, no fences. Start with { end with }.`;
+
 // Passthrough emit: every input row that is NOT an expansion candidate is still
 // emitted unchanged (has_binary=false) so the downstream full-audio + VTT chain —
 // which now runs AFTER this node completes — receives the COMPLETE 329-row set with
@@ -289,10 +338,44 @@ function asStr(v) {
   return '';
 }
 
+// LLM refusal / meta-output detection. Opus 4.7 (and other models) occasionally
+// "step out of character" — refuse to translate, ask clarifying questions, or
+// emit English meta-commentary about the task — instead of producing the requested
+// target-language text. If such output is allowed to flow into re-TTS, ElevenLabs
+// reads it aloud as voiceover (English refusal text spoken in the target voice).
+// Real observed example (sleep1_full seg_020_fr, Opus 4.7):
+//   "You're absolutely right to flag this. I cannot complete this task as written
+//    because the "CURRENT TRANSLATION" input doesn't correspond to the "ORIGINAL
+//    EN TEXT" at all."
+// This is shipped audio if not blocked here — the W2 + Verify + Editor chain does
+// not catch it because it's grammatically clean English on a semantic level.
+//
+// Detection: regex match on high-precision English refusal phrases. 1+ match in
+// a non-EN cell → reject the LLM output and fall back to Phase 1 audio (which has
+// the correct W2 translation, not an Opus refusal).
+const REFUSAL_PATTERNS = [
+  /\bI (?:cannot|can'?t|am unable to|will not|won'?t|need to|have to|should not|shouldn'?t)\b/i,
+  /\bYou(?:'re| are)\s+(?:absolutely\s+)?right\b/i,
+  /^Note:\s/m,
+  /\b(?:input|task|translation|output|CURRENT|ORIGINAL EN|prompt)\b[^.\n]*\b(?:doesn'?t|does not|cannot|can'?t|won'?t)\b/i,
+  /\bI(?:'ll| will)\s+(?:need|have)\s+to\b/i,
+  /\bSorry,?\s/i,
+  /\bAs an AI\b/i,
+  /\bI apologize\b/i,
+  /\bThis (?:translation|text|input|task) (?:doesn'?t|does not|is not|isn'?t)\b/i,
+];
+function looksLikeRefusal(text) {
+  if (!text || typeof text !== 'string' || text.length < 20) return false;
+  for (const pat of REFUSAL_PATTERNS) {
+    if (pat.test(text)) return true;
+  }
+  return false;
+}
+
 // Diagnostics surfaced on the first emitted item's json.phase2_diag (visible in the
 // node Output panel — n8n Code console.log only reaches server stdout). Captures raw
 // retry-expand samples so we can see exactly what the retry LLM returns without server logs.
-const phase2Diag = { retryRawSamples: [], retryCoverage: [], retryNoTextTotal: 0 };
+const phase2Diag = { retryRawSamples: [], retryCoverage: [], retryNoTextTotal: 0, refusalsAttempt1: [], refusalsRetry: [] };
 
 // --- batch helpers ---
 const segmentEntries = Object.entries(candidates);
@@ -507,6 +590,42 @@ async function reTtsOne(task) {
   }
 }
 
+// Deterministic cross-language false-friend enforcement, in place, BEFORE re-TTS (and
+// before fixFormalityInTasks — so the formality detector sees the post-fix text). Mirrors
+// fixFormalityInTasks structure: collect flagged cells, single batched LLM call, apply.
+async function fixFalseFriendsInTasks(tasks) {
+  const flagged = {};
+  const hits = [];
+  for (const t of tasks) {
+    if (hasFalseFriend(t.lang, t.newText)) {
+      if (!flagged[t.sid]) flagged[t.sid] = { en: candidates[t.sid]?.en || '' };
+      flagged[t.sid][t.lang] = t.newText;
+      hits.push(t);
+    }
+  }
+  if (hits.length === 0) return;
+  const byLang = {};
+  for (const h of hits) byLang[h.lang] = (byLang[h.lang] || 0) + 1;
+  console.log(`Phase 2 false-friend: ${hits.length} flagged cells, fixing before re-TTS`, JSON.stringify(byLang));
+  const body = {
+    model: 'claude-sonnet-4-6', max_tokens: 8000,
+    system: [{ type: 'text', text: FALSE_FRIEND_FIX_SYSTEM, cache_control: { type: 'ephemeral' } }],
+    messages: [{ role: 'user', content: JSON.stringify(flagged, null, 2) }],
+  };
+  const fixed = parseLLMJson(await callAnthropic.call(this, body));
+  let applied = 0;
+  let stillContaminated = 0;
+  for (const t of hits) {
+    const nf = asStr(fixed[t.sid]?.[t.lang]);
+    if (nf && nf !== t.newText) {
+      t.newText = nf;
+      applied++;
+      if (hasFalseFriend(t.lang, nf)) stillContaminated++;
+    }
+  }
+  console.log(`Phase 2 false-friend: applied ${applied} fixes${stillContaminated ? `; ${stillContaminated} cells still match a marker after fix` : ''}`);
+}
+
 // Deterministic formality enforcement on accepted text, in place, BEFORE re-TTS.
 // Mutates task.newText for any cell whose text matches a formal-address marker.
 async function fixFormalityInTasks(tasks) {
@@ -538,6 +657,7 @@ async function fixFormalityInTasks(tasks) {
 }
 
 async function runReTtsTasks(tasks) {
+  await fixFalseFriendsInTasks.call(this, tasks);
   await fixFormalityInTasks.call(this, tasks);
   const results = [];
   for (let i = 0; i < tasks.length; i += ELEVENLABS_CHUNK) {
@@ -602,6 +722,9 @@ console.log('Phase 2 editor attempt 1 complete');
 // (otherwise they'd silently fall through to pickFinal's 'no_attempt' bucket
 // which makes diagnostics ambiguous — was the cell never tried, or did the
 // LLM just drop it from its JSON response).
+// Refusal detection: if the LLM emitted English meta/refusal text (Opus 4.7
+// occasionally does this), reject it as 'llm_refusal' instead of synthesizing.
+// pickFinal will fall back to attempt 2 (if accepted) else Phase 1 audio.
 const reTts1Tasks = [];
 const droppedResults1 = [];
 for (const [sid, data] of segmentEntries) {
@@ -609,6 +732,12 @@ for (const [sid, data] of segmentEntries) {
     const newText = final1TextMap[sid]?.[lang];
     if (!newText) {
       droppedResults1.push({ sid, lang, outcome: 'llm_dropped' });
+    } else if (looksLikeRefusal(newText)) {
+      droppedResults1.push({ sid, lang, outcome: 'llm_refusal' });
+      if (phase2Diag.refusalsAttempt1.length < 5) {
+        phase2Diag.refusalsAttempt1.push({ sid, lang, sample: newText.slice(0, 200) });
+      }
+      console.log(`Phase 2 attempt 1: LLM refusal detected for ${sid}_${lang} — rejecting, will fall back to Phase 1`);
     } else {
       reTts1Tasks.push({ sid, lang, newText, info });
     }
@@ -748,20 +877,29 @@ async function runRetryGroup(tasks, systemPrompt, charsMultiplier) {
   // falls back to attempt 1. This is critical: a still_short cell had attempt1='accepted'
   // (a real expansion), and a retry-drop must NOT clobber it down to Phase 1 audio.
   // Dropped retries are logged, not surfaced as a worse outcome.
+  // Refusals on retry are also dropped without recording a2 — attempt 1 stands.
   const reTtsRetryTasks = [];
   let retryNoText = 0;
+  let retryRefusal = 0;
   for (const t of tasks) {
     const ed = asStr(editorRetryMap[t.sid]?.[t.lang]);
     const ex = asStr(expandRetryMap[t.sid]?.[t.lang]);
     const finalText = ed || ex || null;
     if (!finalText) {
       retryNoText++;  // skip → attempt 1 stands (no a2 recorded for this cell)
+    } else if (looksLikeRefusal(finalText)) {
+      retryRefusal++;  // skip → attempt 1 stands
+      if (phase2Diag.refusalsRetry.length < 5) {
+        phase2Diag.refusalsRetry.push({ sid: t.sid, lang: t.lang, sample: finalText.slice(0, 200) });
+      }
+      console.log(`Phase 2 retry: LLM refusal detected for ${t.sid}_${t.lang} — keeping attempt 1 result`);
     } else {
       reTtsRetryTasks.push({ sid: t.sid, lang: t.lang, newText: finalText, info: t.info });
     }
   }
   phase2Diag.retryNoTextTotal += retryNoText;
   if (retryNoText > 0) console.log(`Phase 2 retry: ${retryNoText}/${tasks.length} cells got no retry text — kept attempt 1 result`);
+  if (retryRefusal > 0) console.log(`Phase 2 retry: ${retryRefusal}/${tasks.length} cells got LLM refusal text — kept attempt 1 result`);
 
   return await runReTtsTasks.call(this, reTtsRetryTasks);
 }

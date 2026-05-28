@@ -82,7 +82,7 @@ One row = one key. Read by all workflows. **Edit manually** when you need to twe
 |---|---|---|
 | **API auth** | `anthropic_api_key`, `elevenlabs_api_key`, `deepgram_api_key` (optional — actual auth via n8n credentials) | W1, W2, W3 |
 | **Drive output** | `drive_output_folder_id`, `drive_output_full_folder_id` | W3 |
-| **Translation** | `tone_of_voice` (long ToV doc), `active_langs` (default `de,es,fr,it,pl,pt,tr`) | W2 |
+| **Translation** | `tone_of_voice` (long ToV doc), `active_langs` (default `de,es,fr,it,pl,pt,tr` — gates every stage of W2 and W3; set to e.g. `de` for a single-lang dry-run) | W2, W3 |
 | **Timing** | `min_inter_segment_gap_sec` (0.3), `max_borrow_per_segment_sec` (2.0 — currently unused), `silence_lead_ratio` (0.2), `silence_lead_max_sec` (0.05), `expansion_threshold` (0.75) | W3 |
 | **Speed/retry** | `max_speed` (1.15), `max_adaptation_attempts` (3) | W2, W3 |
 

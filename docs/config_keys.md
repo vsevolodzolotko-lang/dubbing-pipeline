@@ -11,7 +11,7 @@ Every row has two columns: `key`, `value`. Missing keys fall back to the default
 | Key | Default | Read by | Purpose |
 |---|---|---|---|
 | ~~`tone_of_voice`~~ | **MOVED** | — | No longer in `config` tab. Now lives in the new `prompts` tab as the `tone_of_voice` key. See [`sheets_schema.md`](sheets_schema.md#sheet-prompts). |
-| `active_langs` | `de,es,fr,it,pl,pt,tr` | W3 Expand TTS Jobs | Comma-separated lang codes that Synthesize will process. Translation always runs for all 7; this gates which langs get TTS'd and uploaded. |
+| `active_langs` | `de,es,fr,it,pl,pt,tr` | W2 Prepare and Expand, Extract Translations, Verify Translations, Gemini Editor, OpenAI Editor, Adapt Translations, Formality Lint; W3 Expand TTS Jobs | Comma-separated lang codes that the pipeline processes end-to-end. **As of 2026-05-28**: also gates W2 — translation, QA verify, cross-model editor, CPS adapt, and formality lint now skip inactive langs (Prepare and Expand prepends a user-content instruction so Claude returns ONLY the requested lang keys, cutting Anthropic/Gemini output tokens ~85% on single-lang dry-runs). Inactive `{lang}_text` columns in the segments sheet are left untouched (`autoMapInputData` on Update Sheet only writes columns present in items). Empty/missing → all 7. To run a single-lang dry-run end-to-end: set `active_langs=de` (and ensure the corresponding voice row exists). |
 
 ## Adaptation behavior
 

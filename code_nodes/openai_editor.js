@@ -8,12 +8,19 @@
 // on batches 2-4 (no explicit cache_control needed — OpenAI auto-detects shared
 // system-prompt prefixes).
 const QA_BATCH_SIZE = 8;
-const LANGS = ['de', 'es', 'fr', 'pl', 'pt', 'it', 'tr'];
+const ALL_LANGS = ['de', 'es', 'fr', 'pl', 'pt', 'it', 'tr'];
 
 const configMap = {};
 $('Read Config').all().forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });
 const apiKey = configMap.openai_api_key || '';
 if (!apiKey) throw new Error('openai_api_key missing from config sheet');
+
+// active_langs gate — narrow editor pass to active langs only.
+const activeRaw = (configMap.active_langs || '').trim();
+const LANGS = activeRaw
+  ? activeRaw.split(',').map(s => s.trim().toLowerCase()).filter(l => ALL_LANGS.includes(l))
+  : ALL_LANGS.slice();
+if (LANGS.length === 0) throw new Error('active_langs filter produced empty lang list — check config');
 
 // Externalized-prompts loader. Reads from the "prompts" Google Sheets tab via
 // upstream Read Prompts node. Throws if a required key is missing (fail-fast).
@@ -68,11 +75,9 @@ async function runOneEditorBatch(batch) {
   const userMap = {};
   for (const it of batch) {
     const j = it.json;
-    userMap[j.segment_id] = {
-      en: j.en_text || '',
-      de: j.de_text || '', es: j.es_text || '', fr: j.fr_text || '',
-      pl: j.pl_text || '', pt: j.pt_text || '', it: j.it_text || '', tr: j.tr_text || '',
-    };
+    const entry = { en: j.en_text || '' };
+    for (const lang of LANGS) entry[lang] = j[`${lang}_text`] || '';
+    userMap[j.segment_id] = entry;
   }
   const body = {
     model: 'gpt-5',

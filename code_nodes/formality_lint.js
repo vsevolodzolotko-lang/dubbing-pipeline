@@ -14,7 +14,7 @@
 //         de_text..tr_text, *_adaptation_attempts, adaptation_attempts.
 // Output (to Update Sheet, autoMap by segment_id): same items, formal {lang}_text replaced.
 
-const LANGS = ['de', 'es', 'fr', 'pl', 'pt', 'it', 'tr'];
+const ALL_LANGS = ['de', 'es', 'fr', 'pl', 'pt', 'it', 'tr'];
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL = 'claude-sonnet-4-6';
 
@@ -23,6 +23,15 @@ const configMap = {};
 $('Read Config').all().forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });
 const apiKey = configMap.anthropic_api_key || '';
 if (!apiKey) throw new Error('anthropic_api_key missing from config sheet');
+
+// active_langs gate — only scan active langs. Inactive *_text fields are not
+// present in items from upstream nodes anyway, but guarding LANGS here keeps
+// the loop and the LLM userMap aligned.
+const activeRaw = (configMap.active_langs || '').trim();
+const LANGS = activeRaw
+  ? activeRaw.split(',').map(s => s.trim().toLowerCase()).filter(l => ALL_LANGS.includes(l))
+  : ALL_LANGS.slice();
+if (LANGS.length === 0) throw new Error('active_langs filter produced empty lang list — check config');
 
 const promptMap = {};
 $('Read Prompts').all().forEach(i => { if (i.json.key) promptMap[i.json.key] = i.json.value; });

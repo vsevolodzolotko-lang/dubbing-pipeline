@@ -61,8 +61,27 @@ Run-time table. Populated by Workflow_Synthesize. One row per segment × languag
 | final_speed | number | Speed used for TTS: `1.0` / `1.1` / `1.15`. v3 reaches `>1.0` only after all 3 shorten attempts fail. |
 | needs_attention | boolean | `true` if audio was hard-truncated (TTS still over `effective_slot × 1.05` after all 3 adapt attempts and speed 1.15). |
 | audio_drive_file_id | text | Google Drive file ID of the output wav |
+| needs_retts | boolean | (Added 2026-05-28) Content-editor flag for W_Regen. Set to `TRUE` to mark this row for manual regeneration: W_Regen reads the (possibly-edited) `text_translated`, re-synthesizes via ElevenLabs, overwrites the Drive file in place, and clears the flag back to `FALSE`. Used together with `regen_comment` and `last_regen_at`. |
+| regen_comment | text | (Added 2026-05-28) Optional editor's note explaining why the row was flagged (e.g. "fixed gender in es", "added pause before 'breath'"). Audit-only in MVP — not consumed by W_Regen. Future v2 may use this as an LLM-rewrite instruction. |
+| last_regen_at | text | (Added 2026-05-28) ISO timestamp of last successful W_Regen run on this row. Set by W_Regen automatically; not edited by hand. |
 
 > **Note on Scribe accuracy**: `en_start_sec[0]` (and other timestamps) are auto-detected by ElevenLabs Scribe from the audio file in W1. Scribe can overshoot word boundaries by up to ~0.25s on some recordings. If after running W3 the seg_001 lead silence sounds too long, manually edit `en_start_sec` for that segment in the `segments` sheet and re-run W3.
+
+### W_Regen editor flow
+
+To regenerate audio for one or more cells (within a single lesson):
+
+1. Open the `localizations` sheet, find the row(s) to fix.
+2. Edit `text_translated` (and any other content fields if needed — e.g. insert `...` for pauses, fix a misspelled word).
+3. Set `needs_retts=TRUE`. Optionally add a note in `regen_comment`.
+4. Open the `W_Regen — Manual cell regeneration` workflow in n8n and click **Execute Workflow**.
+
+The workflow filters all `needs_retts=TRUE` rows, re-synthesizes each via ElevenLabs (using the same Phase 1-style timing logic — speed-up if overshoot, slowdown if gap remains), overwrites the per-segment Drive WAV in place, updates the row metrics, sets `last_regen_at`, clears `needs_retts`, then rebuilds the full lesson audio + VTT for the affected lesson.
+
+**MVP constraints:**
+- All flagged rows must belong to ONE lesson per run. If they span multiple lessons, the workflow throws — clear the flag on all but one lesson and re-run.
+- `regen_comment` is stored for audit but not consumed by the pipeline yet.
+- The full-audio + VTT rebuild fires automatically after the per-segment regenerations finish.
 
 ---
 
