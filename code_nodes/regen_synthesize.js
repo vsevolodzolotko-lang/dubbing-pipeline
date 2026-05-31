@@ -215,7 +215,10 @@ async function synthOne(row) {
       final_speed:                   usedSpeed,
       needs_attention:               needsAttention ? 'TRUE' : 'FALSE',
       needs_retts:                   'FALSE',
-      last_regen_at:                 new Date().toISOString(),
+      // Sheets-friendly UTC datetime: "2026-05-31 13:05:23" (no T separator,
+      // no fractional ms, no Z suffix). Sortable as text AND recognized by
+      // Google Sheets as a datetime value if the column is formatted as such.
+      last_regen_at:                 new Date().toISOString().replace('T', ' ').slice(0, 19),
       regen_comment:                 j.regen_comment || '',
       audio_drive_file_id:           j.audio_drive_file_id,
       phase2_outcome:                j.phase2_outcome || '',

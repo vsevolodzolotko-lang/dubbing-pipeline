@@ -59,7 +59,7 @@ Run-time table. Populated by Workflow_Synthesize. One row per segment × languag
 | real_duration_sec | number | Actual TTS audio duration after all retries (no surrounding silence). |
 | final_duration_sec | number | Total per-segment file duration = `lead_silence_sec + real_duration_sec + tail_silence_sec`. With borrow: the per-file value can exceed `en_duration_sec - prev_en_end_sec` (its slot) by up to `borrowed_sec`. **The concatenated full WAV is shorter than the sum of `final_duration_sec` because `Build Full Audio Per Lang` trims the borrow back out of the next segment's lead.** Net: full WAV length ≈ EN audio length. |
 | final_speed | number | Speed used for TTS: `1.0` / `1.1` / `1.15`. v3 reaches `>1.0` only after all 3 shorten attempts fail. |
-| needs_attention | boolean | `true` if audio was hard-truncated (TTS still over `effective_slot × 1.05` after all 3 adapt attempts and speed 1.15). |
+| needs_attention | boolean | `true` if audio was hard-truncated (TTS still over `effective_slot × 1.05` after all 3 adapt attempts and speed 1.15). **As of 2026-05-31**: W3 still writes the initial flag, but W_Regen NO LONGER overwrites this column. Editors can manually flip values during review without W_Regen clobbering them on regen. |
 | audio_drive_file_id | text | Google Drive file ID of the output wav |
 | needs_retts | boolean | (Added 2026-05-28) Content-editor flag for W_Regen. Set to `TRUE` to mark this row for manual regeneration: W_Regen reads the (possibly-edited) `text_translated`, re-synthesizes via ElevenLabs, overwrites the Drive file in place, and clears the flag back to `FALSE`. Used together with `regen_comment` and `last_regen_at`. **As of 2026-05-31**: W3 writes `FALSE` to this column on every cell it produces (Phase 1 + Phase 2 + Trim Lead For Sequence). So after a fresh W3 run, the whole column is `FALSE`; the editor flips ONLY the rows they want to regenerate to `TRUE`, then triggers W_Regen. |
 | regen_comment | text | (Added 2026-05-28) Optional editor's note explaining why the row was flagged (e.g. "fixed gender in es", "added pause before 'breath'"). Audit-only in MVP — not consumed by W_Regen. Future v2 may use this as an LLM-rewrite instruction. |
@@ -83,16 +83,21 @@ The workflow filters all `needs_retts=TRUE` rows, re-synthesizes each via Eleven
 - `regen_comment` is stored for audit but not consumed by the pipeline yet.
 - The full-audio + VTT rebuild fires automatically after the per-segment regenerations finish.
 
-### Recommended one-time UI setup: conditional formatting on `needs_retts`
+### Recommended one-time UI setup: conditional formatting + alignment on `needs_retts`
 
-Color the `needs_retts` column so the editor can scan the sheet visually for what's flagged. One-time setup in the Google Sheets UI:
+Color and center the `needs_retts` column so the editor can scan the sheet visually for what's flagged. Two one-time setups in the Google Sheets UI:
 
+**Conditional formatting:**
 1. Select the entire `needs_retts` column (click the column header).
 2. **Format → Conditional formatting**.
 3. Add rule 1: **Format cells if … Text is exactly** → value `TRUE` → background color **green**. Click Done.
 4. Add rule 2: **Format cells if … Text is exactly** → value `FALSE` → background color **red**. Click Done.
 
-After this, every time W3 finishes a lesson, the editor sees a column of red cells (nothing flagged). To regenerate any cell, they flip its value to `TRUE` → it turns green → run W_Regen → cell turns back to red (flag cleared, color updates automatically).
+**Center alignment:**
+1. Select the entire `needs_retts` column.
+2. **Format → Alignment → Center** (or use the toolbar icon).
+
+After this, every time W3 finishes a lesson, the editor sees a column of red cells (nothing flagged), values centered. To regenerate any cell, they flip its value to `TRUE` → it turns green → run W_Regen → cell turns back to red (flag cleared automatically, alignment + color update automatically).
 
 > The color rules use the literal string match because Google Sheets stores the boolean as the uppercase strings `TRUE`/`FALSE` (set by both W3 and W_Regen). If you change one of these rules to use `Text contains` or a lowercase form, the formatting will not match.
 
