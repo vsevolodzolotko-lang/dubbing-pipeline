@@ -12,21 +12,18 @@ $('Read Config').all().forEach(i => { if (i.json.key) configMap[i.json.key] = i.
 const activeLangs = (configMap.active_langs || 'de,es,fr,it,pl,pt,tr')
   .split(',').map(s => s.trim()).filter(Boolean).sort();
 
-// Authoritative borrow/lead source = the localizations SHEET (Read Localizations Fresh),
-// keyed by `${segment_id}_${lang}`. The per-item json flowing through
-// Phase 2 Update Localizations → Download Segment WAV (Drive) loses/zeros these fields,
-// which silently disabled borrow compensation → the full track drifted from the first
-// breath-borrow segment onward. Values here are in SECONDS (format-independent), so this
-// also avoids inferring duration from PCM byte length.
-const locMap = {};
-$('Read Localizations Fresh').all().forEach(i => {
-  const j = i.json || {};
-  if (!j.segment_id || !j.lang) return;
-  locMap[`${j.segment_id}_${j.lang}`] = {
-    borrowed_sec:     parseFloat(j.borrowed_sec) || 0,
-    lead_silence_sec: parseFloat(j.lead_silence_sec) || 0,
-  };
-});
+// As of 2026-05-31 refactor: borrow compensation is now done UPSTREAM by the
+// new `Trim Lead For Sequence` node (which trims each post-borrow segment's
+// lead silence by the previous segment's borrowed_sec and overwrites the Drive
+// copy via a parallel Save Trimmed Audio path). By the time items reach Build
+// Full Audio Per Lang, they are already sequence-aligned. This node is now a
+// pure concatenator — just strip 44-byte WAV headers, accumulate PCM, emit.
+//
+// Why the change: individual WAVs in Drive used to extend past their slot_end
+// for short-segment-borrow cells; editors placing them end-to-end (e.g. in
+// Reaper) saw ~1.5s cumulative drift. Trimming upstream gives Drive a
+// sequence-friendly set of files; Build Full Audio no longer needs special
+// per-segment compensation logic.
 
 const items = $input.all();
 if (!items.length) throw new Error('No items — Download Segment WAV must run first');
@@ -47,19 +44,9 @@ for (const lang of activeLangs) {
   if (!entries.length) continue;
 
   // Strip 44-byte WAV header from each segment, accumulate raw PCM.
-  //
-  // BORROW COMPENSATION (drift fix):
-  // When segment N has borrowed_sec > 0, its WAV extends past en_end[N] by that amount
-  // (breath-borrow path in Check Timing + Pad). To keep the concatenated lesson aligned
-  // with the EN timeline we trim that many seconds from the START of seg N+1's PCM —
-  // eating into its lead silence, never into TTS audio. The borrow budget in Expand
-  // TTS Jobs (max_borrowable ≤ gap_after − MIN_GAP, and lead_silence[N+1] == gap_after[N])
-  // guarantees trimSec ≤ lead_silence[N+1], so the bound is structural; the
-  // Math.min(prevBorrow, leadSec) clamp is belt-and-braces in case Sheet round-trip
-  // introduces rounding.
+  // Segments come in already trimmed by upstream Trim Lead For Sequence node, so
+  // this is a straight concat — no per-segment borrow compensation here.
   const pcmChunks = [];
-  let prevBorrow      = 0;
-  let trimmedLeadSum  = 0;
   let skippedNoBinary = 0;
   let skippedEmptyWav = 0;
   for (const e of entries) {
@@ -68,9 +55,9 @@ for (const lang of activeLangs) {
       console.warn(`Build Full: ${lang} ${e.json?.segment_id} skipped — no binary slot on item`);
       continue;
     }
-    // CRITICAL: must use this.helpers.getBinaryDataBuffer() — see Check Timing
-    // + Pad for full explanation. With N8N_BINARY_DATA_MODE=filesystem the raw
-    // binary.data.data is a tiny placeholder, not the actual WAV bytes.
+    // CRITICAL: must use this.helpers.getBinaryDataBuffer() — with
+    // N8N_BINARY_DATA_MODE=filesystem the raw binary.data.data is a tiny
+    // placeholder, not the actual WAV bytes.
     const originalIdx = indexMap.get(e);
     if (originalIdx === undefined) {
       skippedNoBinary++;
@@ -90,19 +77,7 @@ for (const lang of activeLangs) {
       console.warn(`Build Full: ${lang} ${e.json?.segment_id} skipped — WAV is ${wavBuf?.length ?? 0} bytes (header-only or empty)`);
       continue;
     }
-    let pcm = wavBuf.subarray(44);
-    const loc = locMap[`${e.json.segment_id}_${e.json.lang}`] || {};
-    if (prevBorrow > 0) {
-      const leadSec   = loc.lead_silence_sec ?? (parseFloat(e.json.lead_silence_sec) || 0);
-      const trimSec   = Math.min(prevBorrow, leadSec);
-      const trimBytes = Math.round(trimSec * SAMPLE_RATE) * BPS;
-      if (trimBytes > 0 && trimBytes < pcm.length) {
-        pcm = pcm.subarray(trimBytes);
-        trimmedLeadSum += trimSec;
-      }
-    }
-    pcmChunks.push(pcm);
-    prevBorrow = loc.borrowed_sec ?? (parseFloat(e.json.borrowed_sec) || 0);
+    pcmChunks.push(wavBuf.subarray(44));
   }
 
   const fullPcm = Buffer.concat(pcmChunks);
@@ -135,7 +110,6 @@ for (const lang of activeLangs) {
       skipped_no_binary:      skippedNoBinary,
       skipped_empty_wav:      skippedEmptyWav,
       full_duration_sec:      parseFloat((n / (SAMPLE_RATE * BPS)).toFixed(3)),
-      trimmed_lead_total_sec: parseFloat(trimmedLeadSum.toFixed(3)),
     },
     binary: {
       data: {

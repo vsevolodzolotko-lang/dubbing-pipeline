@@ -34,6 +34,43 @@ Future work (revisit triggers):
 
 ---
 
+### 2026-05-31 — W3_PER_SEGMENT_TRIM_FOR_SEQUENCE_PLACEMENT
+
+Context: Editor reported drift when placing individual segment WAVs end-to-end on a Reaper timeline. Confirmed via diagnostic: `full_duration_sec=684.581` (correct) but sum of individual `final_duration_sec` columns = 686.15 (= 684.58 + 1.569). The 1.569s is `Σ borrowed_sec` over the 4 short-segment-borrow cells (en_dur < 2s where TTS overflowed slot and was allowed to extend into the next EN silence). Build Full Audio Per Lang compensated by trimming the next segment's lead silence at concat time, so the full WAV was correctly EN-aligned. But the per-segment files in Drive themselves were never trimmed — and an editor placing them end-to-end (the natural Reaper workflow) saw cumulative drift starting at the first borrow boundary (seg_010).
+
+Pre-refactor architecture: each per-segment WAV preserved its NATURAL lead silence (= EN gap from previous segment's end to this segment's start). Optimized for the historical "place segment at `slot_start_sec`" use case, where individual files paired with `slot_start_sec` positioning produced correct EN alignment (with small overlaps at borrow boundaries that are silence-over-speech, audibly fine). End-to-end concatenation was a downstream Build Full Audio concern, never a user-facing primitive.
+
+The end-to-end use case is the natural editor workflow today (Reaper, ffmpeg concat, sequential review), and the slot_start placement use case is essentially unused. Refactoring the per-segment files to be end-to-end-friendly cleans up the surface area without losing real functionality.
+
+Decision: Make individual per-segment WAVs in Drive **co-aligned with the full concat**. After all of Phase 1 + Phase 2 commits its audio to Drive (and `Read Localizations Fresh 2` has the final `borrowed_sec` + `lead_silence_sec` per cell), insert a post-pass that trims each post-borrow segment's lead silence by the previous segment's borrow amount, then overwrites the Drive copy. Build Full Audio Per Lang becomes a pure concatenator with no trim logic.
+
+Implementation in `workflows/W3_Synthesize_v2.json` + `code_nodes/`:
+
+1. **NEW node `Trim Lead For Sequence`** (Code, `code_nodes/trim_lead_for_sequence.js`). Sits between `Download Segment WAV` and `Build Full Audio Per Lang`. Reads `Read Localizations Fresh 2` for borrow values, groups items by lang, sorts by segment_id, walks in order tracking `prevBorrow`. For each segment where `prevBorrow > 0`, calls `this.helpers.getBinaryDataBuffer()` for the downloaded WAV, strips the 44-byte header, slices off `prevBorrow * SAMPLE_RATE * BPS` bytes from the start of PCM, rebuilds a fresh WAV header, replaces the item's binary. Updates `lead_silence_sec` and `final_duration_sec` on the json. Sets `trimmed_for_seq: true` flag.
+
+2. **NEW node `Has Trim?`** (IF). Routes items by `trimmed_for_seq === true`.
+
+3. **NEW node `Save Trimmed Audio to Drive`** (HTTP Request, Google Drive PATCH). Same pattern as `Phase 2: Drive Update`: `PATCH /upload/drive/v3/files/{file_id}?uploadType=media&supportsAllDrives=true` with binary body. Only fires on items where the trim node actually modified the WAV.
+
+4. **Simplified `Build Full Audio Per Lang`** (`code_nodes/build_full_audio_per_lang.js`). Removed `locMap` construction, removed `prevBorrow` tracking, removed `trimmed_lead_total_sec` output field, removed the inline trim block. Now just strips 44-byte headers per item, accumulates PCM, builds final header. Segments come in already trimmed.
+
+5. **Rewired connections**: `Download Segment WAV → Trim Lead For Sequence → Build Full Audio Per Lang` (replaces the previous direct edge). Trim Lead also branches to `Has Trim? → Save Trimmed Audio to Drive`.
+
+Trade-offs:
+
+- **Slot_start placement use case loses precision for 4 cells per lesson**: a user placing seg_010 (post-borrow) at its `slot_start_sec` in a DAW would now have speech 0.348s earlier than EN (because lead was trimmed in Drive). Acceptable — this use case has no known consumer.
+- **Drive ops added**: ~4 PATCH overwrites per lang per lesson (only the post-borrow cells). With 7 langs × 4 cells × ~1s/op = ~30s added to W3 wall time. Negligible.
+- **W_Regen interaction**: `W_Regen` regenerates audio from scratch using `lead_silence_sec` + `final_duration_sec` from the sheet. The sheet still holds the ORIGINAL (untrimmed) values — Trim Lead For Sequence doesn't write back to the sheet. So a W_Regen run produces an UNTRIMMED file. This is a known inconsistency: W_Regen output would have drift again. Fix later: either (a) have Trim Lead also update the sheet, or (b) have W_Regen apply its own trim post-TTS. For now, document and move on — W_Regen is rare and the editor can use the full WAV after a W_Regen if drift matters.
+- **Diagnostic output changed**: `Build Full Audio Per Lang` no longer emits `trimmed_lead_total_sec` (which was useful to confirm compensation was running). Replaced by `trimmed_segs_count` + `total_trimmed_sec` on the upstream Trim Lead node's logs.
+
+Verification: re-run W3 single-lang FR on `spirio_meditations2_3_2_en_fix`. Expected: 4 segments in Drive end up with shorter `final_duration_sec` matching trim (visible if the editor inspects Drive metadata). End-to-end placement of the 71 individual WAVs in Reaper produces a 684.58s timeline with phrases aligned to EN throughout — no 0.4s drift at seg_10, no cumulative offset by the end.
+
+Rollback: revert this commit. The pre-refactor `Build Full Audio Per Lang` returns with its inline trim logic; the new nodes (`Trim Lead For Sequence`, `Has Trim?`, `Save Trimmed Audio to Drive`) are removed. Re-import the workflow JSON to restore the old node graph. Drive files would need to be re-rendered (since current Drive has the trimmed versions) — easiest by re-running W3 on the affected lesson.
+
+Related: this builds on the [BORROW_BEHAVIOR_AUDIT_DOCS_SYNC](#2026-05-31--borrow_behavior_audit_docs_sync) entry — that one documented and audited the borrow mechanism; this one fixes a user-facing surface mismatch the audit revealed. The full audio path is unchanged; only the per-segment files are now sequence-aligned.
+
+---
+
 ### 2026-05-31 — W3_PER_SEGMENT_WALL_CLOCK_BUDGET
 
 Context: After the W3 shorten stack (Haiku→Gemini Flash + MIN_RETAIN 0.45 + new w3_shorten_system prompt) shipped, the `Check Timing + Pad` Code node hit a 300s task-runner timeout on batch 8 (segs 057-063) of the `spirio_meditations2_3_2_en_fix` FR re-run. Root cause: the new shorten pipeline is more "active" than the old one — Gemini Flash actually returns shorter text (instead of Haiku's frequent "cannot shorten further" early-out), which triggers a re-TTS, which may still not fit, which triggers another Gemini call, etc. Worst-case per segment: 1 initial TTS + 3 (Gemini + TTS) + 2 speed-up TTS = up to 9 sequential HTTP calls. With batchSize=7 running Promise.all in parallel, this normally completes in ~30-40s. But occasional slow Gemini calls (30+s for a single response when traffic is heavy) or ElevenLabs queueing on a tight tier pushes one segment's wall-clock to 60+s, and when multiple segments in the same batch hit this simultaneously, the parallel `Promise.all` aggregate stays bounded by the slowest. We observed batch 8 cross 300s in real production.
