@@ -34,6 +34,38 @@ Future work (revisit triggers):
 
 ---
 
+### 2026-05-31 — W3_TRIM_SHEET_SYNC_FOR_W_REGEN
+
+Context: Immediate follow-up to [W3_PER_SEGMENT_TRIM_FOR_SEQUENCE_PLACEMENT](#2026-05-31--w3_per_segment_trim_for_sequence_placement). That refactor moved borrow compensation from Build Full Audio's concat-time trim to an upstream post-pass that trims the per-segment WAVs in Drive directly. However, the sheet's `lead_silence_sec` and `final_duration_sec` columns were left at the ORIGINAL (Phase 1) untrimmed values. The sheet and Drive content were therefore out of sync for the 4 post-borrow cells per lesson.
+
+This inconsistency would re-introduce drift through `W_Regen`. `W_Regen` regenerates a single segment by reading `lead_silence_sec` + `final_duration_sec` from the sheet, synthesizing TTS, and building a WAV with that exact lead + a tail to match final_duration. If the sheet says `lead = 6.015s` (Phase 1 original) but Drive currently has a 5.667s-lead version (post-trim), then a W_Regen run for that cell would overwrite Drive with a 6.015s-lead file — undoing the trim and bringing back 0.348s of drift in the full audio chain.
+
+Decision: Make the sheet the authoritative source of truth co-aligned with Drive. After Trim Lead For Sequence applies its in-memory trim, also update the sheet's `lead_silence_sec` + `final_duration_sec` columns for the trimmed cells via a new googleSheets node. Then W_Regen "just works" — it reads the already-trimmed values from the sheet and synthesizes audio that fits the sequence-aligned slot.
+
+Implementation in `workflows/W3_Synthesize_v2.json`:
+
+- **NEW node `Update Trimmed Localizations`** (googleSheets, `appendOrUpdate`). Same sheet + matching pattern as `Phase 2: Update Localizations` (matches on `row_key`). Maps only the two columns that the trim changes: `lead_silence_sec` and `final_duration_sec`. Pulls values directly from `$json` (which is the Trim Lead For Sequence output flowing through `Has Trim?`).
+- **Rewired connection**: `Has Trim? [true]` now fans out to BOTH `Save Trimmed Audio to Drive` AND `Update Trimmed Localizations` in parallel. The `false` branch stays empty (no-op for non-trimmed items).
+
+No code change needed in `code_nodes/regen_synthesize.js`. The fix is purely workflow-level: sheet ↔ Drive consistency is restored, and W_Regen's existing logic produces correct audio.
+
+Trade-offs:
+
+- **Sheet semantics shifted**: the `lead_silence_sec` column for trimmed cells now reflects "what's in Drive" rather than "what Phase 1 produced". Sheet-as-debugging-record loses the Phase 1 history for these 4 cells per lesson. Acceptable — the trimmed value is what every downstream consumer (Build Full, W_Regen, manual editing in DAW) actually needs. If we ever need the original Phase 1 lead, it's recoverable from `slot_start_sec`, `en_start_sec`, and the natural-EN-gap formula.
+- **Sheet write cost**: 4 extra cell updates per lang per lesson (28 ops total at 7 langs). Negligible compared to existing Update Localizations writes.
+- **Cascade case still unhandled**: if the editor regenerates a BORROW segment (e.g., seg_009) via W_Regen, W_Regen would produce a file matching `phase1_final_duration` (which includes the original borrow). If the new audio's real speech duration differs, the effective borrow changes — but the sheet's `borrowed_sec` for seg_009 stays the same, and seg_010's trim in Drive isn't re-applied. Result: a tiny mismatch could appear at the seg_009 → seg_010 boundary. Unlikely to be audible (< 0.1s typically) and editors rarely regen borrow segments anyway. If it becomes a problem, the fix would be cascade-aware W_Regen that also re-trims downstream files when it touches an upstream borrow.
+
+Verification: editor regenerates one of the post-borrow cells (e.g., seg_010_fr) via W_Regen. Inspect:
+1. Sheet's `lead_silence_sec` for seg_010_fr after W_Regen runs — should still match the post-trim value (e.g., 5.667s), not jump back to 6.015s.
+2. Drive WAV duration for seg_010_fr — should match `final_duration_sec` from sheet.
+3. Re-run Build Full Audio for that lang — `full_duration_sec` should still equal 684.58s, not 684.93s.
+
+Rollback: revert this commit. The `Update Trimmed Localizations` node is removed; sheet rows stop being synced to trim. The [W3_PER_SEGMENT_TRIM_FOR_SEQUENCE_PLACEMENT](#2026-05-31--w3_per_segment_trim_for_sequence_placement) refactor remains, but the W_Regen drift inconsistency returns.
+
+Related: closes the W_Regen follow-up listed under "Trade-offs" in the per-segment-trim entry. Pipeline now has consistent sheet ↔ Drive ↔ regen state.
+
+---
+
 ### 2026-05-31 — W3_PER_SEGMENT_TRIM_FOR_SEQUENCE_PLACEMENT
 
 Context: Editor reported drift when placing individual segment WAVs end-to-end on a Reaper timeline. Confirmed via diagnostic: `full_duration_sec=684.581` (correct) but sum of individual `final_duration_sec` columns = 686.15 (= 684.58 + 1.569). The 1.569s is `Σ borrowed_sec` over the 4 short-segment-borrow cells (en_dur < 2s where TTS overflowed slot and was allowed to extend into the next EN silence). Build Full Audio Per Lang compensated by trimming the next segment's lead silence at concat time, so the full WAV was correctly EN-aligned. But the per-segment files in Drive themselves were never trimmed — and an editor placing them end-to-end (the natural Reaper workflow) saw cumulative drift starting at the first borrow boundary (seg_010).
@@ -60,7 +92,7 @@ Trade-offs:
 
 - **Slot_start placement use case loses precision for 4 cells per lesson**: a user placing seg_010 (post-borrow) at its `slot_start_sec` in a DAW would now have speech 0.348s earlier than EN (because lead was trimmed in Drive). Acceptable — this use case has no known consumer.
 - **Drive ops added**: ~4 PATCH overwrites per lang per lesson (only the post-borrow cells). With 7 langs × 4 cells × ~1s/op = ~30s added to W3 wall time. Negligible.
-- **W_Regen interaction**: `W_Regen` regenerates audio from scratch using `lead_silence_sec` + `final_duration_sec` from the sheet. The sheet still holds the ORIGINAL (untrimmed) values — Trim Lead For Sequence doesn't write back to the sheet. So a W_Regen run produces an UNTRIMMED file. This is a known inconsistency: W_Regen output would have drift again. Fix later: either (a) have Trim Lead also update the sheet, or (b) have W_Regen apply its own trim post-TTS. For now, document and move on — W_Regen is rare and the editor can use the full WAV after a W_Regen if drift matters.
+- **W_Regen interaction**: addressed in the follow-up [W3_TRIM_SHEET_SYNC_FOR_W_REGEN](#2026-05-31--w3_trim_sheet_sync_for_w_regen) entry — Trim Lead For Sequence now ALSO updates the `lead_silence_sec` + `final_duration_sec` columns in the sheet for trimmed cells (via a new `Update Trimmed Localizations` googleSheets node wired off `Has Trim? [true]` in parallel with `Save Trimmed Audio to Drive`). This keeps the sheet co-aligned with Drive content. W_Regen reads `lead_silence_sec` from the sheet to construct its WAV; now those values are correct, so regenerated audio is sequence-aligned out of the box. No code change required in W_Regen.
 - **Diagnostic output changed**: `Build Full Audio Per Lang` no longer emits `trimmed_lead_total_sec` (which was useful to confirm compensation was running). Replaced by `trimmed_segs_count` + `total_trimmed_sec` on the upstream Trim Lead node's logs.
 
 Verification: re-run W3 single-lang FR on `spirio_meditations2_3_2_en_fix`. Expected: 4 segments in Drive end up with shorter `final_duration_sec` matching trim (visible if the editor inspects Drive metadata). End-to-end placement of the 71 individual WAVs in Reaper produces a 684.58s timeline with phrases aligned to EN throughout — no 0.4s drift at seg_10, no cumulative offset by the end.

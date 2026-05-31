@@ -870,6 +870,47 @@
           "name": "Google Drive account"
         }
       }
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU/edit?usp=sharing",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "localizations",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "row_key": "={{ $json.row_key }}",
+            "lead_silence_sec": "={{ $json.lead_silence_sec }}",
+            "final_duration_sec": "={{ $json.final_duration_sec }}"
+          },
+          "matchingColumns": [
+            "row_key"
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "id": "update-trimmed-loc-001",
+      "name": "Update Trimmed Localizations",
+      "position": [
+        38304,
+        14128
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      }
     }
   ],
   "pinData": {},
@@ -1196,6 +1237,11 @@
         [
           {
             "node": "Save Trimmed Audio to Drive",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Update Trimmed Localizations",
             "type": "main",
             "index": 0
           }
