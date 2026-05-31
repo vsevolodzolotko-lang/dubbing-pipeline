@@ -87,7 +87,7 @@ const SLOWDOWN_MIN_GAP_SEC = parseFloat(configMap.slowdown_min_gap_sec) || 0.5;
 // Phase 1 — see DECISIONS 2026-05-27 DYNAMIC_SPEED_AND_SLOWDOWN_FILL. Allows clause-
 // preserving expansions whose char count is right but TTS at default speed lands ~5-10%
 // over the slot (e.g. seg_004_de restoration that needs ~3.5s in a 3.4s speechBudget).
-const MAX_SPEED_UP_DELTA = parseFloat(configMap.max_speed_up_delta) || 0.15;
+const MAX_SPEED_UP_DELTA = parseFloat(configMap.max_speed_up_delta) || 0.20;
 
 // Formality enforcement (mirrors the W2 Formality Lint). Phase 2 expand can re-introduce
 // formal address that the W2 lint — which ran before W3 — never sees. Same deterministic

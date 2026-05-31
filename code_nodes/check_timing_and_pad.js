@@ -1,12 +1,16 @@
 const SAMPLE_RATE          = 22050;
 const BPS                  = 2;
 const BUDGET_FACTOR        = 1.05;
-const MIN_RETAIN           = 0.60;
+const MIN_RETAIN           = 0.45;
 const MAX_RETAIN_EXPANSION = 1.5;
 // Per-language CPS — defaults tuned against real ElevenLabs output; overridable via
 // config keys cps_estimate_de, cps_estimate_es, …, cps_estimate_tr. Computed below.
 const CPS_DEFAULTS = { de: 12, es: 15, fr: 15, pl: 14, pt: 16, it: 14, tr: 14 };
-const HAIKU_MODEL          = 'claude-haiku-4-5-20251001';
+// W3 single-segment shortener. Switched from Claude Haiku 4.5 to Gemini 3.5 Flash
+// on 2026-05-31 — Haiku was too conservative on FR tight slots (returned same text
+// across all 3 retries with a "cannot shorten further" meta tag, hitting the slot
+// truncation path). Gemini Flash is also significantly cheaper. See DECISIONS.md.
+const SHORTEN_MODEL        = 'gemini-3.5-flash';
 // Failure threshold: anything shorter than 100ms of PCM (4410 bytes at 22050Hz
 // mono 16-bit) is treated as a failed TTS response.
 const MIN_VALID_PCM_BYTES = 4410;  // 0.1s × 22050 × 2
@@ -17,11 +21,15 @@ const MIN_VALID_PCM_BYTES = 4410;  // 0.1s × 22050 × 2
 // HTTP node was removed) and processes its whole input batch in parallel via
 // Promise.all. Concurrency = "Loop Over Items" batchSize (default 7); retries
 // within a single job stay sequential, so in-flight ElevenLabs calls ≤ batchSize.
+// As of 2026-05-31 each synthOne invocation also enforces a per-segment wall-clock
+// budget (SEG_BUDGET_MS, default 90s). If Gemini or ElevenLabs hangs on one cell,
+// only that cell's retries are skipped — the rest of the Promise.all batch keeps
+// running, so one bad segment can't blow the 300s task-runner timeout for everyone.
 // ---------------------------------------------------------------------------
 const configMap = {};
 $('Read Config').all().forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });
 const EL_KEY  = configMap.elevenlabs_api_key  || '';
-const ANT_KEY = configMap.anthropic_api_key   || '';
+const GEM_KEY = configMap.gemini_api_key      || '';
 
 // Externalized-prompts loader. Reads from the "prompts" Google Sheets tab via
 // upstream Read Prompts node. Throws if a required key is missing (fail-fast).
@@ -52,10 +60,10 @@ const LANG_CPS = {
   tr: parseFloat(configMap.cps_estimate_tr) || CPS_DEFAULTS.tr,
 };
 if (!EL_KEY)  throw new Error('elevenlabs_api_key missing from config sheet');
-if (!ANT_KEY) throw new Error('anthropic_api_key missing from config sheet');
+if (!GEM_KEY) throw new Error('gemini_api_key missing from config sheet');
 
 const SHORT_SEG_THRESHOLD = parseFloat(configMap.short_seg_threshold_sec) || 2.0;
-const MAX_SPEED_UP_DELTA  = parseFloat(configMap.max_speed_up_delta) || 0.15;
+const MAX_SPEED_UP_DELTA  = parseFloat(configMap.max_speed_up_delta) || 0.20;
 const SHORTEN_STATIC      = loadPrompt('w3_shorten_system', { tov: TOV });
 
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -75,10 +83,10 @@ function buildWav(pcmBuf) {
   return Buffer.concat([h, pcmBuf]);
 }
 
-// Strip Claude meta-commentary.
+// Strip LLM meta-commentary.
 // Meditation translations are always single-line; cut at FIRST newline — anything after is meta
-// like "(Already at N characters; cannot shorten further)" which Claude sometimes appends.
-function sanitizeClaudeOutput(rawText) {
+// like "(Already at N characters; cannot shorten further)" which the LLM sometimes appends.
+function sanitizeLLMOutput(rawText) {
   if (!rawText) return '';
   let t = rawText.trim();
   const nlIdx = t.indexOf('\n');
@@ -92,22 +100,31 @@ function sanitizeClaudeOutput(rawText) {
   return t;
 }
 
-// Generic Claude call — only needs ANT_KEY, so it stays at module scope.
-async function callClaude(systemBlocks, userText) {
+// Generic Gemini call — only needs GEM_KEY, so it stays at module scope.
+// Uses the OpenAI-compatible endpoint (same as W2 Editor + Phase 2 Editor); no
+// prompt caching equivalent to Anthropic ephemeral cache, but per-call cost for
+// Gemini 3.5 Flash is ~3× cheaper than cached Haiku 4.5, so net cost still drops.
+async function callGemini(systemPrompt, userText) {
   const MAX_TRIES = 4;
   for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
     try {
       const resp = await this.helpers.httpRequest({
         method: 'POST',
-        url: 'https://api.anthropic.com/v1/messages',
-        headers: { 'x-api-key': ANT_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-        body: { model: HAIKU_MODEL, max_tokens: 500, system: systemBlocks, messages: [{ role: 'user', content: userText }] },
+        url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+        headers: { Authorization: `Bearer ${GEM_KEY}`, 'content-type': 'application/json' },
+        body: {
+          model: SHORTEN_MODEL,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user',   content: userText      },
+          ],
+        },
         json: true,
       });
-      return resp.content?.[0]?.text?.trim() || '';
+      return resp.choices?.[0]?.message?.content?.trim() || '';
     } catch (e) {
       const isLast = attempt === MAX_TRIES - 1;
-      if (isLast) { console.error('W3 callClaude failed after retries:', e.message); return ''; }
+      if (isLast) { console.error('W3 callGemini failed after retries:', e.message); return ''; }
       // Exponential backoff: 2s, 4s, 8s.
       await sleep(2000 * Math.pow(2, attempt));
     }
@@ -184,7 +201,7 @@ async function synthOne(job) {
     return null;
   }
 
-  async function claudeShorten(currentText, realSec, level) {
+  async function geminiShorten(currentText, realSec, level) {
     const minChars       = Math.floor(currentText.length * MIN_RETAIN);
     const targetChars    = Math.floor(slot * (LANG_CPS[lang] || 15));
     const targetCharsLow = Math.floor(targetChars * 0.85);
@@ -198,17 +215,26 @@ TARGET LENGTH: ~${targetChars} characters
 MINIMUM ALLOWED LENGTH: ${floorChars} characters — do NOT go below this
 ATTEMPT LEVEL: ${level}`;
 
-    const systemBlocks = [
-      { type: 'text', text: SHORTEN_STATIC, cache_control: { type: 'ephemeral' } },
-      { type: 'text', text: dynamicPart },
-    ];
-    const raw = await callClaude.call(this, systemBlocks, currentText);
-    const result = sanitizeClaudeOutput(raw);
+    const systemPrompt = `${SHORTEN_STATIC}\n\n${dynamicPart}`;
+    const raw = await callGemini.call(this, systemPrompt, currentText);
+    const result = sanitizeLLMOutput(raw);
     if (!result || result.length < floorChars) return currentText;
     return result;
   }
 
   let text = job.text;
+
+  // Per-segment wall-clock budget. Caps total time spent on shorten + speed-up
+  // retries for ONE segment so that if Gemini or ElevenLabs slows down badly on
+  // a particular cell, the rest of the batch (Promise.all) is not held hostage.
+  // 90s is generous: a normal shorten cycle (3 Gemini + 3 TTS) is ~20-30s. Set
+  // higher than the n8n task-runner default 300s minus initial-TTS+overhead so
+  // 7 parallel segments under worst conditions still fit. When budget is hit
+  // mid-retry, the loop exits, needs_attention=true is set, and the segment
+  // emits with whatever audio was last produced (truncated as needed).
+  const SEG_BUDGET_MS = 90000;
+  const segStartedAt  = Date.now();
+  const overBudget    = () => (Date.now() - segStartedAt) > SEG_BUDGET_MS;
 
   // Initial TTS — synthesized here (the separate HTTP node was removed).
   let pcm = await tts.call(this, text, baseSpeed);
@@ -277,8 +303,13 @@ ATTEMPT LEVEL: ${level}`;
 
   const LEVELS = ['light', 'medium', 'max'];
   for (let i = 0; i < 3 && pcmDuration(pcm) > maxAllowed; i++) {
+    if (overBudget()) {
+      console.warn(`${segment_id}_${lang}: per-segment budget exhausted in shorten iter ${i + 1}; skipping remaining retries`);
+      needsAttention = true;
+      break;
+    }
     const realSec = pcmDuration(pcm);
-    const shorter = await claudeShorten.call(this, text, realSec, LEVELS[i]);
+    const shorter = await geminiShorten.call(this, text, realSec, LEVELS[i]);
     if (shorter && shorter !== text) {
       const newPcm = await tts.call(this, shorter, 1.0);
       if (newPcm) {
@@ -296,6 +327,11 @@ ATTEMPT LEVEL: ${level}`;
 
   for (const speed of SPEED_UP_STEPS) {
     if (pcmDuration(pcm) <= maxAllowed) break;
+    if (overBudget()) {
+      console.warn(`${segment_id}_${lang}: per-segment budget exhausted in speed-up at ${speed}; skipping`);
+      needsAttention = true;
+      break;
+    }
     const newPcm = await tts.call(this, text, speed);
     if (!newPcm) {
       // TTS failed during speed retry — keep previous pcm + finalSpeed, abort loop.
@@ -379,7 +415,11 @@ ATTEMPT LEVEL: ${level}`;
 }
 
 // Drain the batch in parallel. With "Loop Over Items" batchSize=7, ≤7 synthOne run
-// concurrently → ≤7 simultaneous ElevenLabs calls; one output item per input job.
+// concurrently → ≤7 simultaneous ElevenLabs/Gemini calls; one output item per input
+// job. The per-segment SEG_BUDGET_MS guard above means even if one segment hangs
+// on a slow Gemini/ElevenLabs call, its retries cut off at 90s and the batch
+// progresses — staying well under the 300s task-runner ceiling even with all
+// 7 segments running their full shorten + speed-up paths in parallel.
 const jobs = $input.all().map(i => i.json);
 const out  = await Promise.all(jobs.map(j => synthOne.call(this, j)));
 return out;

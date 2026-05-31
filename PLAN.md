@@ -1,102 +1,121 @@
-# 2-Week MVP Plan
+# Roadmap & Status
 
-## Week 1 — Strict-Timing Pipeline
-
-### Day 1 — Cleanup та переоцінка стану
-- [ ] Cleanup: видалити з Workflow_Synthesize v2 cascade-ноди (Aggregate, Get Localizations Fresh, Cascade Positioning, Save Positions to Sheet) — вони більше не потрібні
-- [ ] Cleanup: видалити з Localizations sheet колонки position_start_sec, position_end_sec
-- [ ] Verify: чи Workflow_Translate реально використовує ToV з config sheet (якщо ні — додати)
-- [ ] Verify: Workflow_Ingest заповнює en_duration_sec правильно (не тільки en_start_sec)
-
-### Days 2-3 — Tone Analysis як перший крок Translate
-- [x] Створити prompts/tone_analysis.md — один Claude-виклик на весь скрипт уроку
-- [x] Підготувати code_nodes: prepare_tone_analysis.js, parse_tone_analysis.js, prepare_and_expand.js (з tone context)
-- [ ] У Workflow_Translate додати в n8n UI: Prepare Tone Analysis → Claude Tone Analysis → Parse Tone Map → Update Tone Columns → (existing translate flow)
-- [ ] Оновити "Prepare and Expand" ноду кодом з code_nodes/prepare_and_expand.js
-- [ ] Output: JSON з per-segment metadata: segment_type (narrative/movement/instruction), movement_keywords, key_concepts. Записати в Sheet (нові колонки segment_type, movement_keywords)
-- [ ] Translation prompt отримує tone_map як додатковий контекст
-
-### Days 4-5 — Adaptation Loop у Translate
-- [x] Створити prompts/adaptation.md — для скорочення тексту під timing budget
-- [x] У Workflow_Translate після перекладу: estimate duration (за CPS з voices або фіксованими langs ratio)
-- [x] Якщо estimated > en_duration_sec * 1.05 → loop adaptation:
-  - Attempt 1: легке скорочення (cut filler words)
-  - Attempt 2: середнє скорочення (rephrase shorter)
-  - Attempt 3: максимальне скорочення (preserve only key meaning)
-  - Між кожною спробою — re-estimate
-- [x] Записати final translation + adaptation_attempts count у Sheet
-- NOTE: реалізовано як окрема "Adapt Translations" нода (Code node з helpers.httpRequest). Вставлена між "Extract Translations" і "Update Sheet" у W2_Translate_v2.json. Код у code_nodes/adapt_translations.js.
-
-### Days 6-7 — Synthesize з strict timing
-- [x] Workflow_Synthesize (переробити v2) → W3_Synthesize_v2.json:
-  - TTS в PCM 22050Hz (точне вимірювання без ffprobe)
-  - Виміряти real_duration_sec з розміру PCM буфера
-  - Якщо <= en_duration_sec × 1.05 → silence padding до en_duration
-  - Якщо > → retry TTS speed 1.10 → re-measure
-  - Якщо все ще > → retry speed 1.15
-  - Якщо все ще > → flag needs_attention=true
-  - Pad + WAV header → upload to Drive
-- [x] Output .wav у Drive: flat folder (drive_output_folder_id з config) → seg_NNN_{lang}.wav
-- NOTE: Реалізовано як "Check Timing + Pad" Code node (code_nodes/check_timing_and_pad.js).
-  Duration вимірюється з PCM bytes (без ffprobe). Silence padding через Buffer.alloc в JS.
-  Потрібно: додати drive_output_folder_id в config sheet.
-
-### Days 6-7b — Synthesize v3 (smart timing)
-
-Архітектурне розширення поверх v2 після аналізу реального прогону sleep_001. v2 strict-timing душить там де можна "вдихнути", а адаптація в Translate інколи занадто агресивна (real_duration / en_duration падає до 0.58–0.85, що дає неприродну тишу).
-
-**Effective slot per segment** (computed in Expand TTS Jobs):
-- `gap_after = next.en_start_sec - this.en_end_sec` (0 для останнього)
-- `max_borrowable = max(0, min(gap_after - min_inter_segment_gap_sec, max_borrow_per_segment_sec))`
-- `effective_slot = en_duration_sec + max_borrowable`
-
-**Synthesize flow (per segment × lang)**:
-- [x] TTS at speed 1.0, виміряти `real_duration_sec` з PCM bytes
-- [x] Branch на основі `real_duration` vs slot:
-  - **`real ≤ tts_budget`** → padding 20/80 (lead/tail), DONE
-  - **`tts_budget < real ≤ effective_slot`** → BREATH BORROW: accept TTS як є, без padding/trim, записати `borrowed_sec = real − en_duration`. **Concat-time compensation**: `Build Full Audio Per Lang` тримить `borrowed_sec[N]` з голови lead silence сегмента N+1, тож full WAV лишається aligned з EN (per-file overshoot не накопичується).
-  - **`real > effective_slot`** → Adapt shorten loop (single-segment Claude call):
-    - Attempt 1 (light): прибрати filler/redundancies
-    - Attempt 2 (medium): rephrase коротше зі збереженням concepts
-    - Attempt 3 (max): compress до core meaning
-    - Між кожною спробою re-TTS at 1.0 і re-check vs effective_slot
-  - **IF after 3 adapt attempts still > effective_slot** → speed AS LAST RESORT:
-    - speed 1.10 → re-TTS
-    - speed 1.15 → re-TTS
-    - Still over → `needs_attention=true`, hard truncate to fit
-- [x] **Expansion loop** (after fit-check, only when shorten/speed never fired): IF `real_duration < en_duration × expansion_threshold` → single-segment Claude expand call, max 2 attempts. Якщо нова версія overshoots `effective_slot` → revert до попередньої коротшої.
-- [x] **Silence distribution 20/80**: коли `real ≤ tts_budget`, розподілити `padding = tts_budget − real`:
-  - Default: `silence_lead_ratio × padding` на lead, решта на tail
-  - Exception: якщо natural EN gap (`lead_silence_natural_sec` з prev's en_end до this en_start) > 0 — використати його як lead (зберігає timeline alignment), всю padding в tail
-- [x] **Output WAV**: `[lead_silence] + [TTS audio] + [tail_silence]`, total = `lead + real + tail` (з борровом може бути більше за `en_duration + lead`)
-- [x] **Записати в localizations**: `real_duration_sec`, `lead_silence_sec`, `tail_silence_sec`, `borrowed_sec`, `final_speed`, `expansion_attempts`, `shorten_retries_in_synthesize`, `needs_attention`
-- NOTE: Реалізовано в `workflows/W3_Synthesize_v2.json` — оновлені ноди Expand TTS Jobs, Check Timing + Pad, Prepare Localization Row + schema Update Localizations. Код у `code_nodes/check_timing_and_pad.js`.
-
-**Config keys involved**: `min_inter_segment_gap_sec` (existing, реюз для borrow buffer), `max_borrow_per_segment_sec` (new), `expansion_threshold` (new), `silence_lead_ratio` (new).
-
-**Sheet changes**: rename `trailing_silence_sec` → `tail_silence_sec`; add `borrowed_sec`, `expansion_attempts`, `shorten_retries_in_synthesize`.
+Поточний стан: **production-ready baseline зведений**. 2-week MVP завершено; pipeline прогнаний на 11-хвилинному реальному уроці (`sleep1_full`). Документ переорганізовано в три блоки: (1) що зроблено по MVP-плану, (2) що зроблено понад план в R1–R7 + Phase 2, (3) що лишається до ship.
 
 ---
 
-## Week 2 — Drive trigger + Atomic regenerate + Polish
+## 1. 2-week MVP — DONE
 
-### Days 1-2 — Drive-folder тригер
-- [x] Workflow_Master: Trigger = Google Drive folder watch на input/
-- [x] При новому файлі → запускає Ingest → Tone Analysis → Translate → Synthesize послідовно
-- [x] Notification у Telegram коли все готово (з посиланнями на output папку)
-- NOTE: реалізовано як `workflows/W_Master.json` (2026-05-17). Drive Trigger polls `drive_input_folder_id` щохвилини, `Parse Filename` витягує `lesson_id` з імені файлу (`sleep_002.mp3` → `sleep_002`), три Execute Workflow ноди викликають W1/W2/W3 з retry=1 (5s backoff, потім `stopWorkflow`). W1 розширено: додано Execute Workflow Trigger + Get Params Code-ноду, щоб приймати `{file_id, lesson_id}` від W_Master і fallback-ити на хардкод при ручному запуску. Telegram повідомлення містить lesson_id, filename, active_langs і лінк на `drive_output_full_folder_id`. Нові config-ключі: `drive_input_folder_id`, `telegram_chat_id`.
-- NOTE (2026-05-17): зловлено баг — W2 і W3 читали ВСІ рядки з `segments` без `lesson_id` фільтра, тому при наявності залишкових рядків попередніх уроків нові дропи генерували дубляж не того файлу (test3_small.wav → `sleep_001_full_*.wav`). Виправлено: W2 і W3 отримали той самий dual-trigger pattern (Manual + Execute Workflow Trigger → Get Params), а Code-ноди `Prepare Tone Analysis`, `Prepare and Expand`, `Expand TTS Jobs`, `Build Full Audio Per Lang` тепер фільтрують по `segment_id.startsWith(lesson_id + '_')`. Якщо lesson_id null (ручний запуск через Manual Trigger) — фільтр пропускається (backward compat). У W_Master виправлено `$('Parse Filename').first()` → `$json.lesson_id` для коректної per-item ітерації, і Build Telegram Message переписано щоб емітити N items (по одному на дропнутий файл). Multi-file drop тепер працює коректно як побічний продукт.
+### Week 1 — Strict-Timing Pipeline ✅
 
-### Days 3-4 — Atomic regenerate single segment
-- [ ] Workflow_Regenerate_Single: webhook trigger
-- [ ] Input: segment_id, lang, optional new_text
-- [ ] Якщо new_text дано — оновити в Sheet, скіпнути translate/adapt
-- [ ] TTS → padding → upload (overwrite з backup у /_backup/)
+- [x] **Day 1 — Cleanup та переоцінка стану**
+  - Cascade-ноди (Aggregate, Get Localizations Fresh, Cascade Positioning, Save Positions to Sheet) видалені з W3
+  - Колонки `position_start_sec`, `position_end_sec` прибрані з `localizations`
+  - ToV з config sheet працює у W2; W1 коректно заповнює `en_duration_sec`
 
-### Days 5-6 — Real-world test
-- [ ] Прогнан 2-3 повних реальних уроки через pipeline
-- [ ] Зібрати список реальних проблем (звук, переклад, timing)
-- [ ] Зафіксувати у DECISIONS.md як open issues
+- [x] **Days 2-3 — Tone Analysis як перший крок Translate**
+  - `prompts/tone_analysis.md` + ноди Prepare Tone Analysis → Claude Tone Analysis → Parse Tone Map в W2
+  - Per-segment metadata (`segment_type`, `movement_keywords`, `key_concepts`) записується в `segments` sheet
+  - Translation prompt отримує tone_map як контекст
 
-### Day 7 — Buffer
-- [ ] Дебаг, шліфування, документація для босса
+- [x] **Days 4-5 — Adaptation Loop у Translate**
+  - 3-tier shorten (light/medium/max) винесений у `code_nodes/adapt_translations.js`, інтегрований у W2
+  - `prompts/adaptation.md` + `adapt_attempt_*` промпти у Sheets `prompts` tab
+  - В R6.a (2026-05-22) merge у єдиний шаблон `adapt_attempt_unified`
+
+- [x] **Days 6-7 — Synthesize v2 (strict timing)**
+  - PCM-based duration measurement без ffprobe
+  - 3-tier shorten loop у Check Timing + Pad
+  - Speed retry 1.10 → 1.15 → `needs_attention=true` як остаточний fallback
+  - Per-segment WAV + concat → full per-lang WAV у Drive
+
+- [x] **Days 6-7b — Synthesize v3 (smart timing)**
+  - Breath-borrow / expansion / silence 20/80 → реалізовано, потім частково revoked (див. R/Phase 2 нижче)
+  - Concat-time borrow compensation у Build Full Audio Per Lang
+
+### Week 2 — Drive trigger + Atomic regenerate + Polish ✅
+
+- [x] **Days 1-2 — W_Master Drive trigger**
+  - `workflows/W_Master.json`: Drive folder watch → Parse Filename → Execute W1 → W2 → W3 → Slack notification
+  - Multi-file drop працює (per-item ітерація + `lesson_id` фільтр у всіх Code-нодах W2/W3)
+
+- [x] **Days 3-4 — W_Regen (atomic single-segment regenerate)**
+  - `workflows/W_Regen.json` (commit `8fa446e`, 2026-05-28)
+  - Замінює per-segment WAV "in place" з deterministic filename matching, без duplicate-файлів у Drive
+
+- [x] **Days 5-6 — Real-world test**
+  - Прогнаний `sleep1_full` (11 хв, 47 сегментів × 7 мов = 329 cells)
+  - Видобуті production-grade проблеми задокументовані в `DECISIONS.md`: refusal detection, false-friend ES seg_019, borrow drift seg_035-037, n8n filesystem binary bug, 300s task-runner ceiling
+  - Усі пофікшено в R/Phase 2 ітераціях
+
+- [x] **Day 7 — Buffer / boss-doc**
+  - README.md повний rewrite під production-ready статус (2026-05-17)
+  - `docs/external_review_briefing.md` (2026-05-21) — single-doc briefing для зовнішнього прогляду промптів і архітектури
+
+---
+
+## 2. Post-MVP refactor R1–R7 + Phase 2 + Formality Lint — DONE
+
+Все робилося в response на конкретні фейли з real-world прогонів. Хронологія в `DECISIONS.md`, тут — index.
+
+### Robustness & Scaling
+
+- [x] **Retry + backoff** на Claude/ElevenLabs (`DECISIONS.md` 2026-05-18)
+- [x] **Batched translation** для уникнення token rate-limit (CHUNK=3, 2026-05-18)
+- [x] **Bounded concurrent batches** у Verify/Editor/Adapt (R2, 2026-05-21)
+- [x] **SplitInBatches scaling** — W2 Adapt (batchSize=15) + W3 Phase 2 (batchSize=105 = 15×7) wrapped під n8n 300s task-runner ceiling (2026-05-28)
+- [x] **Filesystem binary mode root-cause fix** — `tts()` inline helper bypass через `httpRequest({encoding: 'arraybuffer'})` (2026-05-21)
+- [x] **Empty buffer guard + 100ms PCM threshold** у Check Timing + Pad (2026-05-21)
+
+### Quality & Prompts
+
+- [x] **R1** — pause-marker rule + output-purity reminders
+- [x] **R3.a** — fail-loud on dropped segments
+- [x] **R4** — qa_verify_system (semantic) vs editor_system (native-rhythm) differentiated
+- [x] **R5** — data-informed translate_system rewrite
+- [x] **R6.a** — adapt_attempt_{light,medium,max} merged → unified template
+- [x] **R6.c** — three-layer false-friend defense + cross-segment mantra consistency + FR formality scan
+- [x] **R7.a/R7.b** — CPS calibration tooling (`scripts/analyze_cps.js`) + runbook у `scripts/README.md`
+- [x] **ToV v3** — universal principles + per-content-type guidance + translation considerations (2026-05-23)
+- [x] **Prompts externalized** у Sheets `prompts` tab (11 промптів + ToV, 2026-05-21)
+- [x] **Formality Lint** — deterministic enforce informal address у W2 (Phase 1) і W3 Phase 2 expand output (2026-05-27)
+
+### Phase 2 (slowdown-to-fill + expansion via patterns)
+
+- [x] **W3 Phase 2 batched expansion** через Verify + Editor (2026-05-25)
+- [x] **Phase 2 retry pass** (`reTtsOne` speed-up на overshoot) + per-candidate diagnostics
+- [x] **Cross-lang isolation** + structural filter + data-corruption fix
+- [x] **LLM refusal detection** (REFUSAL_PATTERNS + `looksLikeRefusal`) — Opus 4.7 occasional English meta/refusal на rare cases
+- [x] **Diff-first restoration** + gender neutrality + Opus 4.7 на Phase 2 (2026-05-28)
+- [x] **Dynamic per-voice speed** + Phase 2 slowdown-to-fill (2026-05-27)
+- [x] **Slot duration derived from `en_end - en_start`** (не зі збереженого `en_duration_sec`, 2026-05-22)
+
+### Subtitles & VTT
+
+- [x] **VTT subtitles per-lang у W3** — emit + upload у dedicated Drive folder (2026-05-20)
+
+---
+
+## 3. Open items — до production ship
+
+Розбито за пріоритетом. Те, що тут — це те, що реально треба зробити, перш ніж віддавати продукт босові / клієнту.
+
+### Must-have перед ship
+
+- [ ] **Boss-facing 1-page doc** — короткий "як дроп файл → отримати дубляж", без технічного жаргону. README.md технічний; потрібен runbook рівня "що бачить нетехнічний користувач".
+- [ ] **QA dashboard / Sheet view** — фільтр по `needs_attention=TRUE`, `phase2_outcome=llm_refusal`, `llm_dropped` та `shorten_retries_in_synthesize >= 3`. Зараз ці колонки є, але людина мусить вручну фільтрувати — треба saved view + Slack alert якщо >0 за прогін.
+- [ ] **End-to-end прогін ще на 1-2 уроках різного формату** (наприклад: 30-сек афірмація + 20-хв медитація). Sleep1_full — лише один кейс; треба covering для edge cases по тривалості.
+- [ ] **External review briefing follow-up** — `docs/external_review_briefing.md` готовий, але результати зовнішньої оцінки промптів і архітектури ще не інтегровані. Якщо feedback зібрано — закрити TODO в `prompts` tab.
+
+### Should-have (cleanup)
+
+- [x] **Borrow / dead-key audit (2026-05-31)** — підтверджено, що `max_borrow_per_segment_sec` НЕ dead: він активний для short segments (`en_duration < short_seg_threshold_sec`, default 2.0с) через `CONDITIONAL_BREATH_BORROW_FOR_SHORT_SEGMENTS` (2026-05-19), а concat-time компенсація у `Build Full Audio Per Lang` нейтралізує per-segment overshoot для full WAV. Розширення borrow на всі сегменти (Варіант B) відкладено до явного запиту — поточна поведінка дає cross-lang sync на per-segment рівні + breath room для коротких афірмацій. Документація синхронізована у README.md (Sheets cheatsheet + localizations watch-list) і `docs/config_keys.md`.
+- [ ] **Залишкові dead config-keys** — `min_speed` (ніколи не wired) і старий absolute `max_speed` (superseded 2026-05-27 → `max_speed_up_delta`/`max_slow_down_delta`). Зараз тільки задокументовано як dead; можна фізично видалити рядки з config sheet (code має fallback default).
+- [ ] **PLAN.md / DECISIONS.md cross-reference** — деякі decisions (наприклад `STRICT_ALIGNMENT_DISABLE_BREATH_BORROW`) частково revoke попередні; додати "see also" посилання, щоб новий читач не плутався
+- [ ] **Sheets schema doc sync** — після всіх R/Phase 2 змін перевірити, що `docs/sheets_schema.md` відповідає тому, що реально пишеться (особливо нові колонки `phase2_outcome`, `phase2_diag`, `llm_dropped`, `final_speed`)
+
+### Nice-to-have (post-ship)
+
+- [ ] **Streaming concat via ffmpeg** — поточний Build Full Audio тримить всі WAVs в памʼяті; для уроків 30+ хв може стати проблемою (memory refactor зроблено 2026-05-19, але fundamental fix залишається на Phase 3)
+- [ ] **W_Regen UX** — зараз trigger ручний (webhook), можна додати Sheet-based trigger (поставив прапорець `regen=TRUE` у segment → W_Regen підхопив)
+- [ ] **Cost dashboard** — поточний estimate в README ($0.10–0.25/lesson) ґрунтується на ~60-сек уроці; для 11-хв і 20-хв треба зібрати real-cost telemetry і додати у README

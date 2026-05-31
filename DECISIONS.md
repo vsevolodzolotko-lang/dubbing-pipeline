@@ -4,6 +4,259 @@
 
 ---
 
+### 2026-05-31 — BORROW_BEHAVIOR_AUDIT_DOCS_SYNC
+
+Context: PLAN.md had `max_borrow_per_segment_sec` listed як "formally dead" у should-have cleanup; README.md → Sheets cheatsheet теж позначав key як "currently unused"; `localizations` watch-list казав `borrowed_sec` "should be 0 (strict alignment)". Це було неточно: `max_borrow_per_segment_sec` фактично активний — використовується як ceiling у `Expand TTS Jobs → effective_slot_sec` обчисленні і застосовується runtime коли `isShortSeg=true` у `Check Timing + Pad`. Користувач попросив зʼясувати, як вирішити це питання і які ризики змін.
+
+Decision: документувати поточну поведінку як інтенціональний design, не міняти код. Логіка зараз:
+
+1. **Normal-length segments (`en_duration_sec ≥ short_seg_threshold_sec`, default 2.0с)** — strict alignment, `maxAllowed = en_duration_sec`. TTS, що overrun, проходить через 3-tier Claude shorten → 2-tier speed retry → hard truncate + `needs_attention=true`. Per-segment WAV duration ідентична між мовами.
+2. **Short segments (`en_duration_sec < short_seg_threshold_sec`)** — conditional breath-borrow дозволено. `maxAllowed = effective_slot_sec = en_duration + min(gap_after - MIN_GAP, max_borrow_per_segment_sec)`. TTS може вийти у trailing gap; `borrowed_sec` записується в localizations.
+3. **Full WAV alignment** — `Build Full Audio Per Lang` тримить `borrowed_sec[N]` секунд з голови lead_silence сегмента N+1 (`Math.min(prevBorrow, leadSec)` guard). Структурний інваріант з Expand TTS Jobs (`maxBorrowable ≤ gap_after - MIN_GAP` і `lead_silence_natural[N+1] == gap_after[N]`) гарантує, що trim не їсть TTS audio. Full WAV для кожної мови ≈ EN audio length, незалежно від per-segment borrow.
+
+Розглянуті альтернативи:
+
+- **Варіант B — borrow для всіх сегментів** (зняти SHORT_SEG_THRESHOLD gate). Pros: менш аґресивний truncation на normal segments що трохи overrun-ять. Cons: per-segment WAV durations розходяться між мовами (повертає причину `STRICT_ALIGNMENT_DISABLE_BREATH_BORROW` 2026-05-17). Full WAV alignment залишається ОК через concat-time compensation, АЛЕ якщо хтось консьюмить per-segment файли окремо (наприклад QA в DAW з 7 lang stems на таймлайні) — побачить drift. Risk: MEDIUM. Відкладено до явного запиту з підтвердженням use case per-segment файлів.
+- **Варіант C — two-pass cross-lang aware borrow** (всі 7 langs одного сегмента → max extension → однакова final_duration). Pros: повний sync і на per-segment рівні. Cons: rework Phase 1 batch loop + Phase 2 + W_Regen, memory hit на 7 PCM buffers одночасно, ризик OOM на 30+ хв уроках. Risk: HIGH. Не для до-ship стану.
+
+Decision rationale: поточний компроміс design-justified — strict для normal segs (cross-lang sync на per-segment рівні), borrow для short афірмацій (де truncation чутніший на слух), concat compensation як safety net. Доки реальний use case не покаже потребу — нічого не міняти.
+
+Files changed (doc-only):
+- `README.md` — Sheets cheatsheet прибрав "currently unused" від `max_borrow_per_segment_sec`, додав blockquote з "Borrow behavior" що пояснює умовну активність + посилання на DECISIONS. `borrowed_sec` watch-list переписаний (0 для normal, non-zero expected для short segs).
+- `PLAN.md` — should-have item з "Dead config-keys cleanup" перейменований і закритий: `max_borrow_per_segment_sec` НЕ dead, залишковий cleanup тільки для `min_speed` + старого `max_speed`.
+- `DECISIONS.md` — цей запис.
+
+`docs/config_keys.md` уже містить коректний опис `max_borrow_per_segment_sec` і `short_seg_threshold_sec` — без правок.
+
+Future work (revisit triggers):
+- Якщо real-world прогони на DE/PL (довші мінімальні слова) покажуть persistent truncation на normal segs → розглянути Варіант B з підтвердженням, що per-segment файли не консумуються окремо.
+- Якщо клієнт вимагає per-segment cross-lang sync (DAW workflow з 7 lang stems) → Варіант C, planned як post-MVP.
+
+---
+
+### 2026-05-31 — W3_PER_SEGMENT_WALL_CLOCK_BUDGET
+
+Context: After the W3 shorten stack (Haiku→Gemini Flash + MIN_RETAIN 0.45 + new w3_shorten_system prompt) shipped, the `Check Timing + Pad` Code node hit a 300s task-runner timeout on batch 8 (segs 057-063) of the `spirio_meditations2_3_2_en_fix` FR re-run. Root cause: the new shorten pipeline is more "active" than the old one — Gemini Flash actually returns shorter text (instead of Haiku's frequent "cannot shorten further" early-out), which triggers a re-TTS, which may still not fit, which triggers another Gemini call, etc. Worst-case per segment: 1 initial TTS + 3 (Gemini + TTS) + 2 speed-up TTS = up to 9 sequential HTTP calls. With batchSize=7 running Promise.all in parallel, this normally completes in ~30-40s. But occasional slow Gemini calls (30+s for a single response when traffic is heavy) or ElevenLabs queueing on a tight tier pushes one segment's wall-clock to 60+s, and when multiple segments in the same batch hit this simultaneously, the parallel `Promise.all` aggregate stays bounded by the slowest. We observed batch 8 cross 300s in real production.
+
+Tried first: lowered batchSize 7 → 3. Conceptually safer (smaller parallel set) but defeats the purpose of using ElevenLabs tier concurrency the user is paying for. User pushed back — wants to keep batchSize high and add a retry/safety mechanism instead.
+
+Tried considered: n8n `retryOnFail` on the Code node. Uncertain whether n8n's task-runner timeout (which kills the V8 process) propagates as a catchable failure to retryOnFail's wrapper. None of our existing Code nodes use this, so no precedent in the repo. Even if it worked, retrying re-does ALL 7 segments in the batch when typically only 1 was slow — wasteful.
+
+Decision: keep batchSize=7 AND add a **per-segment wall-clock budget** inside `synthOne` in `code_nodes/check_timing_and_pad.js` (and the embedded `Check Timing + Pad` node in `workflows/W3_Synthesize_v2.json`):
+
+```js
+const SEG_BUDGET_MS = 90000;          // 90 s
+const segStartedAt  = Date.now();
+const overBudget    = () => (Date.now() - segStartedAt) > SEG_BUDGET_MS;
+```
+
+Checked at the top of each shorten-loop iteration AND before each speed-up TTS retry. When `overBudget()` returns true:
+- `console.warn` with the segment_id + which phase exhausted the budget
+- `needsAttention = true`
+- `break` out of the retry loop
+- Segment still emits whatever audio was last produced (may be original initial-TTS audio that didn't fit; the downstream truncation code handles that)
+
+Why 90s: a normal shorten cycle (3 Gemini + 3 TTS) is ~20-30s when everything is healthy. 90s gives 3× margin — covers slow Gemini responses + ElevenLabs queueing without being so generous that 7 parallel segments all hitting their budget would still timeout (7 × 90 / 7 parallelism = 90s, well under 300s).
+
+Why per-segment and not per-batch: when one segment is slow, only IT should be capped. The other 6 in the batch may be processing fine and shouldn't be cut short for an unrelated bottleneck. Per-segment also keeps the cap surgical — fast segments aren't even aware of the budget.
+
+Trade-offs:
+
+- **Cells that genuinely need >90s of work get flagged**: rare but possible — a structurally tight slot with verbose FR + slow Gemini may hit the budget mid-shorten and emit with `needs_attention=true`. Same outcome as if shorten had returned same text 3 times; only the audit trail differs (now logs a "budget exhausted" warning). Editor reviews these on the sheet just like any other flagged cell.
+- **Not a config key**: `SEG_BUDGET_MS` is a code constant, not a sheet key. Tweaking it requires a code edit. Made deliberately — it's a safety guard against pathological behavior, not a tuning knob editors should touch. If we ever observe that 90s genuinely caps healthy cells, we'd raise the constant in code.
+- **No retry**: if a cell budget-exhausts, we DON'T retry that single cell with a fresh budget. Adding such a retry adds complexity (state tracking, second pass) and the cell is already flagged for human review — the marginal value is low. Could be added later if needed.
+
+Verification: re-run the same FR lesson at batchSize=7. Expected: full 71 segments emit, no 300s timeout. Some cells (the same residual 2-3 we saw at batchSize=3) may still show `needs_attention=true` but with `final_speed=1.06` + `shorten_retries=3` — the LLM hitting its semantic floor, NOT the budget guard. Budget-exhaustion shows different log signature (the `console.warn` line in n8n execution logs).
+
+Rollback: revert this commit. The budget guard is purely additive — removing the lines + restoring batchSize choice returns to prior behavior. No data migration needed.
+
+Related: this completes the `2026-05-31` W3 shorten stack ([W3_SHORTEN_HAIKU_TO_GEMINI_FLASH](#2026-05-31--w3_shorten_haiku_to_gemini_flash) + [W3_SHORTEN_MIN_RETAIN_AND_PROMPT_REWRITE](#2026-05-31--w3_shorten_min_retain_and_prompt_rewrite)). The shorten work got more aggressive in quality (lower MIN_RETAIN + better prompt + better model), then required this guard to stay reliable in throughput. Net result: ~3.6% `needs_attention` rate at full ElevenLabs concurrency, in well under 300s per batch.
+
+---
+
+### 2026-05-31 — W2_EXTRACT_AUTO_RECOVERY_FOR_DROPPED_SEGMENTS
+
+Context: On `spirio_meditations2_3_2_en_fix` re-runs of W2, Sonnet 4.6 in `Claude Translate` occasionally drops one entire batch of segments — returns HTTP 200 + valid-looking JSON but missing some `segment_id` keys. `Extract Translations` detects this and throws `Translator dropped N segment(s) … Re-run W2 to recover` (line 67). HTTP-level retries on the `Claude Translate` node do NOT fire because the response was 200; only Code-throw stops the workflow. Previously the user could just hit "Retry execution" in n8n UI and a fresh run usually returned a complete JSON; recently retries stopped helping (likely because prompt-caching of the system block makes Sonnet's response increasingly deterministic on repeat-cached prefixes within the 5-min TTL window).
+
+Tried first (V1): lower `BATCH_SIZE` in Prepare and Expand from 8 → 4 to reduce the number of segments at risk per drop. Result: still dropped one batch (seg_021-024), just a different one. Conclusion: drops are roughly per-batch-probabilistic, not per-batch-content. Smaller batches don't reduce the rate; they only reduce the cost per drop event (fewer segments to recover).
+
+Decision: Add **auto-recovery** to `Extract Translations`. When dropped segments are detected, instead of throwing immediately, attempt a per-segment Claude retry. Each retry sends ONE segment per Claude call with NO prompt-cache header. Single-segment calls are effectively immune to silent-drop (Claude can't "forget" the only segment it was asked to translate) and no cache prevents the cache-induced determinism the batch path may have hit. Only if individual retries also fail (genuine API error or refusal) does the node throw with the remaining unrecovered list.
+
+Implementation in `code_nodes/extract_translations.js` (and embedded `Extract Translations` node in `workflows/W2_Translate_v2.json`):
+
+- Added `parseClaudeBody(claudeResp)` helper extracted from inline try/catch — reused by both main batch parsing and per-segment recovery.
+- Added `retryOneSegment(seg)` async function: builds a one-segment userMap, calls Sonnet 4.6 directly (no `cache_control`), parses, returns translations on success.
+- Reads `anthropic_api_key` from config; throws a clear error if missing AND any drops detected.
+- Reuses `translate_system` + `tone_of_voice` prompts via the same `loadPrompt` pattern Prepare and Expand uses, so the retry follows the same JSON-shape + ToV contract.
+- Honors `active_langs` gate for both the userContent hint and the post-parse "filled langs" check.
+- MAX_TRIES=3 per segment with exponential backoff (2s, 4s).
+- Final `stillDropped[]` is what gets thrown. Adds "and auto-recovery failed" to the message so the user knows the easy path was already attempted.
+
+Trade-offs:
+
+- **Latency on drop runs**: each recovery is +1 API call (~2-3s). A run that drops 4 segments adds ~12s end-to-end. Acceptable — beats a full W2 re-run (~5-10 min).
+- **Cost on drop runs**: each recovery is ~$0.001 (Sonnet 4.6 input ~3K tokens including non-cached system prompt + 200 tokens output). 4 drops = ~$0.004. Negligible.
+- **Recovery quality**: a single-segment call lacks the cross-segment context the original batch had. The system prompt (ToV) is identical, so tone won't drift. But subtle within-batch consistency (e.g., choosing the same FR word for "breath" across consecutive segments) may differ slightly between recovery and batch translations. For meditation content this is rarely visible, but for technical/educational content with shared terminology it could matter. If observed, escalate to a 2-segment recovery batch (current segment + nearest non-dropped peer).
+- **Loss of the "Re-run W2 to recover" UX habit**: editors who relied on the prior "just hit retry" pattern will now see recovery happen automatically and not realize the workflow had a near-miss. Mitigated by `console.log('Recovered ' + seg.segment_id)` for each recovered cell — visible in n8n execution logs.
+
+`BATCH_SIZE` stays at 4 for now (the V1 change above). It doesn't reduce drop rate but it reduces the per-drop blast radius. Can be reverted to 8 if cost or latency matters more; the auto-recovery handles either.
+
+Verification: re-run W2 single-lang FR on `spirio_meditations2_3_2_en_fix`. Expected outcome on the same drop-prone batches: recovery logs visible in execution, no `Translator dropped` error, all 71 segments emitted. If recovery genuinely fails (e.g., Sonnet refuses certain content even one-at-a-time), the throw message will list the unrecovered segments and the user can fall back to W_Regen with a manual translation.
+
+Rollback: revert this commit. The throw-on-any-drop behavior returns; the user must rerun W2 manually as before.
+
+Related: this fix is upstream of the W3 shorten work (Haiku→Gemini Flash + MIN_RETAIN + prompt rewrite). They're independent — W2 reliability and W3 compression-headroom are separate axes. Both stack into the same end-to-end run.
+
+---
+
+### 2026-05-31 — W3_SHORTEN_MIN_RETAIN_AND_PROMPT_REWRITE
+
+Context: Stacked with the same-day [W3_SHORTEN_HAIKU_TO_GEMINI_FLASH](#2026-05-31--w3_shorten_haiku_to_gemini_flash) swap, BEFORE testing it on the residual 8/71 truncated FR cells. The user requested doing both levers simultaneously: lower the char-floor that lets the shortener return shrinkier output AND revise the system prompt to explicitly authorize aggressive cuts (rephrase, clause-drop, ellipsis substitution) instead of treating every modifier as load-bearing.
+
+Decision: Two coordinated changes on top of the Gemini Flash swap.
+
+1. **Lower `MIN_RETAIN` from 0.60 → 0.45.** In `code_nodes/check_timing_and_pad.js` and the embedded `Check Timing + Pad` node in `workflows/W3_Synthesize_v2.json`. This is the "do not go below" floor passed to the shortener prompt and re-checked when the result comes back:
+
+   ```js
+   floorChars = Math.max(0.45 × currentText.length, 0.85 × targetChars)
+   ```
+
+   With the old 0.60 floor on a 99-char input + slot target 68 chars: floor = `max(59, 58) = 59` — the percent floor binds. With 0.45 × 99 = 44 — now the target-driven 58 binds for THIS case. The change matters most for inputs where the percent floor was the binding constraint, which is exactly the residual 8 cells. Result: LLM has more latitude to return short rewrites that previously got rejected for going below 0.60 of input.
+
+2. **Revise the `w3_shorten_system` prompt** in the Google Sheets `prompts` tab. The new text is checked into `prompts/proposed_changes/w3_shorten_system.md`. Five substantive changes vs the previous version:
+
+   - Lead paragraph inverts the priority: "faithful approximation under target is ALWAYS preferred to perfect overshoot". Previous prompt's first lines emphasized meaning preservation, which Haiku optimized for at the expense of length.
+   - Level `max` is explicitly redefined: it MAY rephrase, MAY drop one non-essential clause, MAY substitute ellipsis for a descriptive phrase. Previous max-level wording was vague about whether structural changes were allowed.
+   - Adds concrete connector simplification examples ("dans la façon dont tu" → "comme tu") — these are the exact patterns that block FR shortening. Targets the specific failure mode observed in seg_046.
+   - Adds "if already at floor → rephrase first, return same text as LAST resort". Previous prompt let the LLM short-circuit to "no change"; new prompt forces at least one rewrite attempt before giving up.
+   - Adds explicit anti-meta rules: no `(already at N chars)` epilogue, no `Shortened:` prefix, no markdown wrapping, no quotes. Tightens the contract so `sanitizeLLMOutput` doesn't have to clean up as much.
+
+   The prompt is plain text + a single `{{tov}}` placeholder, same shape as before. No code change needed to consume it — `loadPrompt('w3_shorten_system', { tov: TOV })` still works.
+
+Why both at once: they address the same root cause from two angles. The MIN_RETAIN lever expands the *contract* (LLM is allowed to go shorter); the prompt rewrite expands the *willingness* (LLM is explicitly told to actually use that latitude). Either alone might be insufficient — Gemini might still refuse to drop modifiers even with a lower floor; or it might want to drop them but be capped by the floor on small texts. Together they should saturate the lever.
+
+Trade-offs:
+
+- **Quality risk on `max` level**: a more aggressive shortener may produce FR that loses subtle nuance ("un peu plus de poids" → "plus de poids" loses the meditative softness). Mitigated by `MAX_RETAIN_EXPANSION` already keeping growth bounded and by the existing Phase 2 expansion path catching cells that go too short. If we observe quality regressions in spot-checks, the lever to pull back is the prompt — keep `max` more conservative.
+- **`MIN_RETAIN` is non-config**: hardcoded constant, not a sheet key. Tweaking it requires a code edit. If we end up wanting per-lesson or per-lang tuning, adding `min_retain_ratio` as a config key is straightforward. Not done now to avoid premature config-key proliferation.
+- **Prompt revision is in Sheets, not code**: the canonical source of truth is the live `prompts` tab. The repo snapshot in `prompts/proposed_changes/w3_shorten_system.md` is a paste-target and a rollback reference, not the active prompt. If the user pastes a different value, the proposed_changes file goes stale until updated.
+
+Verification (combined with the Haiku→Gemini swap): re-run W2 + W3 single-lang FR on `spirio_meditations2_3_2_en_fix`. Target `needs_attention=TRUE` rate ≤ 4/71 (≈5%). Cross-check that previously-flagged cells now show:
+- `text_translated` materially shorter than the CSV 46 version (visible diff in length and possibly in phrasing — rephrase is expected, not just trimming)
+- `real_duration_sec < slot_duration_sec` with `tail_silence_sec > 0`
+- `final_speed` may drop from 1.06 ceiling to baseSpeed (0.86) on cells where the text now fits without speed-up needed
+
+Rollback: revert this commit + paste the previous `w3_shorten_system` value back into the Sheets cell. Both halves are independent and safe to roll back separately.
+
+Related: this is the third stacked lever after [FR_SPEED_HEADROOM_AND_CPS_LOWER](#2026-05-31--fr_speed_headroom_and_cps_lower) and [W3_SHORTEN_HAIKU_TO_GEMINI_FLASH](#2026-05-31--w3_shorten_haiku_to_gemini_flash). Together they target the FR-tight-slot failure mode from multiple angles: structural (W1 split → smaller slots), mechanical (max_speed_up_delta → more compression via TTS speed), CPS-target (cps_estimate_fr → more aggressive W2 Adapt), model (Haiku → Gemini Flash), floor (MIN_RETAIN), and prompt-license. If the residual rate after all six levers is still >5%, the next lever is per-cell escalation to Sonnet-4.6 for shorten — but that's a larger architectural change (parallel-attempt comparison) and we'd wait until the simpler levers are exhausted.
+
+---
+
+### 2026-05-31 — W3_SHORTEN_HAIKU_TO_GEMINI_FLASH
+
+Context: After [FR_SPEED_HEADROOM_AND_CPS_LOWER](#2026-05-31--fr_speed_headroom_and_cps_lower) the FR `spirio_meditations2_3_2_en_fix` re-run dropped `needs_attention=TRUE` from 39% to 11% (8/71), but 8 residual cells all share the same fingerprint: `shorten_retries_in_synthesize=3`, `final_speed=1.06` (the new ceiling), `real_duration_sec == slot_duration_sec` (hard-truncated). Inspection of one case (seg_046, 99 chars / 6.88 s slot):
+
+- The W3 single-segment shortener (`code_nodes/check_timing_and_pad.js` → `claudeShorten`) was calling Claude Haiku 4.5 with prompts `w3_shorten_system` + a dynamic task description. The function asks Haiku to shorten the current text to `~target_chars` while not going below a floor of `max(0.60 × current, target × 0.85)`.
+- For seg_046 the floor was 59 chars — easily reachable. Yet across all 3 retry attempts (`light` → `medium` → `max`), Haiku returned the same 99-char text each time, appending a meta tag `(Already at N characters; cannot shorten further)` which `sanitizeClaudeOutput` strips. So `shortenRetries` ticked up to 3 but the text never actually shrank.
+- Root cause: Haiku is conservative on meaning-preserving compression. When meditation FR text has dense modifiers ("un peu plus de poids dans tes pas, plus de présence dans la façon dont tu habites ton corps"), Haiku considers each modifier load-bearing and refuses to drop them, even when prompted at `ATTEMPT LEVEL: max`. The 3-retry loop is wasted because each iteration starts from the same input and Haiku's decision is deterministic at temperature 0.
+
+Decision: Swap the W3 single-segment shortener from Claude Haiku 4.5 to **Gemini 3.5 Flash**, using the existing OpenAI-compatible endpoint (`generativelanguage.googleapis.com/v1beta/openai/chat/completions`) that W2 Editor + Phase 2 Editor already use. Changes:
+
+- `code_nodes/check_timing_and_pad.js`: `HAIKU_MODEL` → `SHORTEN_MODEL = 'gemini-3.5-flash'`; `ANT_KEY` → `GEM_KEY` (reads `gemini_api_key` from config); `callClaude(systemBlocks, userText)` → `callGemini(systemPrompt, userText)` (single system string instead of Anthropic system-blocks array — Gemini's OpenAI-compatible endpoint accepts only one); `claudeShorten` → `geminiShorten`; `sanitizeClaudeOutput` → `sanitizeLLMOutput` (function body unchanged; rename only). The shorten loop call site `await claudeShorten.call(...)` → `await geminiShorten.call(...)`.
+- `workflows/W3_Synthesize_v2.json`: same edits applied to the embedded `Check Timing + Pad` node's `jsCode`.
+- `docs/external_review_briefing.md`: model reference for `w3_shorten_system` updated from Claude Haiku 4.5 → Gemini 3.5 Flash; brief paragraph updated to reflect new model + reason for swap.
+
+Why Gemini 3.5 Flash specifically, not Sonnet:
+
+- **Cost**: Gemini Flash is ~3× cheaper per call than Haiku and ~30× cheaper than Sonnet. The shorten loop fires only on cells where W2 Adapt left text too long for the slot (typically 5-15 cells per lesson per lang), so absolute cost is small either way — but cheaper-by-default is right when quality is similar.
+- **Reuse of existing infra**: `gemini_api_key` is already in config (W2 Editor + Phase 2 Editor depend on it). No new credential setup, no new failure modes from misconfigured keys.
+- **Behavioral hypothesis**: Gemini Flash follows numerical instructions ("shorten to ~68 chars, min 59") more literally than Haiku, which over-indexes on meaning preservation. Real test on next re-run will confirm. If Gemini also refuses to shrink, the fallback is option (A) lowering `MIN_RETAIN: 0.60 → 0.45` (gives the LLM more room to drop modifiers) or option (C) raising `max_speed_up_delta: 0.20 → 0.25` (gives more speed headroom).
+
+Trade-offs:
+
+- **Lost prompt caching**: Anthropic `ephemeral` cache_control on the static `SHORTEN_STATIC` block was saving ~80% on input tokens for repeat shorten calls within a lesson. Gemini has no equivalent, so each call pays full input cost. Per-call delta is tiny: SHORTEN_STATIC is ~1.7K chars + ~6.5K chars tone-of-voice; ~2K input tokens × $0.30/M = ~$0.0006 per call. Net cost is still lower than Haiku.
+- **Loss of `system-blocks` structure**: Anthropic accepts `system: [block1, block2, …]` with per-block cache_control. Gemini's OpenAI-compatible endpoint accepts only one system message. Resolved by concatenating `SHORTEN_STATIC + '\n\n' + dynamicPart` into one system prompt.
+- **One more dependency on Gemini availability**: if Gemini API has an outage, W3 shorten silently degrades to "no shorten" (each shorten attempt returns empty string → loop body keeps current text and increments `shortenRetries`; speed-up + truncate still fire). Same failure mode as Haiku outage was; just shifted vendor.
+
+Verification: re-run W2 + W3 single-lang FR on `spirio_meditations2_3_2_en_fix` (W1 already produced the segments). Compare `needs_attention=TRUE` rate to 8/71 = 11%. Specifically check if the 8 previously-truncated cells (seg_021, 040, 044, 046, 050, 054, 063, 070) now have `text_translated` materially shorter than before (post-Gemini shorten) and `real_duration_sec < slot_duration_sec` with `tail_silence_sec > 0`.
+
+Rollback: revert this commit. Both the standalone code node file and the workflow JSON revert atomically. Code defaults from before resume (Haiku 4.5 + anthropic_api_key from config sheet).
+
+Related: this fix is about the LLM's behavior, not the prompt or the retry budget. If even Gemini Flash refuses to shrink, next levers are (A) lower `MIN_RETAIN` floor, (B) revise `w3_shorten_system` prompt to explicitly authorize dropping modifiers + using ellipsis. The prompt itself lives in the Google Sheets `prompts` tab; no code change needed for prompt revisions.
+
+---
+
+### 2026-05-31 — FR_SPEED_HEADROOM_AND_CPS_LOWER
+
+Context: After [W1_INTRA_SENTENCE_SPLIT](#2026-05-31--w1_intra_sentence_split) the `spirio_meditations2_3_2_en_fix` lesson re-ran on FR single-lang produced 71 segments (from 63 — split worked) but `needs_attention=TRUE` rate stayed at 28/71 ≈ 39% (vs 19/63 ≈ 30% pre-split). Inspection of the flagged cells revealed:
+
+- Almost every TRUE cell was `final_speed=1.01` AND `shorten_retries_in_synthesize=3` AND `real_duration_sec ≈ slot_duration` (hard-truncation at the slot ceiling).
+- Many had CPS well above target — e.g. seg_013 "Ressens le doux mouvement de montée et de descente." 51 chars in a 2.4 s slot = 21.3 CPS.
+- Root cause is the COMPOUND ceiling on the speed lever: FR voice runs at `voice.speed=0.86` (configured for FR prosody), and `max_speed_up_delta=0.15` set the speed ceiling to `0.86 + 0.15 = 1.01`. Effective compression vs an unspeed-up baseline is `1.01 / 0.86 ≈ +17%` — half the headroom a 1.0-base voice has (`1.15 / 1.0 = +15%`, but expressed differently: 0.86 voice has ~14% room to 1.0, then only 1% past). Phase 1 shorten exhausts its 3 LLM rewrite attempts AND both speed-up steps, then truncates.
+- Adapt was also configured with `cps_estimate_fr=11` (the user had lowered it from 15 in an earlier calibration pass). Even at 11, W2 Adapt's char-budget was occasionally too loose because real observed FR CPS during meditation reads at 0.86 voice is ~9-10. So Adapt sometimes left text 10-20% over what fits — handing W3 an impossible job.
+
+Decision: Two coordinated levers, both small enough that prosody stays acceptable:
+
+1. **Raise `max_speed_up_delta` from 0.15 → 0.20.** Updates: `code_nodes/check_timing_and_pad.js`, `code_nodes/phase2_batch_llm_tts.js`, `code_nodes/regen_synthesize.js`, and the same defaults baked into `workflows/W3_Synthesize_v2.json` (2 occurrences) and `workflows/W_Regen.json` (1 occurrence). With 0.20: FR ceiling becomes 1.06 (+23% vs 0.86, vs +17% before). 1.06 is still well below the perceptual threshold for "fast voice" on a meditation read (~1.10). The default-1.0 voices' ceiling moves 1.15 → 1.20 — minor change, also acceptable. Live `config` sheet must also be updated to `max_speed_up_delta=0.20` (code defaults are fallbacks; sheet value takes precedence).
+
+2. **Lower `cps_estimate_fr` from 11 → 10** in the live `config` sheet. Forces W2 Adapt to compute a tighter `target_chars` budget for FR, which makes the shorten loop more aggressive earlier (in W2, where LLM has full sentence-rewrite latitude) rather than punting the over-budget text to W3 (where only stepwise shorten + speed-up are available and the slot is already tight). Trade-off: occasional FR sentences may lose nuance that 1 extra char-budget point would have preserved. For meditation/wellness this is a good trade — clarity-of-pace beats word-precision when the voice is gentle and the slots are tight.
+
+3. **No change to `voice.speed` for FR.** Keeping the 0.86 base preserves the "calm, settled" tone the editor chose. Moving it up to 0.90 would give more headroom but flatten the prosodic gentleness that the FR voice was tuned for.
+
+Why both at once: independent levers stacked. (1) widens the speed ceiling for cases where text is already minimal but TTS overshoots. (2) reduces the frequency of (1) firing in the first place by making text shorter before TTS. Together they should push the FR `needs_attention` rate from 39% to a target <15% without re-tuning voice prosody.
+
+Verification: re-run W2 + W3 single-lang FR on `spirio_meditations2_3_2_en_fix` after updating the two config sheet rows. Compare `needs_attention=TRUE` count: target ≤ 11/71. Spot-check 3 previously-truncated short slots (seg_013, seg_023, seg_030) to confirm they now end with audio < slot duration and tail silence > 0.
+
+Rollback: revert the doc + code default changes; reset sheet to `max_speed_up_delta=0.15`, `cps_estimate_fr=11`. Code defaults are fallback-only — sheet values override regardless.
+
+Related: this fix only helps the speed-headroom + text-budget axis. Sentences without internal pauses (the W1 split skipped them) and sentences with extremely high information density (CPS > 15 even after shorten) remain hard cases. Future levers: per-target-lang `max_segment_duration` (smaller for FR), per-content-type CPS overrides (educational vs narrative), or moving FR to 0.90 voice base.
+
+---
+
+### 2026-05-31 — W1_INTRA_SENTENCE_SPLIT
+
+Context: A confidence-meditation lesson (`spirio_meditations2_3_2_en_fix`, 63 segments) hit 19 `needs_attention=TRUE` cells (~30%) on FR single-lang run. Diagnosis showed two compounding root causes:
+
+1. FR voice base speed = 0.86; with `max_speed_up_delta=0.15` the ceiling is only 1.01 — almost no compression headroom (vs 1.15 ceiling for a 1.0 voice). Speed lever alone can't fit verbose FR into tight slots.
+
+2. **W1 segmentation has no intra-sentence split.** Deepgram occasionally returns very long single sentences (real example: seg_063 = 28.9 s, seg_038 = 15.4 s). The existing `Segment Transcript` Code node only merges short consecutive sentences — it never breaks a long sentence into pieces. The result: an EN slot that is structurally impossible for FR (or any verbose target lang) to fit, even after Adapt/shorten/speed-up exhaust their levers — audio gets hard-truncated, losing the last syllable.
+
+Of the 19 flagged cells, ~8 had multi-clause EN sentences ≥10s long with natural word-pauses between clauses — split-able. The remaining ~11 were short slots (4–6 s) with verbose FR; for those, only speed-headroom or text-rewrite fixes apply.
+
+Decision: Add an intra-sentence split pass in W1's `Segment Transcript` node, between Deepgram parsing and the existing short-sentence merge loop. Greedy "largest-gap-first" algorithm:
+
+1. For each Deepgram-returned sentence, if `duration ≤ MAX_SEG_DURATION` — keep as a single piece.
+2. Otherwise, look at word-level timestamps (`alt.words[]`). Find every gap between consecutive words. Filter: `gap ≥ MIN_INTRA_PAUSE` AND each resulting half ≥ `MIN_PIECE_DURATION`.
+3. Pick the largest valid gap. Split the sentence at that boundary — left half uses word ranges up to (and including) the gap-opening word; right half starts at the gap-closing word.
+4. Re-evaluate each piece. If still over MAX, repeat. Stop when every piece fits or no more valid gaps exist.
+5. Text per piece is reconstructed from `word.punctuated_word` joined by spaces (preserves original capitalisation + punctuation per word).
+
+After split, the existing merge loop runs as before, with one ADDED constraint: combined segments must also satisfy `combined_duration ≤ MAX_SEG_DURATION`. Without this duration cap on merge, the very pieces produced by split would be eagerly re-merged back by the char-based merge rule (which only checked `MAX_CHARS=150 && gap≤1s`), defeating the split. So the split-then-merge pair now has matched semantics: both stages respect the per-segment duration ceiling.
+
+Three new config keys (all optional, all with code defaults):
+
+- `max_segment_duration_sec` — default `12`. Hard cap on segment duration. Any Deepgram sentence longer than this triggers split. Also applies as merge ceiling. Lower (8–10) for content with verbose target langs + slow voice profiles; higher (15) to behave closer to pre-fix.
+- `min_intra_sentence_pause_sec` — default `0.25`. Minimum word-to-word gap considered as a valid split point. Below this, the silence isn't audibly a pause and splitting mid-flow would feel choppy.
+- `min_segment_piece_duration_sec` — default `1.5`. Each side of a split must be ≥ this. Prevents creating micro-segments (e.g. a 0.3 s "Just." piece) that would feel abrupt.
+
+Verification (mock unit tests in `/tmp/test_w1_split2.js`):
+- 18 s sentence with one major 0.7 s pause + several smaller pauses, MAX=12: split into 8.3 s + 9 s (both ≤ 12, the major pause was picked).
+- 12 s sentence with 0.4 s comma-pauses, MAX=10: split into 8.6 s + 4 s (largest pause within range picked).
+- 12 s sentence, MAX=12: no split (already fits).
+
+Trade-offs:
+- More segments per lesson → more TTS calls (~+10–20% cost on lessons with many long sentences). Acceptable: re-TTS is ~$0.001/call.
+- Build VTT cues become shorter, possibly more rapid-fire visually. For meditation/wellness this matches natural breathing rhythm; for educational content might feel choppy.
+- Splits introduce a clean "pause break" in the dubbed audio at the split boundary, sized to the EN pause minus voice-rhythm. Since we split at natural pauses (≥0.25 s), this matches what the EN narrator did.
+- Sentences without internal pauses ≥ MIN_INTRA_PAUSE stay un-split. For those, the existing speed-up + shorten loops are the only levers; this fix doesn't help them. Pair with raising `max_speed_up_delta` if needed.
+- Per-language verbosity is global today. Future enhancement: per-target-lang `max_segment_duration` (smaller for FR/IT/PT, larger for DE which is verbose but matches EN structure more closely).
+
+Verification on a re-run: rerun W1 on the same audio for `spirio_meditations2_3_2_en_fix`. Expect: total segment count rises from 63 → ~70 (the long sentences become 2–3 pieces). Re-run W2 + W3 single-lang FR. Expect: `needs_attention=TRUE` count drops from 19 → ~5–8 (only the structurally tight short-slot cases remain).
+
+Rollback: revert this commit. `Segment Transcript` reverts to merge-only logic. The 3 new config keys are optional, so deleting them from the config sheet returns to defaults that are equivalent in spirit to the old MAX_CHARS-only rule.
+
+---
+
 ### 2026-05-28 — W_REGEN_DRIVE_DEDUPE_ON_SAVE
 
 Context: First W_Regen design called `Save Full to Drive` and `Save VTT to Drive` (cloned from W3) to upload regenerated full WAV / VTT files. The n8n googleDrive Upload node, by default, creates a NEW file every time — Google Drive does not auto-overwrite by name, so a folder accumulates duplicates: `sleep1_full_full_de.wav`, `sleep1_full_full_de (1).wav`, `sleep1_full_full_de (2).wav` and so on after each regen run.

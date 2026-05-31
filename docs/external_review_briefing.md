@@ -122,7 +122,7 @@ Manual / Execute Trigger
 
 ## 5. W3 synthesis pipeline (brief — uses 2 prompts)
 
-After translations are finalized, W3 reads each (segment × active_lang), calls ElevenLabs TTS, measures PCM duration, and pads with silence to fit the EN slot. If TTS audio overshoots the slot (translation longer than expected), it triggers an **in-flight Claude Haiku shorten loop** (prompts `w3_shorten_system` + dynamic task description). If audio undershoots significantly (translation shorter than expected) and finalSpeed is still 1.0, it triggers an **expand loop** (prompts `w3_expand_system`). Both prompts interpolate `{{tov}}`.
+After translations are finalized, W3 reads each (segment × active_lang), calls ElevenLabs TTS, measures PCM duration, and pads with silence to fit the EN slot. If TTS audio overshoots the slot (translation longer than expected), it triggers an **in-flight Gemini 3.5 Flash shorten loop** (prompts `w3_shorten_system` + dynamic task description; switched from Claude Haiku 4.5 on 2026-05-31 because Haiku hit a "cannot shorten further" wall on tight FR slots). If audio undershoots significantly (translation shorter than expected) and finalSpeed is still 1.0, it triggers an **expand loop** (prompts `w3_expand_system`). Both prompts interpolate `{{tov}}`.
 
 **Breath-borrow timing**: short segments (< 2s) whose TTS just barely overshoots may extend past en_end_sec by up to 2s into the trailing silence before the next EN segment, bounded by `max_borrow_per_segment_sec`. At full-WAV concat time, the borrowed duration is trimmed from the next segment's lead silence — preserving EN-timeline alignment cumulatively. This matters because cross-lang sync (a user toggles language mid-lesson and the audio doesn't drift) is a hard product constraint.
 
@@ -145,7 +145,7 @@ You'll receive the actual prompt text alongside this briefing. Here's what each 
 | `adapt_attempt_light` | Attempt 1 user-message template — light shortening (~5-15%) | W2 Adapt Translations | Sonnet 4.5 | `{{lang}} {{budget}} {{est}} {{en}} {{trans}} {{min_chars}}` | Plain shortened text | ~330 chars |
 | `adapt_attempt_medium` | Attempt 2 — medium shortening (~15-25%) | W2 Adapt Translations | Sonnet 4.5 | Same as light | Plain shortened text | ~310 chars |
 | `adapt_attempt_max` | Attempt 3 — max shortening (preserve concepts, drop secondary context) | W2 Adapt Translations | Sonnet 4.5 | Same as light | Plain shortened text | ~360 chars |
-| `w3_shorten_system` | W3 in-flight single-segment shortener (when TTS overshoots slot) | W3 Check Timing + Pad | Claude Haiku 4.5 | `{{tov}}` | Plain shortened text | ~1.7K chars + tov |
+| `w3_shorten_system` | W3 in-flight single-segment shortener (when TTS overshoots slot) | W3 Check Timing + Pad | Gemini 3.5 Flash | `{{tov}}` | Plain shortened text | ~1.7K chars + tov |
 | `w3_expand_system` | W3 in-flight single-segment expander (when TTS undershoots threshold × en_duration) | W3 Check Timing + Pad | Claude Haiku 4.5 | `{{tov}}` | Plain expanded text | ~1.4K chars + tov |
 
 Placeholder convention: `{{var}}` — double curly braces, no spaces. `String.replace` based, regex-aware, fails silently if user types `{var}` instead. (This is a known mild risk; we mitigate by documenting valid placeholders in the `description` column of each prompt row.)

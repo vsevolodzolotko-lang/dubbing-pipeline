@@ -30,7 +30,7 @@ $('Read Voices').all().forEach(i => { if (i.json.lang) voiceMap[i.json.lang] = i
 const EL_KEY = configMap.elevenlabs_api_key || '';
 if (!EL_KEY) throw new Error('elevenlabs_api_key missing from config sheet');
 
-const MAX_SPEED_UP_DELTA = parseFloat(configMap.max_speed_up_delta) || 0.15;
+const MAX_SPEED_UP_DELTA = parseFloat(configMap.max_speed_up_delta) || 0.20;
 const MAX_SLOW_DOWN_DELTA = parseFloat(configMap.max_slow_down_delta) || 0.15;
 const SLOWDOWN_MIN_GAP_SEC = parseFloat(configMap.slowdown_min_gap_sec) || 0.5;
 const REGEN_CONCURRENCY = parseFloat(configMap.regen_concurrency) || 5;

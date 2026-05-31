@@ -68,6 +68,10 @@ Look for these improvements in the next run's `localizations` sheet:
 - Fewer rows with `final_speed > 1.0` (less last-resort speed adjustment)
 - Fewer rows with `expansion_attempts > 0` (W2 didn't over-shorten)
 
+---
+
+## `test_apis.js` expected output
+
 Reads `.env` (via `dotenv`). Expected output:
 ```
 [1] Claude API
@@ -76,6 +80,11 @@ Reads `.env` (via `dotenv`). Expected output:
   ✓ key valid
   ✓ N voices available
 ```
+
+## Other scripts
+
+- `verify_borrow_compensation.js` — post-run alignment audit; checks that concat-time borrow compensation kept cross-lang full WAVs aligned to EN.
+- `sync_w2_jscode.js` — syncs `code_nodes/*.js` reference copies back into the embedded JS inside `workflows/W2_Translate_v2.json` (round-trip helper after editing a Code-node body locally).
 
 ## History
 

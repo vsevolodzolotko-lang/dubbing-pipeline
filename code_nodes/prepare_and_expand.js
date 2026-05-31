@@ -37,7 +37,7 @@ const toneItems = $('Parse Tone Map').all();
 const toneMap = {};
 toneItems.forEach(i => { if (i.json.segment_id) toneMap[i.json.segment_id] = i.json; });
 
-const BATCH_SIZE = 8;
+const BATCH_SIZE = 4;
 
 const segments = $('Read Pending Segments').all()
   .filter(i => i.json.segment_id && i.json.en_text)
