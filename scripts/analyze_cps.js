@@ -167,19 +167,32 @@ if (opts.segments) {
   console.error(`loaded segment_type for ${Object.keys(segmentTypeMap).length} segments\n`);
 }
 
-// --- optional: load voices.csv for voice_id snapshot ---
+// --- optional: load voices.csv for voice_id + base speed ---
+// `speed` column is the AUTHORITATIVE base voice speed per lang. Used below to
+// filter samples to natural-pace cells only (excludes W3 speed-up retries AND
+// Phase 2 slowdown-to-fill — both produce final_speed != base, which would
+// bias observed CPS).
 const voiceIds = {};
+const baseSpeedFromVoices = {};
 if (fs.existsSync(voicesPath)) {
   const rows = loadCsv(voicesPath, false);
   if (rows) {
     const h = rows[0];
-    const langCol = h.indexOf('lang');
-    const vidCol  = h.indexOf('voice_id');
-    if (langCol >= 0 && vidCol >= 0) {
+    const langCol  = h.indexOf('lang');
+    const vidCol   = h.indexOf('voice_id');
+    const speedCol = h.indexOf('speed');
+    if (langCol >= 0) {
       for (let i = 1; i < rows.length; i++) {
         const lang = (rows[i][langCol] || '').trim();
-        const vid  = (rows[i][vidCol]  || '').trim();
-        if (lang && vid) voiceIds[lang] = vid;
+        if (!lang) continue;
+        if (vidCol >= 0) {
+          const vid = (rows[i][vidCol] || '').trim();
+          if (vid) voiceIds[lang] = vid;
+        }
+        if (speedCol >= 0) {
+          const sp = parseFloat(rows[i][speedCol]);
+          if (sp > 0) baseSpeedFromVoices[lang] = sp;
+        }
       }
     }
   }
@@ -202,20 +215,52 @@ for (const [l, v] of Object.entries(HARDCODED_DEFAULTS)) {
   if (currentCps[l] == null) currentCps[l] = v;
 }
 
-// --- detect default voice speed per lang ---
-// Voice's natural playback speed = min(final_speed) observed in data.
-// (Retries always go UP from default — 1.10, 1.15 — so min is the floor.)
-const defaultSpeed = {};
-for (const s of samples) {
-  if (defaultSpeed[s.lang] == null || s.speed < defaultSpeed[s.lang]) {
-    defaultSpeed[s.lang] = s.speed;
+// --- determine base voice speed per lang ---
+// PRIMARY source: voices.csv `speed` column (authoritative — that's the speed
+// W3 actually requests from ElevenLabs by default for this voice).
+// FALLBACK: mode (most common rounded final_speed) per lang. Works because most
+// cells in a typical lesson DON'T need retries — they land at base speed.
+// We DO NOT use min(final_speed) anymore: Phase 2 slowdown-to-fill produces
+// final_speed values BELOW base (e.g. 0.76 for FR base=0.86), so min picks
+// the wrong reference and the script measures CPS of stretched audio.
+const baseSpeed = {};
+const baseSpeedSource = {};
+
+// Mode: tally rounded speed values per lang, pick most common.
+function computeMode(lang) {
+  const counts = new Map();
+  for (const s of samples) {
+    if (s.lang !== lang) continue;
+    const k = Math.round(s.speed * 1000) / 1000; // 3-decimal bucket
+    counts.set(k, (counts.get(k) || 0) + 1);
+  }
+  let best = null, bestN = 0;
+  for (const [k, n] of counts) if (n > bestN) { best = k; bestN = n; }
+  return best;
+}
+
+const SPEED_EQ_TOL = 0.005;
+function speedsEqual(a, b) { return Math.abs(a - b) < SPEED_EQ_TOL; }
+
+for (const lang of [...new Set(samples.map(s => s.lang))]) {
+  if (baseSpeedFromVoices[lang] != null) {
+    baseSpeed[lang] = baseSpeedFromVoices[lang];
+    baseSpeedSource[lang] = 'voices.csv';
+  } else {
+    const m = computeMode(lang);
+    if (m != null) {
+      baseSpeed[lang] = m;
+      baseSpeedSource[lang] = 'mode';
+    }
   }
 }
 
-// --- aggregate observed CPS per lang at default speed ---
+// --- aggregate observed CPS per lang at base speed only ---
 const byLang = {};
 for (const s of samples) {
-  if (s.speed !== defaultSpeed[s.lang]) continue;
+  const base = baseSpeed[s.lang];
+  if (base == null) continue;
+  if (!speedsEqual(s.speed, base)) continue;
   if (!byLang[s.lang]) byLang[s.lang] = { samples: [], chars: 0, sec: 0 };
   byLang[s.lang].samples.push(s);
   byLang[s.lang].chars += s.chars;
@@ -226,7 +271,8 @@ for (const s of samples) {
 const byLangType = {};
 if (Object.keys(segmentTypeMap).length > 0) {
   for (const s of samples) {
-    if (s.speed !== defaultSpeed[s.lang]) continue;
+    const base = baseSpeed[s.lang];
+    if (base == null || !speedsEqual(s.speed, base)) continue;
     const st = segmentTypeMap[s.segment_id];
     if (!st) continue;
     const key = `${s.lang}|${st}`;
@@ -242,16 +288,21 @@ console.log('========================================');
 console.log('CPS calibration report');
 console.log('========================================\n');
 
-console.log('Per-lang summary (each lang at its detected default voice speed):\n');
-console.log('lang  voice_id              default_spd  N      chars  sec      obs_cps  current  recommend  delta  confidence');
-console.log('----  --------------------  -----------  -----  -----  -------  -------  -------  ---------  -----  ----------');
+console.log('Per-lang summary (each lang at its base voice speed only):\n');
+console.log('lang  voice_id              base_spd  src         N      chars  sec      obs_cps  current  recommend  delta  confidence');
+console.log('----  --------------------  --------  ----------  -----  -----  -------  -------  -------  ---------  -----  ----------');
 
 const recommendations = [];
 const LANGS = ['de','es','fr','it','pl','pt','tr'];
 for (const lang of LANGS) {
   const b = byLang[lang];
+  const totalForLang = samples.filter(s => s.lang === lang).length;
   if (!b || b.samples.length === 0) {
-    console.log(`${lang.padEnd(4)}  ${(voiceIds[lang] || '(no voices.csv)').padEnd(20)}                ${'(no data)'.padStart(40)}`);
+    if (totalForLang === 0) {
+      console.log(`${lang.padEnd(4)}  ${(voiceIds[lang] || '(no voices.csv)').padEnd(20)}  ${'(no data)'}`);
+    } else {
+      console.log(`${lang.padEnd(4)}  ${(voiceIds[lang] || '').padEnd(20)}  ${'?'.padStart(8)}  ${'(none at base)'.padEnd(10)}  ${String(totalForLang).padStart(5)} samples but no base_speed match — supply voices.csv with speed column`);
+    }
     continue;
   }
   const observed = b.chars / b.sec;
@@ -261,11 +312,13 @@ for (const lang of LANGS) {
   const conf = b.samples.length >= 20 ? 'HIGH'
              : b.samples.length >= 10 ? 'MED'
              : 'LOW';
+  const dropped = totalForLang - b.samples.length;
+  const droppedNote = dropped > 0 ? ` (-${dropped} off-base)` : '';
   console.log(
-    `${lang.padEnd(4)}  ${(voiceIds[lang] || '').padEnd(20)}  ${defaultSpeed[lang].toFixed(2).padStart(11)}  ` +
+    `${lang.padEnd(4)}  ${(voiceIds[lang] || '').padEnd(20)}  ${baseSpeed[lang].toFixed(2).padStart(8)}  ${baseSpeedSource[lang].padEnd(10)}  ` +
     `${String(b.samples.length).padStart(5)}  ${String(b.chars).padStart(5)}  ${b.sec.toFixed(2).padStart(7)}  ` +
     `${observed.toFixed(2).padStart(7)}  ${current.toFixed(2).padStart(7)}  ${recommend.toFixed(2).padStart(9)}  ` +
-    `${delta.toFixed(2).padStart(5)}  ${conf.padStart(10)}`
+    `${delta.toFixed(2).padStart(5)}  ${conf.padStart(10)}${droppedNote}`
   );
   if (Math.abs(delta) > 1.0) recommendations.push({ lang, current, recommend, delta, conf });
 }
@@ -311,13 +364,20 @@ if (recommendations.length === 0) {
 // --- legend / next steps ---
 console.log(`
 Notes:
-  - "default_spd" is auto-detected as min(final_speed) per lang. PT/TR voices typically
-    run below 1.0 by default; other langs at 1.0.
+  - "base_spd" is the voice's natural-pace speed used to filter samples. Primary source:
+    voices.csv 'speed' column (src=voices.csv). Fallback: mode (most-common rounded
+    final_speed) when voices.csv has no speed for this lang (src=mode). Samples whose
+    final_speed differs from base by > 0.005 are EXCLUDED — those are W3 speed-up retries
+    or Phase 2 slowdown-to-fill cells, whose CPS would distort the natural-pace measurement.
+    The "(-N off-base)" suffix shows how many samples were dropped.
   - "current" reads from config.csv if you exported it alongside localizations; otherwise
     uses hardcoded defaults from docs/config_keys.md.
   - "confidence" — LOW (<10 samples) / MED (10-19) / HIGH (≥20). Don't trust LOW deltas.
-  - "voice_id" snapshot from sheets/voices.csv. If voice changed between runs, old CPS
+  - "voice_id" snapshot from voices.csv. If voice changed between runs, old CPS
     values are stale — re-calibrate against new voice data.
+  - For accurate base speed detection, export voices.csv from the live 'voices' sheet
+    (it has the speed column). Without it the script falls back to mode-based detection
+    which usually works but is less reliable on small lessons.
 
 Next steps if you updated config values:
   1. Edit the \`config\` sheet rows shown above.
