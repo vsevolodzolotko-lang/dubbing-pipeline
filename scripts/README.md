@@ -5,7 +5,8 @@ Local Node.js helpers — run outside n8n on the command line. Requires `.env` w
 | File | Purpose |
 |---|---|
 | `test_apis.js` | Smoke test for `ANTHROPIC_API_KEY` and `ELEVENLABS_API_KEY`. Hits Claude with a one-token completion and ElevenLabs voice-list endpoint. Confirms both keys work before running the full n8n pipeline. |
-| `analyze_cps.js` | Takes a localizations CSV (export from the `localizations` tab) and prints the observed CPS (chars-per-second) per language for rows where `final_speed=1.0`. Compares with current `cps_estimate_{lang}` values in `config.csv` if present alongside, and suggests rounded recommendations. Use after each W3 run, especially after voice changes. |
+| `analyze_cps.js` | Takes a localizations CSV (export from the `localizations` tab) and prints the observed CPS (chars-per-second) per language for rows where `final_speed=1.0`. Compares with current `cps_estimate_{lang}` values in `config.csv` if present alongside, and suggests rounded recommendations. Use after each W3 run, especially after voice changes. **Zero-arg mode**: if launched without CSV arguments, the script auto-discovers any `localizations*.csv` (plus optional `config.csv`, `segments.csv`, `voices.csv`) sitting in the SAME directory as the script. |
+| `run_analyze_cps.command` | Double-clickable macOS launcher for `analyze_cps.js`. Drop this file plus `analyze_cps.js` into a folder alongside your exported CSVs and double-click — opens Terminal, runs the analyzer with zero args, pauses at the end so the report stays visible. First click may need Right-click → Open to bypass Gatekeeper. Requires Node.js on PATH. |
 
 ## Usage
 
@@ -44,12 +45,23 @@ Tip: drag-drop the CSV file from Finder into the terminal to avoid path-escape i
 
 ### Step 3 — Run the analyzer
 
+**Option A — terminal, explicit path:**
+
 ```bash
 cd ~/Documents/dubbing-pipeline
 node scripts/analyze_cps.js "$HOME/Downloads/localizations.csv"
 ```
 
-You'll get:
+**Option B — double-click `.command` wrapper (zero terminal needed):**
+
+1. Make a new folder anywhere (e.g. `~/Desktop/cps-check/`).
+2. Copy both `scripts/analyze_cps.js` AND `scripts/run_analyze_cps.command` into it.
+3. Drop the exported `localizations.csv` (and ideally `config.csv` from the config tab) into the same folder.
+4. Double-click `run_analyze_cps.command`. macOS opens Terminal, runs the analyzer, and pauses so you can read the report. Press Enter to close.
+
+First-time Gatekeeper note: macOS may block the `.command` file on first run. Right-click → Open → confirm. After that, double-clicking works.
+
+Either option produces:
 - Per-segment CPS (useful for spotting one weird outlier)
 - A summary table with `observed_cps`, `current` (from config.csv if present), `recommend` (observed rounded to nearest 0.5), and `delta` (observed − current)
 

@@ -44,14 +44,43 @@ for (const a of args) {
   else csvPaths.push(a);
 }
 
+const SCRIPT_DIR = path.dirname(__filename);
+const REPO       = path.dirname(SCRIPT_DIR);
+
+// Zero-arg fallback: if no positional CSVs were passed, auto-discover any
+// `localizations*.csv` files sitting next to this script. Lets the user drop
+// the script (or a .command wrapper) into a folder alongside their exported
+// CSVs and run it with no arguments. Also auto-picks up config.csv,
+// segments.csv, voices.csv from the same directory if present.
+if (csvPaths.length === 0) {
+  try {
+    const candidates = fs.readdirSync(SCRIPT_DIR)
+      .filter(f => /^localizations.*\.csv$/i.test(f))
+      .map(f => path.join(SCRIPT_DIR, f));
+    if (candidates.length > 0) {
+      for (const p of candidates) csvPaths.push(p);
+      console.error(`auto-discovered ${candidates.length} localizations CSV(s) next to the script:`);
+      for (const p of candidates) console.error(`  - ${path.basename(p)}`);
+      const sameDir = (name) => {
+        const p = path.join(SCRIPT_DIR, name);
+        return fs.existsSync(p) ? p : null;
+      };
+      if (!opts.segments) { const p = sameDir('segments.csv'); if (p) opts.segments = p; }
+      if (!opts.voices)   { const p = sameDir('voices.csv');   if (p) opts.voices = p; }
+      if (!opts.config)   { const p = sameDir('config.csv');   if (p) opts.config = p; }
+    }
+  } catch (_) { /* fall through to usage */ }
+}
+
 if (csvPaths.length === 0) {
   console.error('usage: node scripts/analyze_cps.js <localizations.csv> [more.csv ...]');
   console.error('       [--segments=<segments.csv>] [--voices=<voices.csv>] [--config=<config.csv>]');
+  console.error('');
+  console.error('zero-arg shortcut: place this script in a folder with localizations*.csv');
+  console.error('(plus optionally config.csv / segments.csv / voices.csv) and run it without args.');
   process.exit(1);
 }
 
-const SCRIPT_DIR = path.dirname(__filename);
-const REPO       = path.dirname(SCRIPT_DIR);
 const voicesPath = opts.voices  || path.join(REPO, 'sheets/voices.csv');
 const configPath = opts.config  || path.join(path.dirname(csvPaths[0]), 'config.csv');
 
