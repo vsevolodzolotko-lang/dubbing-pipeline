@@ -47,28 +47,50 @@ for (const a of args) {
 const SCRIPT_DIR = path.dirname(__filename);
 const REPO       = path.dirname(SCRIPT_DIR);
 
-// Zero-arg fallback: if no positional CSVs were passed, auto-discover any
-// `localizations*.csv` files sitting next to this script. Lets the user drop
-// the script (or a .command wrapper) into a folder alongside their exported
-// CSVs and run it with no arguments. Also auto-picks up config.csv,
-// segments.csv, voices.csv from the same directory if present.
+// Zero-arg fallback: if no positional CSVs were passed, auto-discover related
+// CSVs in the script's own directory. Matches are KEYWORD-based — any *.csv
+// whose filename contains the keyword (case-insensitive, anywhere) qualifies.
+// Lets Google Sheets exports ("dubbing-pipeline - localizations (50).csv",
+// "spirio - config.csv", etc.) and plain renames ("localizations.csv",
+// "config.csv") both work without a strict naming contract.
+//
+// Conflict avoidance: matches for "localizations" claim those files first;
+// "config"/"segments"/"voices" only pick from the REMAINING .csv files in
+// the dir. So "localizations_config.csv" would be used as localizations, not
+// confused for config.
 if (csvPaths.length === 0) {
   try {
-    const candidates = fs.readdirSync(SCRIPT_DIR)
-      .filter(f => /^localizations.*\.csv$/i.test(f))
+    const allCsvs = fs.readdirSync(SCRIPT_DIR)
+      .filter(f => /\.csv$/i.test(f))
+      .sort()
       .map(f => path.join(SCRIPT_DIR, f));
-    if (candidates.length > 0) {
-      for (const p of candidates) csvPaths.push(p);
-      console.error(`auto-discovered ${candidates.length} localizations CSV(s) next to the script:`);
-      for (const p of candidates) console.error(`  - ${path.basename(p)}`);
-      const sameDir = (name) => {
-        const p = path.join(SCRIPT_DIR, name);
-        return fs.existsSync(p) ? p : null;
-      };
-      if (!opts.segments) { const p = sameDir('segments.csv'); if (p) opts.segments = p; }
-      if (!opts.voices)   { const p = sameDir('voices.csv');   if (p) opts.voices = p; }
-      if (!opts.config)   { const p = sameDir('config.csv');   if (p) opts.config = p; }
+
+    const matches = (files, keyword) => files.filter(p => path.basename(p).toLowerCase().includes(keyword));
+
+    const locFiles = matches(allCsvs, 'localizations');
+    if (locFiles.length > 0) {
+      for (const p of locFiles) csvPaths.push(p);
+      console.error(`auto-discovered ${locFiles.length} localizations CSV(s) next to the script:`);
+      for (const p of locFiles) console.error(`  - ${path.basename(p)}`);
     }
+
+    const locSet = new Set(locFiles);
+    const remaining = allCsvs.filter(p => !locSet.has(p));
+
+    const pickOne = (label, keyword) => {
+      const hits = matches(remaining, keyword);
+      if (hits.length === 0) return null;
+      if (hits.length > 1) {
+        console.error(`note: multiple ${label} CSVs found, using ${path.basename(hits[0])} (others: ${hits.slice(1).map(p => path.basename(p)).join(', ')})`);
+      } else {
+        console.error(`auto-discovered ${label} CSV: ${path.basename(hits[0])}`);
+      }
+      return hits[0];
+    };
+
+    if (!opts.config)   { const p = pickOne('config',   'config');   if (p) opts.config = p; }
+    if (!opts.segments) { const p = pickOne('segments', 'segments'); if (p) opts.segments = p; }
+    if (!opts.voices)   { const p = pickOne('voices',   'voices');   if (p) opts.voices = p; }
   } catch (_) { /* fall through to usage */ }
 }
 
@@ -76,8 +98,11 @@ if (csvPaths.length === 0) {
   console.error('usage: node scripts/analyze_cps.js <localizations.csv> [more.csv ...]');
   console.error('       [--segments=<segments.csv>] [--voices=<voices.csv>] [--config=<config.csv>]');
   console.error('');
-  console.error('zero-arg shortcut: place this script in a folder with localizations*.csv');
-  console.error('(plus optionally config.csv / segments.csv / voices.csv) and run it without args.');
+  console.error('zero-arg shortcut: place this script in a folder with any *.csv files whose');
+  console.error('names contain "localizations" (required) and optionally "config" / "segments" /');
+  console.error('"voices". Match is case-insensitive and substring-anywhere — Google Sheets-style');
+  console.error('exports like "dubbing-pipeline - localizations (50).csv" or plain "config.csv"');
+  console.error('both work. Drop multiple localizations CSVs to pool samples for HIGH confidence.');
   process.exit(1);
 }
 
