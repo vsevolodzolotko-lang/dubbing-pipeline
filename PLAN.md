@@ -102,7 +102,7 @@
 
 ### Must-have перед ship
 
-- [ ] **Boss-facing 1-page doc** — короткий "як дроп файл → отримати дубляж", без технічного жаргону. README.md технічний; потрібен runbook рівня "що бачить нетехнічний користувач".
+- [x] **Boss-facing 1-page doc (2026-06-01)** — `docs/operator_manual.md` (українською). Drop файлу → перевірка → W_Regen для точкових фіксів. 6 секцій з explicit decision matrices, без технічного жаргону. Лінк додано у `docs/README.md` як першу позицію в таблиці.
 - [ ] **QA dashboard / Sheet view** — фільтр по `needs_attention=TRUE`, `phase2_outcome=llm_refusal`, `llm_dropped` та `shorten_retries_in_synthesize >= 3`. Зараз ці колонки є, але людина мусить вручну фільтрувати — треба saved view + Slack alert якщо >0 за прогін.
 - [ ] **End-to-end прогін ще на 1-2 уроках різного формату** (наприклад: 30-сек афірмація + 20-хв медитація). Sleep1_full — лише один кейс; треба covering для edge cases по тривалості.
 - [ ] **External review briefing follow-up** — `docs/external_review_briefing.md` готовий, але результати зовнішньої оцінки промптів і архітектури ще не інтегровані. Якщо feedback зібрано — закрити TODO в `prompts` tab.
