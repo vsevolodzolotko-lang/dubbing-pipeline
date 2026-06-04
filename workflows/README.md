@@ -5,25 +5,30 @@ Four workflows: **W_Master** (Drive folder trigger, optional) chains **W1 → W2
 ## W_Master.json — Drive folder trigger orchestrator
 
 **Input**: any audio file dropped into the Drive `input/` folder (configured by `drive_input_folder_id`).
-**Output**: triggers W1 → W2 → W3 in sequence, then posts a Slack notification with the link to the per-lang `full/` output folder.
+**Output**: archives the previous run's artifacts into `05_archive/{prev_basename}_{date}/`, then triggers W1 → W2 → W3 in sequence on the new file, then posts a Slack notification with per-lesson `needs_attention` stats and clickable links to both output folders + a one-click W_Regen launcher.
 
 | Node | Purpose |
 |---|---|
 | Drive Trigger (input/) | Polls the configured `drive_input_folder_id` for new files (every minute) |
 | Parse Filename (Code) | Derives `lesson_id` from the filename (e.g. `sleep_002.mp3` → `sleep_002`); skips non-audio drops |
+| Once Per Run (Code) | Collapses N Parse Filename items into a single sentinel item so the archive chain fires exactly once per trigger activation, regardless of multi-file drops. Carries the just-dropped `file_id`s so the archive step can exclude them. |
+| Read Config (Archive) | Pulls all `drive_*_folder_id` keys + `drive_archive_folder_id` (must be set before W_Master can run). Separate from the existing post-W3 `Read Config` because the archive runs at the head of the workflow. |
+| **Archive chain (11 nodes)** | Replaces the previous single-Code-node implementation (which relied on `helpers.httpRequestWithAuthentication`, blocked in some n8n Code Node sandboxes). All Drive + Sheets API calls go through HTTP Request nodes with `predefinedCredentialType` against `googleDriveOAuth2Api` / `googleSheetsOAuth2Api` — guaranteed to work in every n8n version. Chain runs at the start of each W_Master execution, before W1: `Plan Sources` (Code: emits 1 item per source folder, validates `drive_archive_folder_id` upfront) → `List Files` (HTTP GET `/drive/v3/files`, fires per source) → `Plan Archive` (Code: aggregates lists, excludes just-dropped trigger files, derives `archive_name` from previous-input basename or segments/full prefix + `YYYY-MM-DD_HH-MM` timestamp; emits `{skip:true}` if nothing to archive) → `Has Files To Archive?` (IF: routes around the destructive chain on first-run / pre-cleaned folders) → `Create Archive Root` (HTTP POST `/drive/v3/files` with `mimeType=folder`) → `Copy Sheet Snapshot` (HTTP POST `/drive/v3/files/{sheet_id}/copy` into archive root as `sheet_snapshot_{archive_name}`; **throws BEFORE any destructive op if snapshot fails** so previous data can't be lost) → `Plan Subfolders` (Code: emits 1 item per subfolder with files to move) → `Create Subfolder` (HTTP POST, fires per item) → `Plan Moves` (Code: pairs each file with its destination subfolder id) → `Move File` (HTTP PATCH `/drive/v3/files/{id}?addParents=&removeParents=`, fires N times, retryOnFail=3 with continueRegularOutput so partial failures don't kill the workflow) → `Clear Sheet Tabs` (HTTP POST `/spreadsheets/{id}/values:batchClear` with ranges `['segments!A2:ZZ','localizations!A2:ZZ']`, `executeOnce=true`; headers stay, `voices`/`prompts`/`config` NOT touched; failure logged but doesn't throw — moves already done) → `Pass Lessons (after Archive)` (Code: re-emits Parse Filename items so Execute W1 fan-out works as before). The IF false-branch also flows directly into Pass Lessons (after Archive), so first-run executions still proceed to W1. |
 | Execute W1 (STT) | Calls W1 with `{file_id, lesson_id}`. Retry: 1 attempt on fail, then stop |
 | Execute W2 (Translate) | Calls W2 with `{lesson_id}`. Retry: 1 attempt on fail, then stop |
 | Execute W3 (Synthesize) | Calls W3 with `{lesson_id}`. Retry: 1 attempt on fail, then stop |
-| Read Config | Pulls `drive_output_full_folder_id`, `slack_channel`, `active_langs` for the Slack message |
-| Build Slack Message (Code) | Composes one Slack message per Parse Filename item using mrkdwn (`*bold*`, `:emoji:`, `<url|text>` for the Drive folder link). Reads `slack_channel` from config; throws if missing. |
+| Read Config | Pulls `drive_output_full_folder_id`, `drive_output_vtt_folder_id`, `slack_channel`, `active_langs`, `w_regen_workflow_url` for the Slack message |
+| Read Localizations | Pulls the `localizations` sheet so Build Slack Message can compute the per-lesson `needs_attention` rate (`flagged / total`) |
+| Build Slack Message (Code) | Composes one Slack message per Parse Filename item using mrkdwn. Filters `localizations` rows by `segment_id.startsWith(lesson_id + '_')` to compute `needs_attention` % + count for the lesson. Renders three clickable links: Audio folder, VTT folder, and "Open W_Regen" (the last one launches the webhook trigger of W_Regen — no n8n login needed). Each link is omitted if its source config key is missing. Throws if `slack_channel` is missing. |
 | Slack Notify | Posts the message via Slack API (Bot User OAuth Token). |
 
 **Setup checklist** (after importing):
 1. Drive Trigger → confirm `folderToWatch` is your `input/` folder ID.
 2. Execute W1 / W2 / W3 → re-bind to the workflow IDs assigned by your n8n instance after import.
-3. Slack Notify → bind your Slack credential (Bot User OAuth Token `xoxb-...`). The credential ID in the JSON is a placeholder.
-4. `config` sheet → add `slack_channel` = your channel ID (e.g. `C01234ABCDE`). The bot must be a member of that channel unless its scopes include `chat:write.public`.
-5. Set `active = true` on the workflow only after manual smoke-test (otherwise polling starts immediately).
+3. Archive chain → check that each HTTP Request node (`List Files`, `Create Archive Root`, `Copy Sheet Snapshot`, `Create Subfolder`, `Move File`, `Clear Sheet Tabs`) has its `predefinedCredentialType` credential bound correctly (Drive ones use `googleDriveOAuth2Api`, the Clear node uses `googleSheetsOAuth2Api`). After import n8n usually keeps the binding, but verify on first opening.
+4. Slack Notify → bind your Slack credential (Bot User OAuth Token `xoxb-...`). The credential ID in the JSON is a placeholder.
+5. `config` sheet → add `slack_channel` = your channel ID (e.g. `C01234ABCDE`) + `drive_archive_folder_id` = the Drive folder ID of `05_archive`. The bot must be a member of the Slack channel unless its scopes include `chat:write.public`.
+6. Set `active = true` on the workflow only after manual smoke-test (otherwise polling starts immediately).
 
 The Drive trigger watches *file-created* events only — moving an existing file into the folder also counts. Modifying an already-processed file does not retrigger.
 
@@ -95,6 +100,33 @@ The Drive trigger watches *file-created* events only — moving an existing file
 | ↳ Save Full to Drive | Upload N full WAVs (one per active_lang) |
 | ↳ Build VTT Per Lang (Code) | Parallel branch to Download Segment WAV. Generates one WebVTT file per active_lang. Cue text = `text_translated`; cue timings = `en_start_sec → en_end_sec` (EN-aligned, matches dubbed audio after borrow compensation). |
 | ↳ Save VTT to Drive | Upload N `.vtt` files into `drive_output_vtt_folder_id` (falls back to `drive_output_full_folder_id` then `drive_output_folder_id`). |
+
+## W_Regen.json — Manual cell regeneration
+
+**Input**: rows in `localizations` flagged with `needs_retts=TRUE`. Two ways to launch:
+1. **Manual Trigger** — open the workflow in n8n UI, click Execute. The editor-facing path documented in [`../docs/sheets_schema.md`](../docs/sheets_schema.md#L70-L84).
+2. **Webhook Trigger** (added 2026-06-03) — public GET URL exposed by n8n. Slack messages from W_Master / W_Regen include an "Open W_Regen" link pointing at this URL. Clicking the link in Slack starts a fresh regen run without requiring an n8n login. Copy the production URL from the Webhook Trigger node and put it into the `w_regen_workflow_url` config key.
+
+**Output**: per-segment WAVs overwritten in `drive_output_folder_id`; affected lessons' full WAVs rebuilt in `drive_output_full_folder_id`; matching VTT files rebuilt in `drive_output_vtt_folder_id`; the `needs_retts` flag cleared and `last_regen_at` set on each processed row; one Slack message per affected lesson with post-regen `needs_attention` rate.
+
+| Node | Purpose |
+|---|---|
+| Manual Trigger | UI launch (editor flow) |
+| Webhook Trigger | Public-URL launch (the "Open W_Regen" Slack link). `httpMethod=GET`, `responseMode=onReceived` so the browser gets an instant "Regen started" message and the workflow runs in the background. |
+| Read Config / Read Voices / Read Localizations Initial | Pull inputs |
+| Get Params (Code) | Reads `lesson_id` from incoming payload if present; null otherwise. Both Manual + Webhook triggers leave it null today (Regen Engine processes all flagged rows across lessons). |
+| Regen Engine (Code) | The brains. Reads rows with `needs_retts=TRUE`, re-TTSes each via ElevenLabs, applies the same Phase 1-style timing logic (speed-up on overshoot, slowdown to fill on undershoot, hard-truncate as last resort). Bounded concurrency via `regen_concurrency` config (default 5). Emits one item per regenerated cell; emits a sentinel item if nothing is flagged. |
+| Has Audio? (IF) | Splits the success branch (has_audio=true) from the error/sentinel branch |
+| Drive PATCH | Overwrites the per-segment WAV in place using `audio_drive_file_id` from the row |
+| Merge Branches | Re-merges success + sentinel/error branches before updating the sheet |
+| Update Localizations Row | Writes back per-row metrics (`final_speed`, `needs_attention`, `last_regen_at`, etc.) and clears `needs_retts` |
+| Coalesce Updates | One-item pass-through to synchronize before the full-audio rebuild |
+| Read Localizations Fresh | Re-read the sheet so the rebuild uses post-regen text/diagnostics |
+| Build Full Audio Per Lang / Save Full to Drive / Search Same Name Full / Plan Old Deletes Full / Delete Old Full | Rebuild + upload + cleanup of duplicate full-lesson WAVs |
+| Build VTT Per Lang / Save VTT to Drive / Search Same Name VTT / Plan Old Deletes VTT / Delete Old VTT | Same pattern for the per-lang VTT files |
+| Wait For Saves (Merge) | Waits for both Save Full to Drive and Save VTT to Drive to complete before notifying Slack — so the operator clicking the folder link sees the new files |
+| Build Regen Slack Message (Code) | Composes one Slack message per affected lesson with `regenerated cells`, post-regen `needs_attention` rate, and the same three clickable links (Audio / VTT / Open W_Regen). Reads `regen` stats from `$('Regen Engine').all()` and post-regen rows from `$('Read Localizations Fresh').all()`. Skips notification when 0 cells were regenerated. |
+| Slack Notify (Regen) | Posts the message via Slack API |
 
 ## n8n deployment env vars (required for production)
 

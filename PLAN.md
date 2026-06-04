@@ -110,6 +110,7 @@
 ### Should-have (cleanup)
 
 - [x] **Borrow / dead-key audit (2026-05-31)** — підтверджено, що `max_borrow_per_segment_sec` НЕ dead: він активний для short segments (`en_duration < short_seg_threshold_sec`, default 2.0с) через `CONDITIONAL_BREATH_BORROW_FOR_SHORT_SEGMENTS` (2026-05-19), а concat-time компенсація у `Build Full Audio Per Lang` нейтралізує per-segment overshoot для full WAV. Розширення borrow на всі сегменти (Варіант B) відкладено до явного запиту — поточна поведінка дає cross-lang sync на per-segment рівні + breath room для коротких афірмацій. Документація синхронізована у README.md (Sheets cheatsheet + localizations watch-list) і `docs/config_keys.md`.
+- [x] **Drive folder archive rotation (2026-06-03)** — W_Master тепер на старті кожного прогону переміщує файли з working folders (`01_input`, `02_output`, `03_full`, `04_vtt`) у dated subfolder в `05_archive` (новий config key `drive_archive_folder_id`). Збережена структура папок; назва archive subfolder = basename попереднього 01_input файлу + `YYYY-MM-DD_HH-MM`. Move через Drive PATCH `addParents/removeParents` (не copy), single code node з `httpRequestWithAuthentication`. Throws якщо `drive_archive_folder_id` missing — no silent skip. Деталі в DECISIONS `W_MASTER_ARCHIVE_PREVIOUS_RUN_ROTATION`.
 - [ ] **Залишкові dead config-keys** — `min_speed` (ніколи не wired) і старий absolute `max_speed` (superseded 2026-05-27 → `max_speed_up_delta`/`max_slow_down_delta`). Зараз тільки задокументовано як dead; можна фізично видалити рядки з config sheet (code має fallback default).
 - [ ] **PLAN.md / DECISIONS.md cross-reference** — деякі decisions (наприклад `STRICT_ALIGNMENT_DISABLE_BREATH_BORROW`) частково revoke попередні; додати "see also" посилання, щоб новий читач не плутався
 - [ ] **Sheets schema doc sync** — після всіх R/Phase 2 змін перевірити, що `docs/sheets_schema.md` відповідає тому, що реально пишеться (особливо нові колонки `phase2_outcome`, `phase2_diag`, `llm_dropped`, `final_speed`)
@@ -117,5 +118,14 @@
 ### Nice-to-have (post-ship)
 
 - [ ] **Streaming concat via ffmpeg** — поточний Build Full Audio тримить всі WAVs в памʼяті; для уроків 30+ хв може стати проблемою (memory refactor зроблено 2026-05-19, але fundamental fix залишається на Phase 3)
-- [ ] **W_Regen UX** — зараз trigger ручний (webhook), можна додати Sheet-based trigger (поставив прапорець `regen=TRUE` у segment → W_Regen підхопив)
+- [ ] **W_Regen UX** — Webhook Trigger додано 2026-06-03 (клік на Slack-лінк "Open W_Regen" → workflow стартує без логіну в n8n). Залишається Sheet-based trigger (прапорець `regen=TRUE` у segment → W_Regen підхопив) для випадків коли оператор уже в Sheet редагує `text_translated` і не хоче переходити у Slack/n8n.
 - [ ] **Cost dashboard** — поточний estimate в README ($0.10–0.25/lesson) ґрунтується на ~60-сек уроці; для 11-хв і 20-хв треба зібрати real-cost telemetry і додати у README
+- [ ] **CPS calibration → Slack suggest у W_Master (R7.c)** — закрити manual цикл "експорт 3 CSV → run script → edit config". Окрема гілка в `W_Master` поряд з існуючим `Build Slack Message → Slack Notify`: `Read Voices → Compute CPS Recs → IF recs.length>0 → Build CPS Slack → Slack Notify`. Один новий Code-нод порту логіки з `scripts/analyze_cps.js` (~80 рядків, чиста арифметика). Функціонал:
+  - **Rolling window** замість per-lesson — config key `cps_window_lessons=5`, інакше завжди LOW confidence
+  - **Tiered trigger**: HIGH (N≥20) + |delta|>1.0 постимо; MED + |delta|>2.0 як early signal; решта — тихо
+  - **Anti-spam** через `config.last_cps_signature` (hash рекомендацій) — не дублюємо ті самі suggestions щодня
+  - **Voice-change detection** через hash voices snapshot → окремий alert "ребейзлайн з наступних лекцій"
+  - **Per-content-type сигнал** (опц.) — якщо `segments.segment_type` дає `|delta_vs_lang_mean|>1.5`, окремий рядок про potential per-type CPS
+  - **Optional auto-apply** gated config key `cps_auto_apply=false` за замовчуванням; коли `true` + HIGH + |delta|>1.5 — нода також робить Sheets Update і пише "✅ auto-applied" замість "📝 suggested"
+  - **НЕ робити**: інтерактивні Slack buttons, окремий `tts_metrics` tab (`localizations` достатньо), повідомлення "all stable" (шум)
+  - Ризик: на 50+ лекціях × 7 мов `Read Localizations` тягне ~10k рядків — якщо стане повільно, додати фільтр "тільки останні N днів". `voices.csv` snapshot може застаріти — читати `voices` tab з Sheets, не файл.

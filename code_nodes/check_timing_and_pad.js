@@ -62,7 +62,6 @@ const LANG_CPS = {
 if (!EL_KEY)  throw new Error('elevenlabs_api_key missing from config sheet');
 if (!GEM_KEY) throw new Error('gemini_api_key missing from config sheet');
 
-const SHORT_SEG_THRESHOLD = parseFloat(configMap.short_seg_threshold_sec) || 2.0;
 const MAX_SPEED_UP_DELTA  = parseFloat(configMap.max_speed_up_delta) || 0.20;
 const SHORTEN_STATIC      = loadPrompt('w3_shorten_system', { tov: TOV });
 
@@ -143,6 +142,7 @@ async function synthOne(job) {
     lead_silence_natural_sec, tts_budget_sec, effective_slot_sec, trailing_steal_sec,
     silence_lead_ratio, silence_lead_max_sec, expansion_threshold,
     stability, similarity_boost, segment_id, lang, lesson_id,
+    movement_keywords, segment_type,
   } = job;
 
   const enDur        = parseFloat(en_duration_sec)          || 0;
@@ -157,11 +157,19 @@ async function synthOne(job) {
 
   const maxBorrowable = Math.max(0, slot - budget);
 
-  // Conditional breath-borrow: only short segments (< SHORT_SEG_THRESHOLD) with available
-  // trailing silence (slot > enDur) may extend past en_duration into the gap. Bounded by
-  // effective_slot_sec (= en_duration + maxBorrowable). Normal-length segments stay strict.
-  const isShortSeg = enDur > 0 && enDur < SHORT_SEG_THRESHOLD && slot > enDur;
-  const maxAllowed = isShortSeg ? slot : enDur;
+  // Permissive breath-borrow (2026-06-04): any segment with available trailing silence
+  // (slot > enDur) may extend past en_duration into the gap — bounded by effective_slot_sec
+  // (= en_duration + maxBorrowable). EXCEPTION: movement-locked segments (yoga/meditation
+  // movement cues that MUST sync with video) stay strict at en_duration. Signal:
+  // movement_keywords non-empty OR segment_type === 'movement' (defensive — either fires).
+  // Previously gated on SHORT_SEG_THRESHOLD (now removed) — false positives on long
+  // narrative segments with trailing silence motivated the change.
+  // Concat-time `Trim Lead For Sequence` continues to preserve sum(per-seg) == full per lang.
+  const movementKw  = (movement_keywords || '').toString().trim();
+  const segType     = (segment_type || '').toString().trim().toLowerCase();
+  const hasMovement = movementKw !== '' || segType === 'movement';
+  const canBorrow   = enDur > 0 && slot > enDur && !hasMovement;
+  const maxAllowed  = canBorrow ? slot : enDur;
 
   // Dynamic speed-up ceiling for the shorten path, RELATIVE to this voice's configured
   // speed (replaces the old absolute 1.15 / dead max_speed config key). A 0.8-speed voice

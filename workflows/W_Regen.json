@@ -14,6 +14,25 @@
     },
     {
       "parameters": {
+        "httpMethod": "GET",
+        "path": "w-regen",
+        "responseMode": "onReceived",
+        "responseCode": 200,
+        "responseData": "Regen started — you will get a Slack notification when it finishes. You can close this tab.",
+        "options": {}
+      },
+      "id": "c7d8e9f0-a1b2-3c4d-5e6f-webhookregen01",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        200
+      ],
+      "webhookId": "w-regen-public-launch"
+    },
+    {
+      "parameters": {
         "documentId": {
           "__rl": true,
           "value": "https://docs.google.com/spreadsheets/d/1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU/edit?usp=sharing",
@@ -116,7 +135,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// W_Regen — Regen Engine Code node.\n// Reads localizations rows from upstream Read Localizations, filters where\n// needs_retts=TRUE, and synthesizes each via ElevenLabs using Phase 1-style\n// timing logic (lead silence + speech + tail silence to match phase1_final_duration).\n//\n// Editor flow:\n//   1. Open localizations sheet, find row(s) to fix.\n//   2. Edit text_translated (and any other content fields if needed).\n//   3. Set needs_retts=TRUE; optionally add regen_comment for audit.\n//   4. Trigger W_Regen via Manual Trigger.\n// Result: audio for each flagged cell overwritten in Drive, sheet metrics updated,\n// needs_retts cleared, last_regen_at set.\n//\n// Multi-cell + multi-lesson handled in one run: cells processed with bounded concurrency\n// (regen_concurrency config key, default 5). Affected lessons are deduped and propagated\n// downstream so Build Full Audio + VTT regenerates only the lessons that had at least\n// one cell touched.\n\nconst SAMPLE_RATE = 22050;\nconst BPS = 2;\nconst MIN_VALID_PCM_BYTES = 4410;\nconst NEEDS_ATTENTION_THRESHOLD = 0.70;\n\nconst configMap = {};\n$('Read Config').all().forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });\n\nconst voiceMap = {};\n$('Read Voices').all().forEach(i => { if (i.json.lang) voiceMap[i.json.lang] = i.json; });\n\nconst EL_KEY = configMap.elevenlabs_api_key || '';\nif (!EL_KEY) throw new Error('elevenlabs_api_key missing from config sheet');\n\nconst MAX_SPEED_UP_DELTA = parseFloat(configMap.max_speed_up_delta) || 0.20;\nconst MAX_SLOW_DOWN_DELTA = parseFloat(configMap.max_slow_down_delta) || 0.15;\nconst SLOWDOWN_MIN_GAP_SEC = parseFloat(configMap.slowdown_min_gap_sec) || 0.5;\nconst REGEN_CONCURRENCY = parseFloat(configMap.regen_concurrency) || 5;\n\n// Read upstream localizations rows, filter by needs_retts flag\nconst allRows = $input.all();\nconst candidates = allRows.filter(it => {\n  const v = it.json.needs_retts;\n  return v === true || v === 'TRUE' || v === 'true';\n});\n\nif (candidates.length === 0) {\n  console.log('W_Regen: no rows flagged needs_retts=TRUE — nothing to do');\n  // Emit a single sentinel item so downstream nodes don't error on empty input;\n  // sentinel has has_audio=false and affected_lessons=[] — Build Full guard skips.\n  return [{ json: { regen_count: 0, affected_lessons: [], has_audio: false } }];\n}\n\nconsole.log(`W_Regen: ${candidates.length} cells flagged for regeneration`);\n\nasync function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }\n\nfunction buildWav(pcm) {\n  const n = pcm.length;\n  const h = Buffer.alloc(44);\n  h.write('RIFF', 0); h.writeUInt32LE(36 + n, 4); h.write('WAVE', 8); h.write('fmt ', 12);\n  h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22); h.writeUInt32LE(SAMPLE_RATE, 24);\n  h.writeUInt32LE(SAMPLE_RATE * BPS, 28); h.writeUInt16LE(BPS, 32); h.writeUInt16LE(16, 34);\n  h.write('data', 36); h.writeUInt32LE(n, 40);\n  return Buffer.concat([h, pcm]);\n}\n\nasync function synthOne(row) {\n  const j = row.json;\n  const lang = j.lang;\n  const voice = voiceMap[lang];\n  if (!voice || !voice.voice_id) {\n    return {\n      json: { ...j, regen_error: `no voice for lang=${lang}`, has_audio: false },\n    };\n  }\n\n  const text = (j.text_translated || '').toString();\n  if (!text.trim()) {\n    return {\n      json: { ...j, regen_error: 'text_translated is empty', has_audio: false },\n    };\n  }\n\n  const enDur = parseFloat(j.en_duration_sec) || 0;\n  const lead = parseFloat(j.lead_silence_sec) || 0;\n  // Target the EXACT slot duration Phase 1 produced — matches Phase 2 reTtsOne logic\n  // so the concatenated full WAV stays EN-aligned after regen.\n  const phase1FinalDur = parseFloat(j.final_duration_sec) || 0;\n  const targetFileDur = phase1FinalDur > 0 ? phase1FinalDur : (lead + enDur);\n  const speechBudget = targetFileDur - lead;\n\n  if (speechBudget <= 0) {\n    return {\n      json: { ...j, regen_error: `speechBudget <= 0 (lead=${lead}, target=${targetFileDur})`, has_audio: false },\n    };\n  }\n\n  const baseSpeed = parseFloat(voice.speed) || 1.0;\n  const stability = parseFloat(voice.stability) || 0.5;\n  const similarity = parseFloat(voice.similarity_boost) || 0.75;\n  const style = parseFloat(voice.style) || 0;\n  const model = voice.model || 'eleven_multilingual_v2';\n\n  async function ttsAt(speed) {\n    const MAX_TRIES = 4;\n    for (let attempt = 0; attempt < MAX_TRIES; attempt++) {\n      try {\n        const resp = await this.helpers.httpRequest({\n          method: 'POST',\n          url: `https://api.elevenlabs.io/v1/text-to-speech/${voice.voice_id}/stream?output_format=pcm_22050`,\n          headers: { 'xi-api-key': EL_KEY, 'content-type': 'application/json', accept: 'audio/pcm' },\n          body: {\n            text,\n            model_id: model,\n            voice_settings: { stability, similarity_boost: similarity, style, speed },\n          },\n          encoding: 'arraybuffer',\n          returnFullResponse: false,\n        });\n        return Buffer.from(resp);\n      } catch (e) {\n        if (attempt === MAX_TRIES - 1) {\n          console.error(`W_Regen TTS failed for ${j.segment_id}_${lang}:`, e.message);\n          return null;\n        }\n        await sleep(2000 * Math.pow(2, attempt));\n      }\n    }\n    return null;\n  }\n\n  let pcm = await ttsAt.call(this, baseSpeed);\n  if (!pcm || pcm.length < MIN_VALID_PCM_BYTES) {\n    return {\n      json: { ...j, regen_error: 'TTS produced no audio', has_audio: false },\n    };\n  }\n  let real = pcm.length / (SAMPLE_RATE * BPS);\n  let usedSpeed = baseSpeed;\n\n  // Speed-up retry if overshoot (mirrors Phase 1 shorten path + Phase 2 reTtsOne)\n  if (real > speechBudget) {\n    const steps = [\n      baseSpeed + MAX_SPEED_UP_DELTA * (2 / 3),\n      baseSpeed + MAX_SPEED_UP_DELTA,\n    ];\n    for (const speedTry of steps) {\n      const fastPcm = await ttsAt.call(this, speedTry);\n      if (!fastPcm || fastPcm.length < MIN_VALID_PCM_BYTES) continue;\n      const fastReal = fastPcm.length / (SAMPLE_RATE * BPS);\n      if (fastReal <= speechBudget) {\n        pcm = fastPcm; real = fastReal; usedSpeed = parseFloat(speedTry.toFixed(3));\n        break;\n      }\n    }\n  }\n\n  let needsAttention = false;\n\n  if (real > speechBudget) {\n    // Still overshoot at max speed-up — hard-truncate and flag\n    needsAttention = true;\n    const truncBytes = Math.round(speechBudget * SAMPLE_RATE) * BPS;\n    pcm = pcm.subarray(0, truncBytes);\n    real = pcm.length / (SAMPLE_RATE * BPS);\n  } else if (speechBudget - real > SLOWDOWN_MIN_GAP_SEC) {\n    // Slowdown-to-fill (mirrors Phase 2 reTtsOne)\n    const floor = baseSpeed - MAX_SLOW_DOWN_DELTA;\n    const wanted = baseSpeed * (real / speechBudget);\n    const slowSpeed = parseFloat(Math.max(floor, wanted).toFixed(3));\n    if (slowSpeed < baseSpeed - 1e-6 && slowSpeed > 0) {\n      const slowPcm = await ttsAt.call(this, slowSpeed);\n      if (slowPcm && slowPcm.length >= MIN_VALID_PCM_BYTES) {\n        const slowReal = slowPcm.length / (SAMPLE_RATE * BPS);\n        if (slowReal <= speechBudget) {\n          pcm = slowPcm; real = slowReal; usedSpeed = slowSpeed;\n        }\n      }\n    }\n  }\n\n  const tail = Math.max(0, targetFileDur - lead - real);\n\n  // Flag if speech is significantly shorter than the EN slot (mirrors Phase 2 threshold)\n  if (enDur > 0 && real / enDur < NEEDS_ATTENTION_THRESHOLD) needsAttention = true;\n\n  const leadBytes = Math.round(lead * SAMPLE_RATE) * BPS;\n  const tailBytes = Math.round(tail * SAMPLE_RATE) * BPS;\n  const fullPcm = Buffer.concat([\n    leadBytes > 0 ? Buffer.alloc(leadBytes, 0) : Buffer.alloc(0),\n    pcm,\n    tailBytes > 0 ? Buffer.alloc(tailBytes, 0) : Buffer.alloc(0),\n  ]);\n  const wav = buildWav(fullPcm);\n  const finalDur = (leadBytes + pcm.length + tailBytes) / (SAMPLE_RATE * BPS);\n\n  return {\n    json: {\n      row_key:                       j.row_key,\n      segment_id:                    j.segment_id,\n      lang,\n      lesson_id:                     j.lesson_id || (j.segment_id || '').split('_seg_')[0],\n      text_translated:               text,\n      en_start_sec:                  parseFloat(j.en_start_sec) || 0,\n      en_duration_sec:               enDur,\n      slot_start_sec:                parseFloat(j.slot_start_sec) || 0,\n      slot_end_sec:                  parseFloat(j.slot_end_sec) || 0,\n      lead_silence_sec:              parseFloat(lead.toFixed(3)),\n      tts_budget_sec:                parseFloat(j.tts_budget_sec) || enDur,\n      tail_silence_sec:              parseFloat(tail.toFixed(3)),\n      real_duration_sec:             parseFloat(real.toFixed(3)),\n      final_duration_sec:            parseFloat(finalDur.toFixed(3)),\n      borrowed_sec:                  parseFloat(j.borrowed_sec) || 0,\n      expansion_attempts:            parseFloat(j.expansion_attempts) || 0,\n      shorten_retries_in_synthesize: parseFloat(j.shorten_retries_in_synthesize) || 0,\n      final_speed:                   usedSpeed,\n      needs_attention:               needsAttention ? 'TRUE' : 'FALSE',\n      needs_retts:                   'FALSE',\n      // Sheets-friendly UTC datetime: \"2026-05-31 13:05:23\" (no T separator,\n      // no fractional ms, no Z suffix). Sortable as text AND recognized by\n      // Google Sheets as a datetime value if the column is formatted as such.\n      last_regen_at:                 new Date().toISOString().replace('T', ' ').slice(0, 19),\n      regen_comment:                 j.regen_comment || '',\n      audio_drive_file_id:           j.audio_drive_file_id,\n      phase2_outcome:                j.phase2_outcome || '',\n      file_name:                     `${j.segment_id}_${lang}.wav`,\n      has_audio:                     true,\n    },\n    binary: {\n      data: {\n        data:     wav.toString('base64'),\n        mimeType: 'audio/wav',\n        fileName: `${j.segment_id}_${lang}.wav`,\n      },\n    },\n  };\n}\n\n// Bounded-concurrent synthesis. Same idiom as W3 Phase 2 reTtsOne batching.\nconst results = [];\nfor (let i = 0; i < candidates.length; i += REGEN_CONCURRENCY) {\n  const slice = candidates.slice(i, i + REGEN_CONCURRENCY);\n  const partial = await Promise.all(slice.map(c => synthOne.call(this, c)));\n  for (const r of partial) results.push(r);\n}\n\nconst ok = results.filter(r => r.json.has_audio).length;\nconst failed = results.length - ok;\nconst affectedLessons = [...new Set(results.filter(r => r.json.has_audio).map(r => r.json.lesson_id))];\nconsole.log(`W_Regen: ${ok} cells regenerated, ${failed} failed, affected lessons: ${affectedLessons.join(', ')}`);\n\nreturn results;\n"
+        "jsCode": "// W_Regen — Regen Engine Code node.\n// Reads localizations rows from upstream Read Localizations, filters where\n// needs_retts=TRUE, and synthesizes each via ElevenLabs using Phase 1-style\n// timing logic (lead silence + speech + tail silence to match phase1_final_duration).\n//\n// Editor flow:\n//   1. Open localizations sheet, find row(s) to fix.\n//   2. Edit text_translated (and any other content fields if needed).\n//   3. Set needs_retts=TRUE; optionally add regen_comment for audit.\n//   4. Trigger W_Regen via Manual Trigger.\n// Result: audio for each flagged cell overwritten in Drive, sheet metrics updated,\n// needs_retts cleared, last_regen_at set.\n//\n// Multi-cell + multi-lesson handled in one run: cells processed with bounded concurrency\n// (regen_concurrency config key, default 5). Affected lessons are deduped and propagated\n// downstream so Build Full Audio + VTT regenerates only the lessons that had at least\n// one cell touched.\n\nconst SAMPLE_RATE = 22050;\nconst BPS = 2;\nconst MIN_VALID_PCM_BYTES = 4410;\nconst NEEDS_ATTENTION_THRESHOLD = 0.70;\n\nconst configMap = {};\n$('Read Config').all().forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });\n\nconst voiceMap = {};\n$('Read Voices').all().forEach(i => { if (i.json.lang) voiceMap[i.json.lang] = i.json; });\n\nconst EL_KEY = configMap.elevenlabs_api_key || '';\nif (!EL_KEY) throw new Error('elevenlabs_api_key missing from config sheet');\n\nconst MAX_SPEED_UP_DELTA = parseFloat(configMap.max_speed_up_delta) || 0.20;\nconst MAX_SLOW_DOWN_DELTA = parseFloat(configMap.max_slow_down_delta) || 0.15;\nconst SLOWDOWN_MIN_GAP_SEC = parseFloat(configMap.slowdown_min_gap_sec) || 0.5;\nconst REGEN_CONCURRENCY = parseFloat(configMap.regen_concurrency) || 5;\n\n// Read upstream localizations rows, filter by needs_retts flag\nconst allRows = $input.all();\nconst candidates = allRows.filter(it => {\n  const v = it.json.needs_retts;\n  return v === true || v === 'TRUE' || v === 'true';\n});\n\nif (candidates.length === 0) {\n  console.log('W_Regen: no rows flagged needs_retts=TRUE — exiting cleanly (no Slack notification, no sheet writes).');\n  // Return [] so downstream nodes (Has Audio?, Update Localizations Row, Build Full,\n  // Wait For Saves, Slack Notify) simply don't fire. Workflow ends with success.\n  // This makes spurious triggers (Slack link unfurl, accidental webhook GET) harmless.\n  return [];\n}\n\nconsole.log(`W_Regen: ${candidates.length} cells flagged for regeneration`);\n\nasync function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }\n\nfunction buildWav(pcm) {\n  const n = pcm.length;\n  const h = Buffer.alloc(44);\n  h.write('RIFF', 0); h.writeUInt32LE(36 + n, 4); h.write('WAVE', 8); h.write('fmt ', 12);\n  h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22); h.writeUInt32LE(SAMPLE_RATE, 24);\n  h.writeUInt32LE(SAMPLE_RATE * BPS, 28); h.writeUInt16LE(BPS, 32); h.writeUInt16LE(16, 34);\n  h.write('data', 36); h.writeUInt32LE(n, 40);\n  return Buffer.concat([h, pcm]);\n}\n\nasync function synthOne(row) {\n  const j = row.json;\n  const lang = j.lang;\n  const voice = voiceMap[lang];\n  if (!voice || !voice.voice_id) {\n    return {\n      json: { ...j, regen_error: `no voice for lang=${lang}`, has_audio: false },\n    };\n  }\n\n  const text = (j.text_translated || '').toString();\n  if (!text.trim()) {\n    return {\n      json: { ...j, regen_error: 'text_translated is empty', has_audio: false },\n    };\n  }\n\n  const enDur = parseFloat(j.en_duration_sec) || 0;\n  const lead = parseFloat(j.lead_silence_sec) || 0;\n  // Target the EXACT slot duration Phase 1 produced — matches Phase 2 reTtsOne logic\n  // so the concatenated full WAV stays EN-aligned after regen.\n  const phase1FinalDur = parseFloat(j.final_duration_sec) || 0;\n  const targetFileDur = phase1FinalDur > 0 ? phase1FinalDur : (lead + enDur);\n  const speechBudget = targetFileDur - lead;\n\n  if (speechBudget <= 0) {\n    return {\n      json: { ...j, regen_error: `speechBudget <= 0 (lead=${lead}, target=${targetFileDur})`, has_audio: false },\n    };\n  }\n\n  const baseSpeed = parseFloat(voice.speed) || 1.0;\n  const stability = parseFloat(voice.stability) || 0.5;\n  const similarity = parseFloat(voice.similarity_boost) || 0.75;\n  const style = parseFloat(voice.style) || 0;\n  const model = voice.model || 'eleven_multilingual_v2';\n\n  async function ttsAt(speed) {\n    const MAX_TRIES = 4;\n    for (let attempt = 0; attempt < MAX_TRIES; attempt++) {\n      try {\n        const resp = await this.helpers.httpRequest({\n          method: 'POST',\n          url: `https://api.elevenlabs.io/v1/text-to-speech/${voice.voice_id}/stream?output_format=pcm_22050`,\n          headers: { 'xi-api-key': EL_KEY, 'content-type': 'application/json', accept: 'audio/pcm' },\n          body: {\n            text,\n            model_id: model,\n            voice_settings: { stability, similarity_boost: similarity, style, speed },\n          },\n          encoding: 'arraybuffer',\n          returnFullResponse: false,\n        });\n        return Buffer.from(resp);\n      } catch (e) {\n        if (attempt === MAX_TRIES - 1) {\n          console.error(`W_Regen TTS failed for ${j.segment_id}_${lang}:`, e.message);\n          return null;\n        }\n        await sleep(2000 * Math.pow(2, attempt));\n      }\n    }\n    return null;\n  }\n\n  let pcm = await ttsAt.call(this, baseSpeed);\n  if (!pcm || pcm.length < MIN_VALID_PCM_BYTES) {\n    return {\n      json: { ...j, regen_error: 'TTS produced no audio', has_audio: false },\n    };\n  }\n  let real = pcm.length / (SAMPLE_RATE * BPS);\n  let usedSpeed = baseSpeed;\n\n  // Speed-up retry if overshoot (mirrors Phase 1 shorten path + Phase 2 reTtsOne)\n  if (real > speechBudget) {\n    const steps = [\n      baseSpeed + MAX_SPEED_UP_DELTA * (2 / 3),\n      baseSpeed + MAX_SPEED_UP_DELTA,\n    ];\n    for (const speedTry of steps) {\n      const fastPcm = await ttsAt.call(this, speedTry);\n      if (!fastPcm || fastPcm.length < MIN_VALID_PCM_BYTES) continue;\n      const fastReal = fastPcm.length / (SAMPLE_RATE * BPS);\n      if (fastReal <= speechBudget) {\n        pcm = fastPcm; real = fastReal; usedSpeed = parseFloat(speedTry.toFixed(3));\n        break;\n      }\n    }\n  }\n\n  let needsAttention = false;\n\n  if (real > speechBudget) {\n    // Still overshoot at max speed-up — hard-truncate and flag\n    needsAttention = true;\n    const truncBytes = Math.round(speechBudget * SAMPLE_RATE) * BPS;\n    pcm = pcm.subarray(0, truncBytes);\n    real = pcm.length / (SAMPLE_RATE * BPS);\n  } else if (speechBudget - real > SLOWDOWN_MIN_GAP_SEC) {\n    // Slowdown-to-fill (mirrors Phase 2 reTtsOne)\n    const floor = baseSpeed - MAX_SLOW_DOWN_DELTA;\n    const wanted = baseSpeed * (real / speechBudget);\n    const slowSpeed = parseFloat(Math.max(floor, wanted).toFixed(3));\n    if (slowSpeed < baseSpeed - 1e-6 && slowSpeed > 0) {\n      const slowPcm = await ttsAt.call(this, slowSpeed);\n      if (slowPcm && slowPcm.length >= MIN_VALID_PCM_BYTES) {\n        const slowReal = slowPcm.length / (SAMPLE_RATE * BPS);\n        if (slowReal <= speechBudget) {\n          pcm = slowPcm; real = slowReal; usedSpeed = slowSpeed;\n        }\n      }\n    }\n  }\n\n  const tail = Math.max(0, targetFileDur - lead - real);\n\n  // Flag if speech is significantly shorter than the EN slot (mirrors Phase 2 threshold)\n  if (enDur > 0 && real / enDur < NEEDS_ATTENTION_THRESHOLD) needsAttention = true;\n\n  const leadBytes = Math.round(lead * SAMPLE_RATE) * BPS;\n  const tailBytes = Math.round(tail * SAMPLE_RATE) * BPS;\n  const fullPcm = Buffer.concat([\n    leadBytes > 0 ? Buffer.alloc(leadBytes, 0) : Buffer.alloc(0),\n    pcm,\n    tailBytes > 0 ? Buffer.alloc(tailBytes, 0) : Buffer.alloc(0),\n  ]);\n  const wav = buildWav(fullPcm);\n  const finalDur = (leadBytes + pcm.length + tailBytes) / (SAMPLE_RATE * BPS);\n\n  return {\n    json: {\n      row_key:                       j.row_key,\n      segment_id:                    j.segment_id,\n      lang,\n      lesson_id:                     j.lesson_id || (j.segment_id || '').split('_seg_')[0],\n      text_translated:               text,\n      en_start_sec:                  parseFloat(j.en_start_sec) || 0,\n      en_duration_sec:               enDur,\n      slot_start_sec:                parseFloat(j.slot_start_sec) || 0,\n      slot_end_sec:                  parseFloat(j.slot_end_sec) || 0,\n      lead_silence_sec:              parseFloat(lead.toFixed(3)),\n      tts_budget_sec:                parseFloat(j.tts_budget_sec) || enDur,\n      tail_silence_sec:              parseFloat(tail.toFixed(3)),\n      real_duration_sec:             parseFloat(real.toFixed(3)),\n      final_duration_sec:            parseFloat(finalDur.toFixed(3)),\n      borrowed_sec:                  parseFloat(j.borrowed_sec) || 0,\n      expansion_attempts:            parseFloat(j.expansion_attempts) || 0,\n      shorten_retries_in_synthesize: parseFloat(j.shorten_retries_in_synthesize) || 0,\n      final_speed:                   usedSpeed,\n      // Tri-state needs_attention semantics:\n      //   TRUE  = W_Regen still couldn't fit audio in slot (hard-truncated or speech <70%)\n      //   REVIEW = W_Regen produced a valid file — human should listen + flip to FALSE/TRUE\n      //   FALSE = (only W3 writes this; W_Regen never demotes to FALSE — human verifies)\n      // Operator workflow: W3 writes TRUE/FALSE → operator flags TRUE → runs W_Regen →\n      // cell becomes REVIEW (yellow) → operator listens → manually flips to FALSE (green)\n      // or back to TRUE (red) if regen still sounds wrong.\n      needs_attention:               needsAttention ? 'TRUE' : 'REVIEW',\n      needs_retts:                   'FALSE',\n      // Kyiv local time, Sheets-friendly format \"YYYY-MM-DD HH:MM:SS\".\n      // 'sv-SE' locale uses ISO-like format with space separator, ideal for sorting.\n      last_regen_at:                 new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Kyiv' }),\n      regen_comment:                 j.regen_comment || '',\n      audio_drive_file_id:           j.audio_drive_file_id,\n      phase2_outcome:                j.phase2_outcome || '',\n      file_name:                     `${j.segment_id}_${lang}.wav`,\n      has_audio:                     true,\n    },\n    binary: {\n      data: {\n        data:     wav.toString('base64'),\n        mimeType: 'audio/wav',\n        fileName: `${j.segment_id}_${lang}.wav`,\n      },\n    },\n  };\n}\n\n// Bounded-concurrent synthesis. Same idiom as W3 Phase 2 reTtsOne batching.\nconst results = [];\nfor (let i = 0; i < candidates.length; i += REGEN_CONCURRENCY) {\n  const slice = candidates.slice(i, i + REGEN_CONCURRENCY);\n  const partial = await Promise.all(slice.map(c => synthOne.call(this, c)));\n  for (const r of partial) results.push(r);\n}\n\nconst ok = results.filter(r => r.json.has_audio).length;\nconst failed = results.length - ok;\nconst affectedLessons = [...new Set(results.filter(r => r.json.has_audio).map(r => r.json.lesson_id))];\nconsole.log(`W_Regen: ${ok} cells regenerated, ${failed} failed, affected lessons: ${affectedLessons.join(', ')}`);\n\nreturn results;\n"
       },
       "id": "422557c6-166f-ccd7-052d-a77f4006b53b",
       "name": "Regen Engine",
@@ -233,6 +252,7 @@
             "final_speed": "={{ $('Regen Engine').item.json.final_speed }}",
             "audio_drive_file_id": "={{ $('Regen Engine').item.json.audio_drive_file_id }}",
             "phase2_outcome": "={{ $('Regen Engine').item.json.phase2_outcome }}",
+            "needs_attention": "={{ $('Regen Engine').item.json.needs_attention }}",
             "needs_retts": "={{ $('Regen Engine').item.json.needs_retts }}",
             "last_regen_at": "={{ $('Regen Engine').item.json.last_regen_at }}",
             "regen_comment": "={{ $('Regen Engine').item.json.regen_comment }}"
@@ -576,11 +596,80 @@
           "name": "Google Drive account"
         }
       }
+    },
+    {
+      "parameters": {
+        "mode": "append"
+      },
+      "id": "f1e2d3c4-b5a6-9788-0123-waitforsaves01",
+      "name": "Wait For Saves",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        2600,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build one Slack message per affected lesson after a W_Regen run.\n// Symmetric to W_Master's Build Slack Message: emits { channel, text }.\n// Reads:\n//   $('Read Config').all()              — slack_channel, folder IDs, w_regen_workflow_url\n//   $('Regen Engine').all()             — per-cell results (has_audio, lesson_id, regen_error)\n//   $('Read Localizations Fresh').all() — post-regen rows for needs_attention rate\n// Fires only when at least one cell was regenerated; empty runs short-circuit.\nconst cfg = {};\n$('Read Config').all().forEach(i => { if (i.json && i.json.key) cfg[i.json.key] = i.json.value; });\n\nconst channel = cfg.slack_channel;\nif (!channel) {\n  console.log('W_Regen Slack: slack_channel missing — skipping notification');\n  return [];\n}\n\nconst fullFolder = cfg.drive_output_full_folder_id || cfg.drive_output_folder_id;\nconst segmentsFolder = cfg.drive_output_folder_id;\nconst vttFolder  = cfg.drive_output_vtt_folder_id;\nconst regenUrl   = cfg.w_regen_workflow_url;\nconst fullUrl     = fullFolder     ? `https://drive.google.com/drive/folders/${fullFolder}`     : null;\nconst segmentsUrl = segmentsFolder ? `https://drive.google.com/drive/folders/${segmentsFolder}` : null;\nconst vttUrl      = vttFolder      ? `https://drive.google.com/drive/folders/${vttFolder}`      : null;\n\nconst regenResults = $('Regen Engine').all().map(i => i.json || {});\nconst lessonStats = new Map();\nfor (const r of regenResults) {\n  if (!r.lesson_id) continue;\n  const s = lessonStats.get(r.lesson_id) || { ok: 0, failed: 0 };\n  if (r.has_audio) s.ok++;\n  else if (r.regen_error) s.failed++;\n  lessonStats.set(r.lesson_id, s);\n}\nif (lessonStats.size === 0) {\n  console.log('W_Regen Slack: no affected lessons — skipping notification');\n  return [];\n}\n\nconst messages = [];\nfor (const [lesson_id, { ok, failed }] of lessonStats) {\n  const cellsLine = failed > 0 ? `${ok} (${failed} failed)` : `${ok}`;\n\n  const lines = [\n    ':arrows_counterclockwise: *Regen complete*',\n    '',\n    `*Lesson:* ${lesson_id}`,\n    `*Cells regenerated:* ${cellsLine}`,\n  ];\n  if (fullUrl || segmentsUrl || vttUrl || regenUrl) lines.push('');\n  if (fullUrl)     lines.push(`:file_folder: <${fullUrl}|Full audio (per-lang)>`);\n  if (segmentsUrl) lines.push(`:musical_note: <${segmentsUrl}|Per-segment audio>`);\n  if (vttUrl)      lines.push(`:closed_book: <${vttUrl}|VTT subtitles>`);\n  if (regenUrl)    lines.push(`:wrench: <${regenUrl}|Regen Segments>`);\n\n  messages.push({ json: { channel, text: lines.join('\\n') } });\n}\nreturn messages;"
+      },
+      "id": "a4b5c6d7-e8f9-0a1b-2c3d-buildregenslk1",
+      "name": "Build Regen Slack Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2800,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $json.channel }}",
+          "mode": "id"
+        },
+        "text": "={{ $json.text }}",
+        "otherOptions": {
+          "mrkdwn": true,
+          "unfurl_links": false,
+          "unfurl_media": false,
+          "includeLinkToWorkflow": false
+        }
+      },
+      "id": "b5c6d7e8-f9a0-1b2c-3d4e-slackregennot1",
+      "name": "Slack Notify (Regen)",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        3000,
+        300
+      ],
+      "webhookId": "regen-slack-notify-001",
+      "credentials": {
+        "slackApi": {
+          "id": "ogtQ2NONkRrXj2kl",
+          "name": "Slack account"
+        }
+      }
     }
   ],
   "pinData": {},
   "connections": {
     "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Trigger": {
       "main": [
         [
           {
@@ -764,6 +853,11 @@
             "node": "Search Same Name Full",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "Wait For Saves",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -797,6 +891,11 @@
             "node": "Search Same Name VTT",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "Wait For Saves",
+            "type": "main",
+            "index": 1
           }
         ]
       ]
@@ -817,6 +916,28 @@
         [
           {
             "node": "Delete Old VTT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait For Saves": {
+      "main": [
+        [
+          {
+            "node": "Build Regen Slack Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Regen Slack Message": {
+      "main": [
+        [
+          {
+            "node": "Slack Notify (Regen)",
             "type": "main",
             "index": 0
           }

@@ -4,6 +4,194 @@
 
 ---
 
+### 2026-06-04 — PERMISSIVE_BORROW_FOR_NONMOVEMENT_SEGMENTS
+
+Context: Користувач знайшов 2 false-positive `needs_attention=TRUE` cells у CSV. У обох випадках TTS overshoot-ив `en_duration_sec` на невелику кількість, АЛЕ після сегмента була тиша (`gap_after_sec > 0`) — фізично безпечно заборгувати ту тишу. Поточна логіка не дозволяла, бо `isShortSeg` gate перевіряв тільки `en_duration < short_seg_threshold_sec` (default 2.0с): короткі афірмації мали право borgувати, довгі narrative сегменти — ні, і навіть з вільною тишою після перетворювалися на truncate + needs_attention.
+
+Decision: видалено `short_seg_threshold_sec` gate. Заміна — рух-локед перевірка:
+- `hasMovement = (movement_keywords || '').trim() !== '' || segment_type === 'movement'`
+- `canBorrow = enDur > 0 && slot > enDur && !hasMovement`
+- `maxAllowed = canBorrow ? slot : enDur`
+
+Усі non-movement сегменти будь-якої довжини тепер можуть розширювати свій TTS у тишу після — bounded by `effective_slot_sec` (= `en_duration + max_borrowable`, з `max_borrowable = min(gap_after - MIN_GAP, max_borrow_per_segment_sec)`). Movement-locked сегменти (yoga/meditation cues, де озвучка має sync-нути з video-рухами) залишаються strict at `en_duration_sec` — overshoot все ще тригерить `needs_attention=TRUE`.
+
+Двосигнальна перевірка movement (`OR`) defensive: і `movement_keywords`, і `segment_type` пишуться W2 Tone Analysis у segments sheet. Якщо LLM промахнувся на одному з них (наприклад поставив type=narrative але keywords заповнив), ми все одно lock-немо. Тільки якщо ОБИДВА сигнали missing — borrow дозволено.
+
+Архітектурна гарантія `sum(per-seg_{lang}.wav) == full_{lang}.wav` per language НЕ порушується. `Trim Lead For Sequence` (added 2026-05-31) trim-ить лідер наступного сегмента на `borrowed_sec` поточного — boundary між сегментами зсувається, але абсолютна позиція кожного speech-старту = EN-aligned. Per-segment WAV файли НЕ-MOVEMENT сегментів між мовами тепер можуть мати різну тривалість (один lang заборгував, інший ні), але full WAV-и однакові за тривалістю + з sync-нутими боундарями.
+
+Альтернативи, які розглядались:
+- **Keep `short_seg_threshold_sec` AS-IS + add movement check** (`canBorrow = isShortSeg && !hasMovement`): не вирішує користувачеву проблему — довгі narrative сегменти все одно не borgують.
+- **Make threshold configurable з default=Infinity** (`canBorrow = (enDur < threshold) && !hasMovement`): зайве абстрагування. User explicitly chose to remove the gate.
+- **Per-segment opt-in/opt-out у segments sheet** (нова колонка `allow_borrow`): додає manual work для оператора. Cycle gain не виправдовує.
+
+Files changed:
+- `code_nodes/check_timing_and_pad.js` — видалено `SHORT_SEG_THRESHOLD` constant; destructure of `synthOne` додає `movement_keywords, segment_type`; gate logic замінено per the snippet вище.
+- `workflows/W3_Synthesize_v2.json` — `Expand TTS Jobs` Code: per-job payload додає `movement_keywords` + `segment_type` (вже у segments sheet read upstream). `Check Timing + Pad` inline code: synch-rized з standalone file.
+- `docs/sheets_schema.md` — `needs_attention` опис оновлено: tri-state + movement gate timing rule.
+- `docs/config_keys.md` — `short_seg_threshold_sec` помічено dead.
+- `DECISIONS.md` — цей запис.
+
+Verification:
+- W3 JSON parses ✓, всі jsCode async-wrap-аються ✓
+- Standalone `code_nodes/check_timing_and_pad.js` parses ✓
+- No code references to `SHORT_SEG_THRESHOLD` / `short_seg_threshold_sec` (тільки коментарі)
+- Тестування: drop урок, де є відомий false-positive cell з minor overshoot + non-empty gap_after + empty movement_keywords → раніше `needs_attention=TRUE` з truncated audio, тепер `needs_attention=FALSE` + `borrowed_sec > 0` + full audio збережено.
+
+Future work:
+- Per-segment WAV cross-lang duration drift (non-movement segments тепер різної довжини між мовами) — тільки якщо хтось консьюмить per-seg files окремо. Не критично для поточного operator workflow (full WAV в DAW).
+- Якщо рух розкласифіковано вручну оператором ПІСЛЯ W2 (rare), W_Regen прогон використає поточний стан segments sheet (W2 Tone Analysis pre-write), не original W3 рішення. Це коректна поведінка.
+
+---
+
+### 2026-06-04 — W_MASTER_ARCHIVE_REFACTOR_TO_HTTP_NODES
+
+Context: `Archive Previous Run` Code node (added 2026-06-03) використовував `this.helpers.httpRequestWithAuthentication` для Drive/Sheets REST викликів. Користувацька версія n8n блокує цей helper у Code Node sandbox (`The function "helpers.httpRequestWithAuthentication" is not supported in the Code Node`), тож архів-чейн впав на першому ж прогоні. Predelete code's коментар про fallback "switch this node to HTTP Request nodes with explicit credential binding" став необхідним рефактором.
+
+Decision: один Archive Previous Run Code node замінено на ланцюг з 11 нод (positions y=720, x=2528→4992):
+
+1. **Plan Sources** (Code) — validates `drive_archive_folder_id` + `drive_input_folder_id` + `drive_output_folder_id`, emits 1 item per source folder з `{src_key, folder_id, q}` (q — pre-built Drive query string)
+2. **List Files** (HTTP Request, `googleDriveOAuth2Api`) — GET `/drive/v3/files?q={{$json.q}}&...&pageSize=1000`. Fires once per source folder (1-4 times залежно від dedupe). Pagination >1000 файлів не обробляється (поточний max ≈350 на урок).
+3. **Plan Archive** (Code) — aggregates `$('List Files').all()` paired by index з `$('Plan Sources').all()`, filters out `new_file_ids`, derives `archive_name` (input basename fallback to segments/full prefix), emits ONE item з повним планом OR `{skip:true}`
+4. **Has Files To Archive?** (IF v2.2) — routes на основі `$json.skip === false`. False output (skip=true) пайпом одразу до Pass Lessons (after Archive)
+5. **Create Archive Root** (HTTP POST) — створює archive folder у `05_archive`
+6. **Copy Sheet Snapshot** (HTTP POST `/files/{id}/copy`) — копіює живий Sheet у archive root. **onError default (stopWorkflow)** — якщо snapshot впав, нічого не порушено, можна re-drop файл після фіксу
+7. **Plan Subfolders** (Code) — emits 1 item per src_key що має файли в плані (можливо <4 якщо щось порожнє)
+8. **Create Subfolder** (HTTP POST) — fires per item
+9. **Plan Moves** (Code) — pairs subfolder IDs (from `$('Create Subfolder').all()` by index) з files (з `$('Plan Archive').first()`), emits N items
+10. **Move File** (HTTP PATCH `/files/{id}?addParents=&removeParents=`) — fires N times. `retryOnFail=true`, `maxTries=3`, `waitBetweenTries=2000ms`, `onError=continueRegularOutput` — partial failures не вбивають workflow
+11. **Clear Sheet Tabs** (HTTP POST `/values:batchClear`, `googleSheetsOAuth2Api`) — `executeOnce=true` (один виклик незалежно від кількості Move File output items), `onError=continueRegularOutput` (moves вже зроблені, sheet clear фейл recoverable manually)
+12. **Pass Lessons (after Archive)** (Code) — re-emits Parse Filename items, точка конвергенції з IF-false branch
+
+W_Master тепер має 26 нод (було 15). Connections: 25 sources (було 14). Існуючі positions існуючих 15 нод НЕ змінено (per [feedback_workflow_node_layout]).
+
+Чому HTTP Request nodes а не n8n Google Drive native nodes:
+- HTTP Request має стабільні параметри між версіями n8n (метод/url/query/body — universal). Native Drive/Sheets node params шифтяться між v3, v4, v5+.
+- Ми знаємо Drive REST API exactly — meta-документація стабільна.
+- Pattern уже використовується у W_Regen (Drive PATCH httpRequest line 175+) і Search Same Name Full (line 436+) — consistency.
+
+Чому не окремий W_Archive workflow:
+- Inline зберігає W_Master self-contained — одна точка для оператора щоб бачити повний flow після drop.
+- Окремий workflow додав би крок для setup (import + bind credentials + reference workflow ID у W_Master Execute Workflow node).
+- 11 нод inline видно у Visual UI без переключення.
+
+Files changed:
+- `workflows/W_Master.json` — Archive Previous Run Code node (1 node) → 11 nodes. Total: 15 → 26 nodes; connections 14 → 25.
+- `workflows/README.md` — оновлено W_Master section (замість "Archive Previous Run" row тепер табличний row "Archive chain (11 nodes)" з повним описом ланцюга). Setup checklist оновлено (пункт 3 — checking credentials на HTTP Request nodes).
+- `DECISIONS.md` — цей запис.
+
+Verification:
+- W_Master.json parses ✓, всі jsCode async-wrap-аються ✓, всі 25 connection targets resolve ✓
+- 26 nodes, archive chain positions exact [2080,720]→[4992,720] grid (224px step)
+- HTTP Request nodes мають `nodeCredentialType` + `credentials` block — same pattern як Drive PATCH у W_Regen.
+
+Future work:
+- Якщо pagination >1000 файлів на папку стане потрібна — додати loop pattern (Code + SplitInBatches) перед List Files. Поточний max ≈350 файлів per folder (sleep1_full 47×7).
+- Якщо архів-чейн стане частим bottleneck — extract до W_Archive workflow і викликати через Execute Workflow.
+
+---
+
+### 2026-06-03 — W_MASTER_ARCHIVE_PREVIOUS_RUN_ROTATION
+
+Context: Drive working folders `01_input`, `02_output` (`drive_output_folder_id`), `03_full` (`drive_output_full_folder_id`), `04_vtt` (`drive_output_vtt_folder_id`) accumulated файли від кожного processed lesson — після десяти прогонів папки переповнені файлами від десяти різних уроків. Оператор хотів, щоб папки лишались "чистими" — тільки поточний урок видимий, попередні тукаються в `05_archive` (новий, ID `1DHRzoMLTLGbgvNuCxCOY3oB58AkWfEbq`), із збереженою структурою папок і datestamped subfolder за іменем попереднього файлу.
+
+Decision: додано трьохнодний archive chain inline у W_Master між `Parse Filename` і `Execute W1 (STT)`:
+
+1. **Once Per Run** (Code, [2080, 720]) — згортає N Parse Filename items до 1 sentinel item (так archive chain fires once, незалежно від multi-file drops). Carries `new_file_ids` для exclusion.
+2. **Read Config (Archive)** (Sheets, [2304, 720]) — окремий config read саме на початку workflow (existing `Read Config` живе ПІСЛЯ Execute W3 — занадто пізно). Reads folder IDs + новий `drive_archive_folder_id`.
+3. **Archive Previous Run** (Code, [2528, 720], із прив'язаними `googleDriveOAuth2Api` + `googleSheetsOAuth2Api` credentials) — робить ВСЕ Drive + Sheets REST через `this.helpers.httpRequestWithAuthentication.call(this, '<type>', {...})` (pattern з [code_nodes/predelete_drive_files.js](code_nodes/predelete_drive_files.js)):
+   - lists всі 4 source folders (з pagination для >1000 файлів)
+   - excludes файли в `new_file_ids` set
+   - дерево archive: derives ім'я з `01_input` leftover basename (sort by alpha — deterministic), fallback на `_seg_`/`_full_` prefix із 02-04, fallback на літерал `archive`
+   - timestamp: `YYYY-MM-DD_HH-MM` (sortable + human-readable)
+   - створює archive root + per-source subfolders через `POST /drive/v3/files` з `mimeType=folder`
+   - **копіює живий Google Sheet** через `POST /drive/v3/files/{sheetId}/copy` (Drive copy → independent Sheet, NOT a link) в archive root як `sheet_snapshot_{archiveName}`. Sheet ID береться з config key `sheets_document_id` (новий, optional) з fallback на hardcoded `1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU`. Snapshot failure → **throws BEFORE any destructive op** (no moves, no clear) — необхідна гарантія, інакше можна втратити дані попереднього прогону при пропуску snapshot.
+   - переміщує файли через `PATCH /drive/v3/files/{id}?addParents&removeParents` (NOT copy — без duplicates, без quota burst)
+   - bounded concurrency 10 для moves
+   - **wipe-ить `segments` і `localizations` таби** живого Sheet через `POST /spreadsheets/{id}/values:batchClear` (ranges `segments!A2:ZZ` + `localizations!A2:ZZ` — headers rows залишаються; `voices`, `prompts`, `config` таби НЕ зачеплено). Це даєW1/W2/W3 чистий старт для нового уроку без collision зі stale rows. Sheet clear failure logged but NOT throw (moves already done; recoverable manually).
+   - pass-through `$('Parse Filename').all()` items у return, щоб Execute W1 fan-out працював незмінно
+
+Wiring (chain): `Parse Filename → Once Per Run → Read Config (Archive) → Archive Previous Run → Execute W1`. Існуючі позиції всіх інших нод збережено (per [feedback_workflow_node_layout]) — нові ноди на новому row y=720 (нижче existing y=432 main row і y=592 Pass Lessons row). Visual: ланцюг іде вниз-вправо-вгору-вліво до Execute W1. Не найкрасивіше, але preserves всю стару layout.
+
+Новий config key `drive_archive_folder_id` — REQUIRED. Якщо missing → Archive Previous Run throws ще до будь-якого Drive mutation. Свідома відсутність silent-skip: інакше папки 01-04 росли б непомітно для оператора, і він би помітив тільки коли quota lapsed.
+
+Edge cases handled:
+- **Перший прогон** (01-04 порожні): toMove[] empty → console log + pass-through до Execute W1 без створення archive subfolder.
+- **Multi-file drop**: `new_file_ids` excludes всі N just-dropped → archive захоплює тільки старе. W1 fan-out не зачеплений.
+- **Leftover input не співпадає з segments prefix**: archive name береться з alpha-sorted 01_input файлу — det'мінований. Якщо 02-04 мають файли від multi-lesson, всі дампляться в одну архів-папку (per user decision — "все в одну").
+- **drive_archive_folder_id missing**: throw з actionable error message.
+- **Move fails partway** (network blip): part-moved йдуть в архів, решта залишається в working folders. Не fails workflow — W1/W2/W3 ще можуть процесити новий файл, незавершені moves підхопить наступний прогон. Логи warn-ять про count of errors.
+
+Альтернативи, які розглядались:
+- **Separate W_Archive workflow** через Execute Workflow — cleaner separation, але +1 файл для maintenance. Inline залишає logic next to W_Master orchestration; якщо W_Archive потрібен пізніше — легко витягти.
+- **n8n Google Drive Search + Create Folder nodes** (не Code-node-із-httpRequest) — стандартніший pattern, але потребує 8-12 нод замість одного code. Code node з httpRequestWithAuthentication дає ту саму auth + менше нод (плата — залежність від цього n8n helper, документовано working у предделете коменті).
+- **Copy + verify + delete** (3 кроки) — повноцінний backup, але double-write transient state + 2× quota. Move через `addParents/removeParents` атомарний на Drive side і повертає file_id незмінним.
+
+Files changed:
+- `workflows/W_Master.json` — додано 3 ноди, нові connections, всі існуючі positions збережено. Нод тепер 15 (було 12), connection sources 14 (було 11).
+- `docs/config_keys.md` — нова row `drive_archive_folder_id`; updated `drive_input_folder_id` опис що тепер also consumed by Archive Previous Run.
+- `workflows/README.md` — W_Master section: 3 нові table rows (Once Per Run, Read Config (Archive), Archive Previous Run); setup checklist оновлено (нові пункти 3 + 5 про credential + config).
+- `DECISIONS.md` — цей запис.
+
+Verification:
+- W_Master.json parses ✓, all jsCode async-wraps ✓, all 14 connection targets resolve ✓
+- 15 nodes, positions sane (existing all at y=432/592, нові 3 на y=720)
+- Code-node-з-credential pattern документований у [code_nodes/predelete_drive_files.js:13-15](code_nodes/predelete_drive_files.js#L13-L15). Якщо `httpRequestWithAuthentication` not available у user's n8n version → fall back на explicit HTTP Request nodes з credential bindings (8+ нод замість 1 code).
+
+Future work:
+- **Retention policy на 05_archive**: зараз files accumulate forever. Окремий cleanup workflow, що видаляє archive subfolders старше N днів — add якщо Drive quota стане проблемою.
+- **Rollback on W1/W2/W3 failure**: якщо новий run падає після archive — old files вже в archive і таби wipe-нуті, чисто manual cleanup (operator копіює дані зі snapshot Sheet назад у segments/localizations таби). Можна додати checkpoint workflow для restore — defer до першого реального failure.
+
+---
+
+### 2026-06-03 — SLACK_SURFACE_REDESIGN_NEEDS_ATTENTION_REGEN_BUTTON
+
+Context: `Build Slack Message` у W_Master повідомляло лише про факт завершення + один лінк на full-folder. Оператор просив додати (а) лінк на VTT-папку поряд із Audio, (б) per-lesson `needs_attention` rate (%+absolute) для quick triage, (в) "кнопку" у Slack, що запускає W_Regen без логіну в n8n. Окремо: W_Regen досі не слав жодного Slack-нотіфаєра по завершенні — оператор має постійно відкривати n8n щоб дізнатись, чи виправилось.
+
+Decision:
+
+**W_Master Build Slack Message** — переписано на 3-блочну mrkdwn-форму:
+1. Header (`:white_check_mark: Dubbing complete` + lesson_id + filename + active langs)
+2. **Needs attention rate** — per-lesson computed з нового `Read Localizations` Sheets node, що вставлений між `Read Config` і `Build Slack Message`. Filter: `segment_id.startsWith(lesson_id + '_')`. Render `N% (flagged / total)` або `n/a` коли total=0 (наприклад, drop файлу що валиться на W1 без створення localizations).
+3. Three clickable links (mrkdwn `<url|text>`, не Block Kit buttons — для уникнення невідомих n8n Slack node параметрів у v2.2): Audio folder, VTT folder, Open W_Regen. Кожен з лінків опускається, якщо відповідний config key відсутній.
+
+**W_Regen — Webhook Trigger** новий, поряд із Manual Trigger:
+- `httpMethod=GET`, `path=w-regen`, `responseMode=onReceived` (миттєва відповідь `"Regen started — you will get a Slack notification when it finishes"`, workflow рухається у фоні)
+- Connection: `Webhook Trigger → Read Config` паралельно до `Manual Trigger → Read Config`. n8n merge-ить через input 0; Read Config спрацьовує один раз на trigger activation.
+- Слак-кнопка є просто mrkdwn-лінком на webhook URL. Клік у Slack → браузер відкриває webhook → отримує "Started" → закриває таб. Workflow стартує без логіну. Security risk: anyone with the URL can trigger; mitigated тим, що URL живе в private Slack channel + має random path suffix. Для більш суворого захисту можна додати query-param shared secret у майбутньому.
+
+**W_Regen — Slack notification на завершенні** (новий tail):
+- `Wait For Saves` (Merge node v3, mode=append) — синхронізує закінчення обох паралельних save-branches (`Save Full to Drive` + `Save VTT to Drive`). Connections — second output port from each save node. Empty-run case (Regen Engine returned 0-cell sentinel → ні Save Full ні Save VTT не fire) ⇒ Merge не fire ⇒ Slack не fire (інтенціонально — оператор знає що нічого не запускалось).
+- `Build Regen Slack Message` (Code) — читає `$('Regen Engine').all()` для per-lesson stats (ok / failed), `$('Read Localizations Fresh').all()` для post-regen needs_attention rate. Емітить one message per affected lesson, симетрично до W_Master (різниця: `:arrows_counterclockwise: *Regen complete*` + `Cells regenerated: X (Y failed)` замість source filename + active langs).
+- `Slack Notify (Regen)` — стандартна n8n Slack v2.2 нода, same credential, same `text` + `mrkdwn=true` як у W_Master.
+
+**Новий config key** `w_regen_workflow_url` — повний webhook URL (з production endpoint n8n), наприклад `https://n8n.example.com/webhook/w-regen`. Optional — без нього кнопка просто опускається з обох Slack-повідомлень. Документовано в `docs/config_keys.md` поряд із `slack_channel`.
+
+Альтернативи, які розглядались і відхилені:
+- **Block Kit buttons** (з полем `actions` + `style: primary`) — потребують точного імені параметра у n8n Slack v2.2 (`blocksUi`? `messageType: block`?), яке я не можу швидко верифікувати без живого n8n. mrkdwn-лінки дають той самий UX (клік → URL) і працюють гарантовано. Якщо UX справді треба styled-buttons, можна вернутись пізніше.
+- **Лінк на n8n UI** (`/workflow/{id}`) — простіше, але оператор мусить мати n8n акаунт + логінитись. Користувач явно сказав уникати цього.
+- **`min_inter_segment_gap_sec` security token** для webhook — overkill для MVP коли URL вже у private Slack channel. Якщо в майбутньому Slack-канал розшириться поза команду, можна додати `?token=...` перевірку.
+- **Slack interactivity (real button → POST to app endpoint → trigger via n8n REST API)** — потребує Slack App setup + interactivity endpoint receiver. Overkill для MVP.
+
+Files changed:
+- `workflows/W_Master.json` — додано node `Read Localizations` ([3184, 432]); зміщено `Build Slack Message` → [3408, 432] та `Slack Notify` → [3632, 432] (стандартний 224px grid збережено per [feedback_workflow_node_layout]). `Build Slack Message` jsCode переписано на 3-блочну форму. `Slack Notify` залишився text+mrkdwn (не Block Kit). Connection: `Read Config → Read Localizations → Build Slack Message`.
+- `workflows/W_Regen.json` — додано Webhook Trigger ([0, 200]), Wait For Saves Merge ([2600, 300]), Build Regen Slack Message ([2800, 300]), Slack Notify (Regen) ([3000, 300]). Save Full / Save VTT connections отримали другий target → Wait For Saves (input 0 / input 1 відповідно).
+- `docs/config_keys.md` — нова row `w_regen_workflow_url` + оновлено `slack_channel` row що тепер consumed by both W_Master і W_Regen.
+- `workflows/README.md` — оновлено W_Master section (новий Read Localizations node, оновлений Build Slack Message опис), додано нову W_Regen section з повною таблицею nodes (раніше W_Regen не був задокументований у workflows/README.md).
+- `DECISIONS.md` — цей запис.
+
+Verification:
+- Both workflow JSONs parse ✓
+- Усі jsCode-блоки async-wrap-нуто і компілюються ✓
+- Усі connections targets resolve у existing node names ✓
+- W_Master: 12 nodes, 11 connections; W_Regen: 27 nodes, 24 connections
+
+Future work:
+- Якщо webhook стане target для зловмисників/script kiddies → додати token query-param check (`if (request.query.token !== cfg.w_regen_token) throw`).
+- Якщо оператор хоче styled-buttons замість mrkdwn-лінків → перевести Slack Notify на Block Kit (потрібен живий n8n щоб верифікувати точний param shape).
+- Якщо W_Regen починає fire-ити часто (наприклад via Sheet-based `regen=TRUE` trigger, що сьогодні post-ship у PLAN.md) → можна додати throttle (last_regen_at < 10s back → skip).
+
+---
+
 ### 2026-05-31 — BORROW_BEHAVIOR_AUDIT_DOCS_SYNC
 
 Context: PLAN.md had `max_borrow_per_segment_sec` listed як "formally dead" у should-have cleanup; README.md → Sheets cheatsheet теж позначав key як "currently unused"; `localizations` watch-list казав `borrowed_sec` "should be 0 (strict alignment)". Це було неточно: `max_borrow_per_segment_sec` фактично активний — використовується як ceiling у `Expand TTS Jobs → effective_slot_sec` обчисленні і застосовується runtime коли `isShortSeg=true` у `Check Timing + Pad`. Користувач попросив зʼясувати, як вирішити це питання і які ризики змін.

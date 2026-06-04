@@ -49,6 +49,335 @@
     },
     {
       "parameters": {
+        "jsCode": "// Collapse N Parse Filename items down to 1 sentinel item so the archive chain\n// (List → Plan → Move) fires exactly once per Drive Trigger activation, not once\n// per dropped file. Carries the set of just-dropped file IDs so Archive Previous Run\n// can exclude them from the move list.\nconst newFileIds = $('Parse Filename').all().map(i => i.json.file_id).filter(Boolean);\nconst newFileNames = $('Parse Filename').all().map(i => i.json.filename).filter(Boolean);\nreturn [{ json: { archive_run_at: new Date().toISOString(), new_file_ids: newFileIds, new_file_names: newFileNames } }];"
+      },
+      "id": "e1f2a3b4-c5d6-7890-1234-onceperrun001",
+      "name": "Once Per Run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2080,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "config",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "f2a3b4c5-d6e7-8901-2345-readcfgarchv1",
+      "name": "Read Config (Archive)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        2304,
+        720
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Plan Sources — emits one item per source folder that downstream List Files\n// will hit via Drive REST. We dedupe folder IDs (in case fallback chains collapsed\n// vtt → full → segments onto the same folder) so we don't list the same folder\n// twice. drive_archive_folder_id is validated here, BEFORE any List/Move starts.\nconst cfg = {};\n$('Read Config (Archive)').all().forEach(i => { if (i.json && i.json.key) cfg[i.json.key] = i.json.value; });\n\nconst ARCHIVE_PARENT = cfg.drive_archive_folder_id;\nif (!ARCHIVE_PARENT) {\n  throw new Error('drive_archive_folder_id missing from config sheet — required for the archive feature. Either set it to the Drive folder ID of 05_archive, or remove the archive chain from W_Master.');\n}\nif (!cfg.drive_input_folder_id) throw new Error('drive_input_folder_id missing from config sheet');\nif (!cfg.drive_output_folder_id) throw new Error('drive_output_folder_id missing from config sheet');\n\nconst sources = [\n  { src_key: '01_input',    folder_id: cfg.drive_input_folder_id },\n  { src_key: '02_output', folder_id: cfg.drive_output_folder_id },\n  { src_key: '03_full',     folder_id: cfg.drive_output_full_folder_id || cfg.drive_output_folder_id },\n  { src_key: '04_vtt',      folder_id: cfg.drive_output_vtt_folder_id || cfg.drive_output_full_folder_id || cfg.drive_output_folder_id },\n];\n\nconst seen = new Set();\nconst out = [];\nfor (const s of sources) {\n  if (!s.folder_id || seen.has(s.folder_id)) continue;\n  seen.add(s.folder_id);\n  out.push({ json: { src_key: s.src_key, folder_id: s.folder_id, q: `'${s.folder_id}' in parents and trashed = false` } });\n}\nreturn out;"
+      },
+      "id": "aaaa1111-1111-1111-1111-plansources001",
+      "name": "Plan Sources",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2528,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.googleapis.com/drive/v3/files",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "q", "value": "={{ $json.q }}" },
+            { "name": "fields", "value": "files(id,name,mimeType)" },
+            { "name": "pageSize", "value": "1000" },
+            { "name": "supportsAllDrives", "value": "true" },
+            { "name": "includeItemsFromAllDrives", "value": "true" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "aaaa2222-2222-2222-2222-listfiles00001",
+      "name": "List Files",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2752,
+        720
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "MoWG4XRaoJGU18eu",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Plan Archive — aggregates the per-source-folder file lists, filters out the\n// just-dropped trigger files, derives the archive subfolder name, and emits a\n// single plan item that downstream nodes consume via $('Plan Archive').first().json.\n// If nothing remains to archive (first run / pre-cleaned folders) → emits a single\n// item with skip=true and Has Files? routes around the destructive chain.\nconst FOLDER_MIME = 'application/vnd.google-apps.folder';\n\nconst sources = $('Plan Sources').all().map(i => i.json);\nconst responses = $('List Files').all().map(i => i.json);\n\nif (sources.length !== responses.length) {\n  console.warn(`[Archive] source/response count mismatch: ${sources.length} vs ${responses.length}`);\n}\n\nconst newFileIds = new Set(($('Once Per Run').first().json.new_file_ids || []));\n\nconst cfg = {};\n$('Read Config (Archive)').all().forEach(i => { if (i.json && i.json.key) cfg[i.json.key] = i.json.value; });\n\nconst toMove = [];\nfor (let i = 0; i < sources.length; i++) {\n  const src = sources[i];\n  const files = (responses[i] && responses[i].files) || [];\n  for (const f of files) {\n    if (f.mimeType === FOLDER_MIME) continue;       // never move subfolders\n    if (newFileIds.has(f.id)) continue;             // skip just-dropped trigger files\n    toMove.push({ id: f.id, name: f.name, src_key: src.src_key, src_folder: src.folder_id });\n  }\n}\n\nif (toMove.length === 0) {\n  console.log('[Archive] nothing to archive — folders already clean (first run or operator pre-cleaned)');\n  return [{ json: { skip: true } }];\n}\n\nfunction basenameNoExt(name) { return (name || '').replace(/\\.[^./\\\\]+$/, ''); }\nlet archiveBase = null;\nconst leftoverInputs = toMove.filter(f => f.src_key === '01_input').sort((a, b) => a.name.localeCompare(b.name));\nif (leftoverInputs.length > 0) {\n  archiveBase = basenameNoExt(leftoverInputs[0].name);\n} else {\n  const sample = toMove.find(f => /_(seg|full)_/.test(f.name));\n  if (sample) archiveBase = sample.name.split(/_(seg|full)_/)[0];\n}\nif (!archiveBase) archiveBase = 'archive';\n\n// Kyiv local time. 'sv-SE' locale → \"YYYY-MM-DD HH:MM:SS\"; turn into filename-safe\n// \"YYYY-MM-DD_HH-MM\" (no seconds, underscore between date and time, hyphens not colons).\nconst kyivTime = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Kyiv' });\nconst stamp = kyivTime.replace(' ', '_').replace(/:/g, '-').slice(0, 16);\nconst archive_name = `${archiveBase}_${stamp}`;\n\nconst SHEET_ID = cfg.sheets_document_id || '1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU';\nconst ARCHIVE_PARENT = cfg.drive_archive_folder_id;\n\nconsole.log(`[Archive] plan: ${toMove.length} files → ${archive_name}/ (parent ${ARCHIVE_PARENT})`);\n\nreturn [{ json: { skip: false, archive_name, archive_parent: ARCHIVE_PARENT, sheet_id: SHEET_ID, files: toMove } }];"
+      },
+      "id": "aaaa3333-3333-3333-3333-planarchive001",
+      "name": "Plan Archive",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2976,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "has-files-check",
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": false,
+              "operator": { "type": "boolean", "operation": "false", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "aaaa4444-4444-4444-4444-hasfilesif0001",
+      "name": "Has Files To Archive?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3200,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://www.googleapis.com/drive/v3/files",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "supportsAllDrives", "value": "true" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ name: $json.archive_name, mimeType: 'application/vnd.google-apps.folder', parents: [$json.archive_parent] }) }}",
+        "options": {}
+      },
+      "id": "aaaa5555-5555-5555-5555-createroot0001",
+      "name": "Create Archive Root",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3424,
+        720
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "MoWG4XRaoJGU18eu",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://www.googleapis.com/drive/v3/files/{{ $('Plan Archive').first().json.sheet_id }}/copy",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "supportsAllDrives", "value": "true" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ name: 'sheet_snapshot_' + $('Plan Archive').first().json.archive_name, parents: [$('Create Archive Root').first().json.id] }) }}",
+        "options": {}
+      },
+      "id": "aaaa6666-6666-6666-6666-copysnapsht001",
+      "name": "Copy Sheet Snapshot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3648,
+        720
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "MoWG4XRaoJGU18eu",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Plan Subfolders — emits one item per archive subfolder we need to create.\n// Skips any src_key that has no files in the plan (e.g. if 04_vtt had 0 leftovers,\n// we don't create an empty 04_vtt subfolder).\nconst plan = $('Plan Archive').first().json;\nconst rootId = $('Create Archive Root').first().json.id;\nconst presentKeys = new Set(plan.files.map(f => f.src_key));\nconst order = ['01_input', '02_output', '03_full', '04_vtt'];\nreturn order\n  .filter(k => presentKeys.has(k))\n  .map(k => ({ json: { name: k, parent: rootId } }));"
+      },
+      "id": "aaaa7777-7777-7777-7777-plansubfldrs01",
+      "name": "Plan Subfolders",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3872,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://www.googleapis.com/drive/v3/files",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "supportsAllDrives", "value": "true" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ name: $json.name, mimeType: 'application/vnd.google-apps.folder', parents: [$json.parent] }) }}",
+        "options": {}
+      },
+      "id": "aaaa8888-8888-8888-8888-createsubfld01",
+      "name": "Create Subfolder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4096,
+        720
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "MoWG4XRaoJGU18eu",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Plan Moves — pairs each file in the plan with the just-created destination\n// subfolder ID. Emits one item per file. Move File HTTP node fires per item.\nconst planSubInputs = $('Plan Subfolders').all().map(i => i.json);\nconst createdSubs = $('Create Subfolder').all().map(i => i.json);\n\n// Pair by index: Create Subfolder fires once per Plan Subfolders item in order.\nconst subMap = {};\nfor (let i = 0; i < planSubInputs.length; i++) {\n  if (!createdSubs[i] || !createdSubs[i].id) {\n    console.error(`[Archive] missing subfolder response for ${planSubInputs[i].name}`);\n    continue;\n  }\n  subMap[planSubInputs[i].name] = createdSubs[i].id;\n}\n\nconst plan = $('Plan Archive').first().json;\nconst out = [];\nfor (const f of plan.files) {\n  const dest = subMap[f.src_key];\n  if (!dest) {\n    console.error(`[Archive] no destination subfolder for ${f.name} (src_key=${f.src_key}) — skipping`);\n    continue;\n  }\n  out.push({ json: { file_id: f.id, name: f.name, src_folder: f.src_folder, dest_folder: dest } });\n}\nconsole.log(`[Archive] planned ${out.length} moves`);\nreturn out;"
+      },
+      "id": "aaaa9999-9999-9999-9999-planmoves00001",
+      "name": "Plan Moves",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4320,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://www.googleapis.com/drive/v3/files/{{ $json.file_id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "addParents", "value": "={{ $json.dest_folder }}" },
+            { "name": "removeParents", "value": "={{ $json.src_folder }}" },
+            { "name": "supportsAllDrives", "value": "true" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "aaab0000-0000-0000-0000-movefile000001",
+      "name": "Move File",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4544,
+        720
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "MoWG4XRaoJGU18eu",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/{{ $('Plan Archive').first().json.sheet_id }}/values:batchClear",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ ranges: ['segments!A2:ZZ', 'localizations!A2:ZZ'] }) }}",
+        "options": {}
+      },
+      "id": "aaab1111-1111-1111-1111-cleartabs00001",
+      "name": "Clear Sheet Tabs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4768,
+        720
+      ],
+      "executeOnce": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pass Lessons (after Archive) — re-emits the original Parse Filename items so\n// Execute W1 fan-out works as before (one item per dropped file).\n// Same idiom as the existing Pass Lessons (after W1/W2/W3) nodes.\nreturn $('Parse Filename').all().map(i => ({ json: i.json }));"
+      },
+      "id": "aaab2222-2222-2222-2222-passafterarc01",
+      "name": "Pass Lessons (after Archive)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4992,
+        720
+      ]
+    },
+    {
+      "parameters": {
         "workflowId": {
           "__rl": true,
           "value": "WBsnWAyagEkenM6U",
@@ -223,14 +552,43 @@
     },
     {
       "parameters": {
-        "jsCode": "// Build one Slack message per Parse Filename item (one per source audio file).\n// Read Config (upstream) provides slack_channel, output folder, active_langs — same for all messages.\nconst configRows = $input.all().map(i => i.json);\nconst cfg = {};\nfor (const row of configRows) {\n  if (row && row.key) cfg[row.key] = row.value;\n}\n\nconst fullFolder = cfg.drive_output_full_folder_id || cfg.drive_output_folder_id;\nconst channel = cfg.slack_channel;\nif (!channel) throw new Error('slack_channel missing from config sheet (set to channel ID like C01234ABCDE)');\n\nconst folderUrl = fullFolder ? `https://drive.google.com/drive/folders/${fullFolder}` : null;\nconst activeLangs = (cfg.active_langs || 'de,es,fr,it,pl,pt,tr').split(',').map(s => s.trim()).filter(Boolean);\n\n// Iterate all Parse Filename items so multi-file drops produce one message per file.\n// Slack mrkdwn: *bold*, _italic_, <url|text> for links, :emoji_name:\nconst parsed = $('Parse Filename').all();\nreturn parsed.map(p => {\n  const lesson_id = p.json.lesson_id;\n  const filename = p.json.filename;\n  const folderLink = folderUrl ? `<${folderUrl}|Open in Drive>` : '_(output folder id not configured)_';\n  const text = [\n    ':white_check_mark: *Dubbing complete*',\n    '',\n    `*Lesson:* ${lesson_id}`,\n    `*Source file:* ${filename}`,\n    `*Languages:* ${activeLangs.length} (${activeLangs.join(', ')})`,\n    '',\n    `*Output:* ${folderLink}`,\n  ].join('\\n');\n  return { json: { channel, text } };\n});"
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "localizations",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "d4e5f6a7-b8c9-0123-4567-readlocaliz001",
+      "name": "Read Localizations",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        3184,
+        432
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build one Slack message per Parse Filename item (one per source audio file).\n// Reads config from $('Read Config') and per-lesson needs_attention stats from $('Read Localizations').\n// Emits { channel, text } — Slack Notify uses mrkdwn (clickable <url|label> links).\nconst cfg = {};\n$('Read Config').all().forEach(i => { if (i.json && i.json.key) cfg[i.json.key] = i.json.value; });\n\nconst fullFolder = cfg.drive_output_full_folder_id || cfg.drive_output_folder_id;\nconst segmentsFolder = cfg.drive_output_folder_id;\nconst vttFolder  = cfg.drive_output_vtt_folder_id;\nconst regenUrl   = cfg.w_regen_workflow_url;\nconst channel    = cfg.slack_channel;\nif (!channel) throw new Error('slack_channel missing from config sheet (set to channel ID like C01234ABCDE)');\n\nconst fullUrl     = fullFolder     ? `https://drive.google.com/drive/folders/${fullFolder}`     : null;\nconst segmentsUrl = segmentsFolder ? `https://drive.google.com/drive/folders/${segmentsFolder}` : null;\nconst vttUrl      = vttFolder      ? `https://drive.google.com/drive/folders/${vttFolder}`      : null;\nconst activeLangs = (cfg.active_langs || 'de,es,fr,it,pl,pt,tr').split(',').map(s => s.trim()).filter(Boolean);\n\nconst allLocs = $('Read Localizations').all().map(i => i.json || {});\nconst isFlagged = v => v === true || v === 'TRUE' || v === 'true';\n\nfunction statsForLesson(lesson_id) {\n  const rows = allLocs.filter(r => (r.segment_id || '').startsWith(lesson_id + '_'));\n  const total = rows.length;\n  const flagged = rows.filter(r => isFlagged(r.needs_attention)).length;\n  const pct = total > 0 ? Math.round((flagged / total) * 100) : null;\n  return { total, flagged, pct };\n}\n\nfunction buildMessage(p) {\n  const lesson_id = p.json.lesson_id;\n  const filename  = p.json.filename;\n  const { total, flagged, pct } = statsForLesson(lesson_id);\n  const naLine = pct === null ? 'n/a' : `${pct}% (${flagged} / ${total})`;\n\n  const lines = [\n    ':white_check_mark: *Dubbing complete*',\n    '',\n    `*Lesson:* ${lesson_id}`,\n    `*Source file:* ${filename}`,\n    `*Languages:* ${activeLangs.length} (${activeLangs.join(', ')})`,\n    `*Needs attention:* ${naLine}`,\n  ];\n  if (fullUrl || segmentsUrl || vttUrl || regenUrl) lines.push('');\n  if (fullUrl)     lines.push(`:file_folder: <${fullUrl}|Full audio (per-lang)>`);\n  if (segmentsUrl) lines.push(`:musical_note: <${segmentsUrl}|Per-segment audio>`);\n  if (vttUrl)      lines.push(`:closed_book: <${vttUrl}|VTT subtitles>`);\n  if (regenUrl)    lines.push(`:wrench: <${regenUrl}|Regen Segments>`);\n\n  return { json: { channel, text: lines.join('\\n') } };\n}\n\nreturn $('Parse Filename').all().map(buildMessage);"
       },
       "id": "b2c3d4e5-f6a7-8901-2345-buildslack001",
       "name": "Build Slack Message",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3184,
+        3408,
         432
       ]
     },
@@ -244,7 +602,10 @@
         },
         "text": "={{ $json.text }}",
         "otherOptions": {
-          "mrkdwn": true
+          "mrkdwn": true,
+          "unfurl_links": false,
+          "unfurl_media": false,
+          "includeLinkToWorkflow": false
         }
       },
       "id": "c3d4e5f6-a7b8-9012-3456-slacknotify01",
@@ -252,7 +613,7 @@
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
       "position": [
-        3408,
+        3632,
         432
       ],
       "webhookId": "36682c9e-8108-46b3-93b2-34f1fda90de1",
@@ -278,6 +639,167 @@
       ]
     },
     "Parse Filename": {
+      "main": [
+        [
+          {
+            "node": "Once Per Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Once Per Run": {
+      "main": [
+        [
+          {
+            "node": "Read Config (Archive)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Config (Archive)": {
+      "main": [
+        [
+          {
+            "node": "Plan Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan Sources": {
+      "main": [
+        [
+          {
+            "node": "List Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Files": {
+      "main": [
+        [
+          {
+            "node": "Plan Archive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan Archive": {
+      "main": [
+        [
+          {
+            "node": "Has Files To Archive?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Files To Archive?": {
+      "main": [
+        [
+          {
+            "node": "Create Archive Root",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Pass Lessons (after Archive)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Archive Root": {
+      "main": [
+        [
+          {
+            "node": "Copy Sheet Snapshot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Copy Sheet Snapshot": {
+      "main": [
+        [
+          {
+            "node": "Plan Subfolders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan Subfolders": {
+      "main": [
+        [
+          {
+            "node": "Create Subfolder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Subfolder": {
+      "main": [
+        [
+          {
+            "node": "Plan Moves",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan Moves": {
+      "main": [
+        [
+          {
+            "node": "Move File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move File": {
+      "main": [
+        [
+          {
+            "node": "Clear Sheet Tabs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clear Sheet Tabs": {
+      "main": [
+        [
+          {
+            "node": "Pass Lessons (after Archive)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pass Lessons (after Archive)": {
       "main": [
         [
           {
@@ -355,6 +877,17 @@
       ]
     },
     "Read Config": {
+      "main": [
+        [
+          {
+            "node": "Read Localizations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Localizations": {
       "main": [
         [
           {
