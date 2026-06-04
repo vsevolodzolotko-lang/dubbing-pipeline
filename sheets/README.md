@@ -1,11 +1,30 @@
 # sheets/
 
-Descriptions of the Google Sheets structure used by the pipeline. Actual sheet data lives in Google Drive — this folder documents the schema so the n8n workflows and scripts can be understood without opening the spreadsheet.
+Local **reference copies** of the Google Sheets data + schema. Actual runtime source-of-truth is the live Google Spreadsheet (one document, 5 tabs) that all workflows read via the Google Sheets API.
 
-| File | Describes |
-|------|-----------|
-| `transcripts-schema.md` | Main input sheet. Columns: `lesson_id`, `segment_id`, `start_time`, `end_time`, `source_text` (EN), then one column per language (DE, ES, FR, IT, PL, PT, TR) for translated text and status. |
-| `voice-mapping-schema.md` | Lookup table: `language_code` → `elevenlabs_voice_id` → `voice_name`. Used by `build-tts-payload.js` to select the correct voice per language. |
-| `cost-log-schema.md` | Append-only log written by the pipeline after each batch: `run_id`, `timestamp`, `segment_count`, `claude_tokens`, `elevenlabs_chars`, `estimated_usd`. |
+## Files
 
-When the actual sheet structure changes, update the schema file here and add a note in DECISIONS.md.
+| File | What it is |
+|------|------------|
+| `voices.csv` | Snapshot of the live `voices` tab — `lang`, `voice_id`, `model`, `stability`, `similarity_boost`, `style`, `speed`. Use as starting point when setting up a fresh Sheet. |
+| `prompts.tsv` | Snapshot of the live `prompts` tab — 11 prompts + ToV. Tab-separated to preserve multi-line prompt values. Use as starting point. |
+| `dubbing-pipeline_bk_21:05.xlsx` | Excel backup of the whole 5-tab document, including a recent run's data. Reference-only — do NOT re-import into Sheets directly without rebuilding the IDs. |
+
+## Live Sheet structure
+
+The runtime sheet has **5 tabs**. Full column-level schema with types and write rules is in [../docs/sheets_schema.md](../docs/sheets_schema.md).
+
+| Tab | Purpose | Written by | Read by |
+|-----|---------|-----------|---------|
+| `config` | One row per config key. API keys, Drive folder IDs, timing thresholds, Slack channel, ToV doc. | Operator (manual setup) | All workflows |
+| `segments` | One row per EN segment. `segment_id`, `en_text`, timestamps, then per-lang translations + tone-analysis output (`segment_type`, `movement_keywords`). | W1 writes EN + timestamps; W2 writes translations + tone fields | W3, W_Regen |
+| `voices` | One row per language. ElevenLabs voice ID + tuning params. | Operator (manual setup) | W3, W_Regen |
+| `localizations` | One row per `(segment_id × lang)`. Run-time diagnostics: durations, retries, `needs_attention`, `audio_drive_file_id`, etc. **Wiped (rows 2+) at the start of every W_Master run; the previous data is preserved in `05_archive/{archive_name}/sheet_snapshot_*`.** | W3, W_Regen | W_Master Slack message, W_Regen filter |
+| `prompts` | One row per prompt key. 11 prompts + ToV — externalized so prompt-tuning doesn't require touching code. | Operator (manual edits) | W2, W3 |
+
+## When the schema changes
+
+1. Update [../docs/sheets_schema.md](../docs/sheets_schema.md) — the canonical reference.
+2. Add a `DECISIONS.md` entry explaining why.
+3. Refresh the snapshot files in this folder if the change affects starter values (`voices.csv`, `prompts.tsv`).
+4. Update [../docs/config_keys.md](../docs/config_keys.md) if a config key was added/removed/renamed.

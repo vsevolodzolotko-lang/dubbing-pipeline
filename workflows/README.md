@@ -17,10 +17,10 @@ Four workflows: **W_Master** (Drive folder trigger, optional) chains **W1 → W2
 | Execute W1 (STT) | Calls W1 with `{file_id, lesson_id}`. Retry: 1 attempt on fail, then stop |
 | Execute W2 (Translate) | Calls W2 with `{lesson_id}`. Retry: 1 attempt on fail, then stop |
 | Execute W3 (Synthesize) | Calls W3 with `{lesson_id}`. Retry: 1 attempt on fail, then stop |
-| Read Config | Pulls `drive_output_full_folder_id`, `drive_output_vtt_folder_id`, `slack_channel`, `active_langs`, `w_regen_workflow_url` for the Slack message |
-| Read Localizations | Pulls the `localizations` sheet so Build Slack Message can compute the per-lesson `needs_attention` rate (`flagged / total`) |
-| Build Slack Message (Code) | Composes one Slack message per Parse Filename item using mrkdwn. Filters `localizations` rows by `segment_id.startsWith(lesson_id + '_')` to compute `needs_attention` % + count for the lesson. Renders three clickable links: Audio folder, VTT folder, and "Open W_Regen" (the last one launches the webhook trigger of W_Regen — no n8n login needed). Each link is omitted if its source config key is missing. Throws if `slack_channel` is missing. |
-| Slack Notify | Posts the message via Slack API (Bot User OAuth Token). |
+| Read Config | Pulls `drive_output_folder_id` (per-segment), `drive_output_full_folder_id` (full audio), `drive_output_vtt_folder_id` (VTT), `slack_channel`, `active_langs`, `w_regen_workflow_url` for the Slack message |
+| Read Localizations | Pulls the `localizations` sheet so Build Slack Message can compute the per-lesson `needs_attention` rate (`flagged / total`, counting only `TRUE`) |
+| Build Slack Message (Code) | Composes one Slack message per Parse Filename item using mrkdwn. Filters `localizations` rows by `segment_id.startsWith(lesson_id + '_')` to compute `needs_attention` % + count for the lesson. Renders **four clickable mrkdwn links**: `:file_folder: Full audio (per-lang)` → `drive_output_full_folder_id`, `:musical_note: Per-segment audio` → `drive_output_folder_id`, `:closed_book: VTT subtitles` → `drive_output_vtt_folder_id`, `:wrench: Regen Segments` → `w_regen_workflow_url`. Each link is omitted if its source config key is missing. Throws if `slack_channel` is missing. |
+| Slack Notify | Posts the message via Slack API (Bot User OAuth Token). Configured with `unfurl_links: false`, `unfurl_media: false`, `includeLinkToWorkflow: false` — prevents Slack's link-preview bot from accidentally hitting the W_Regen webhook URL on message arrival (self-trigger loop) and removes the default "Automated with this n8n workflow" footer. |
 
 **Setup checklist** (after importing):
 1. Drive Trigger → confirm `folderToWatch` is your `input/` folder ID.
@@ -90,7 +90,7 @@ The Drive trigger watches *file-created* events only — moving an existing file
 | Expand TTS Jobs (Code) | Cross-join: emit one item per (segment × active_lang). Pre-compute slot timing — `slot_start_sec`, `slot_end_sec`, `lead_silence_natural_sec`, `tts_budget_sec`, `effective_slot_sec`. Filters by `lesson_id` prefix. |
 | Loop Over Items (Split In Batches) | Per-segment-per-lang loop. `batchSize=1` (one item per iteration) — required because Check Timing + Pad uses singular `.item` accessors. Parallel-TTS optimization removed due to data-loss bug (see DECISIONS.md `W3_LOOP_BATCHING_REVERTED_DATA_LOSS_BUG`). |
 | ↳ ElevenLabs TTS | POST text to `eleven_multilingual_v2` with `output_format=pcm_22050`. One request per item (sequential). |
-| ↳ Check Timing + Pad (Code) | The brains. Re-adapt via Claude Haiku if over budget (3-tier shorten), retry at speed 1.10/1.15, hard-truncate as last resort, expand if too short (max 2 attempts), prepend `lead_silence`, append `tail_silence`, build WAV |
+| ↳ Check Timing + Pad (Code) | The brains. Re-adapt via Gemini 3.5 Flash if over budget (3-tier shorten — switched from Claude Haiku 2026-05-31), retry at dynamic per-voice speed-up (`voice.speed + max_speed_up_delta` ceiling), hard-truncate as last resort. Permissive silence-borrow (2026-06-04): any non-movement segment may extend past `en_duration` into trailing silence, bounded by `effective_slot_sec`. Movement-locked segments (`movement_keywords` non-empty OR `segment_type == 'movement'`) stay strict at `en_duration`. Reads `movement_keywords` and `segment_type` from the Expand TTS Jobs payload. Prepend `lead_silence`, append `tail_silence`, build WAV. |
 | ↳ Save to Drive | Upload per-segment WAV |
 | ↳ Prepare Localization Row + Update Localizations | Write diagnostics row |
 | ↳ Rate Limit Guard (Wait) | 0.5s between batched iterations (ElevenLabs Scale tier has plenty of RPM headroom) |
@@ -115,7 +115,7 @@ The Drive trigger watches *file-created* events only — moving an existing file
 | Webhook Trigger | Public-URL launch (the "Open W_Regen" Slack link). `httpMethod=GET`, `responseMode=onReceived` so the browser gets an instant "Regen started" message and the workflow runs in the background. |
 | Read Config / Read Voices / Read Localizations Initial | Pull inputs |
 | Get Params (Code) | Reads `lesson_id` from incoming payload if present; null otherwise. Both Manual + Webhook triggers leave it null today (Regen Engine processes all flagged rows across lessons). |
-| Regen Engine (Code) | The brains. Reads rows with `needs_retts=TRUE`, re-TTSes each via ElevenLabs, applies the same Phase 1-style timing logic (speed-up on overshoot, slowdown to fill on undershoot, hard-truncate as last resort). Bounded concurrency via `regen_concurrency` config (default 5). Emits one item per regenerated cell; emits a sentinel item if nothing is flagged. |
+| Regen Engine (Code) | The brains. Reads rows with `needs_retts=TRUE`, re-TTSes each via ElevenLabs, applies the same Phase 1-style timing logic (speed-up on overshoot, slowdown to fill on undershoot, hard-truncate as last resort). Bounded concurrency via `regen_concurrency` config (default 5). On successful regen, writes `needs_attention=REVIEW` (yellow — human must verify); writes `TRUE` only if regen STILL couldn't fit. Uses Kyiv-local time for `last_regen_at`. **Returns `[]` (empty) if no rows are flagged** — workflow ends silently with success status, no Slack notification, no sheet writes. Makes spurious triggers (Slack link unfurl, accidental webhook GET) harmless. |
 | Has Audio? (IF) | Splits the success branch (has_audio=true) from the error/sentinel branch |
 | Drive PATCH | Overwrites the per-segment WAV in place using `audio_drive_file_id` from the row |
 | Merge Branches | Re-merges success + sentinel/error branches before updating the sheet |
@@ -125,8 +125,8 @@ The Drive trigger watches *file-created* events only — moving an existing file
 | Build Full Audio Per Lang / Save Full to Drive / Search Same Name Full / Plan Old Deletes Full / Delete Old Full | Rebuild + upload + cleanup of duplicate full-lesson WAVs |
 | Build VTT Per Lang / Save VTT to Drive / Search Same Name VTT / Plan Old Deletes VTT / Delete Old VTT | Same pattern for the per-lang VTT files |
 | Wait For Saves (Merge) | Waits for both Save Full to Drive and Save VTT to Drive to complete before notifying Slack — so the operator clicking the folder link sees the new files |
-| Build Regen Slack Message (Code) | Composes one Slack message per affected lesson with `regenerated cells`, post-regen `needs_attention` rate, and the same three clickable links (Audio / VTT / Open W_Regen). Reads `regen` stats from `$('Regen Engine').all()` and post-regen rows from `$('Read Localizations Fresh').all()`. Skips notification when 0 cells were regenerated. |
-| Slack Notify (Regen) | Posts the message via Slack API |
+| Build Regen Slack Message (Code) | Composes one Slack message per affected lesson with `Cells regenerated: N (M failed)` line and the same four clickable links (Full audio / Per-segment audio / VTT subtitles / Regen Segments). Reads regen stats from `$('Regen Engine').all()`. Skips notification when 0 cells were regenerated. Per-lesson `needs_attention` rate intentionally NOT shown (regen-successful cells move from `TRUE` → `REVIEW`, not `FALSE` — so the count of `TRUE` after regen would mislead; operator should look at the REVIEW state visually in the sheet). |
+| Slack Notify (Regen) | Posts the message via Slack API. Same `unfurl_links: false`, `unfurl_media: false`, `includeLinkToWorkflow: false` as W_Master Slack Notify — prevents Slack from re-triggering W_Regen via link-preview bot. |
 
 ## n8n deployment env vars (required for production)
 
