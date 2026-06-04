@@ -8,8 +8,8 @@
       "type": "n8n-nodes-base.manualTrigger",
       "typeVersion": 1,
       "position": [
-        -608,
-        192
+        15008,
+        4384
       ]
     },
     {
@@ -19,8 +19,8 @@
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1,
       "position": [
-        -608,
-        352
+        15008,
+        4544
       ]
     },
     {
@@ -32,8 +32,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -400,
-        272
+        15216,
+        4464
       ]
     },
     {
@@ -57,8 +57,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        -192,
-        272
+        15408,
+        4464
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -86,8 +86,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        -96,
-        272
+        15600,
+        4464
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -117,8 +117,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        0,
-        272
+        15792,
+        4464
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -136,8 +136,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        0,
-        0
+        15216,
+        4704
       ]
     },
     {
@@ -165,8 +165,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        208,
-        0
+        15408,
+        4704
       ],
       "retryOnFail": true,
       "maxTries": 4,
@@ -187,8 +187,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        416,
-        0
+        15600,
+        4704
       ]
     },
     {
@@ -446,8 +446,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        624,
-        0
+        15792,
+        4704
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -465,8 +465,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        208,
-        272
+        16048,
+        4464
       ]
     },
     {
@@ -476,8 +476,8 @@
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        416,
-        272
+        16224,
+        4464
       ],
       "id": "a05f3913-e098-410e-a214-558b0d3a9a42",
       "name": "Wait",
@@ -508,8 +508,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        624,
-        272
+        16384,
+        4464
       ],
       "executeOnce": false,
       "retryOnFail": true,
@@ -532,8 +532,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        832,
-        272
+        16544,
+        4464
       ]
     },
     {
@@ -768,8 +768,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        1248,
-        272
+        17088,
+        4608
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -787,8 +787,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2416,
-        992
+        16048,
+        4704
       ]
     },
     {
@@ -800,8 +800,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2592,
-        992
+        16224,
+        4704
       ]
     },
     {
@@ -813,8 +813,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2592,
-        1200
+        16144,
+        4880
       ]
     },
     {
@@ -826,8 +826,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2768,
-        992
+        16656,
+        4880
       ]
     },
     {
@@ -839,8 +839,8 @@
       "id": "w2-formality-lint",
       "name": "Formality Lint",
       "position": [
-        2976,
-        992
+        16928,
+        4608
       ]
     },
     {
@@ -853,8 +853,8 @@
       "type": "n8n-nodes-base.splitInBatches",
       "typeVersion": 3,
       "position": [
-        2672,
-        992
+        16512,
+        4704
       ]
     },
     {
@@ -1089,8 +1089,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        2864,
-        1072
+        16368,
+        4880
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -1120,8 +1120,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        2864,
-        912
+        16768,
+        4608
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {

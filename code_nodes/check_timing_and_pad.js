@@ -140,20 +140,26 @@ async function synthOne(job) {
   const {
     voice_id, en_text, en_duration_sec,
     lead_silence_natural_sec, tts_budget_sec, effective_slot_sec, trailing_steal_sec,
+    tail_audio_silence_sec,
     silence_lead_ratio, silence_lead_max_sec, expansion_threshold,
     stability, similarity_boost, segment_id, lang, lesson_id,
     movement_keywords, segment_type,
   } = job;
 
-  const enDur        = parseFloat(en_duration_sec)          || 0;
-  const naturalLead  = parseFloat(lead_silence_natural_sec) || 0;
-  const budget       = parseFloat(tts_budget_sec)           || enDur;
-  const slot         = parseFloat(effective_slot_sec)       || budget;
-  const trailSteal   = parseFloat(trailing_steal_sec)       || 0;
-  const leadRatio    = parseFloat(silence_lead_ratio)       || 0.2;
-  const leadMaxSec   = parseFloat(silence_lead_max_sec)     || 0.05;
-  const expThreshold = parseFloat(expansion_threshold)      || 0.75;
-  const enRef        = en_text || '';
+  const enDur            = parseFloat(en_duration_sec)          || 0;
+  const naturalLead      = parseFloat(lead_silence_natural_sec) || 0;
+  const budget           = parseFloat(tts_budget_sec)           || enDur;
+  const slot             = parseFloat(effective_slot_sec)       || budget;
+  const trailSteal       = parseFloat(trailing_steal_sec)       || 0;
+  // Trailing silence after slot_end to EN audio EOF — non-zero only for the last
+  // segment (W3 Expand TTS Jobs computes audio_duration_sec - en_end_sec). Appended
+  // to the last seg's WAV so sum(per-seg) == EN total even though en_end_sec now
+  // marks actual speech end (not file end).
+  const tailAudioSilence = parseFloat(tail_audio_silence_sec)   || 0;
+  const leadRatio        = parseFloat(silence_lead_ratio)       || 0.2;
+  const leadMaxSec       = parseFloat(silence_lead_max_sec)     || 0.05;
+  const expThreshold     = parseFloat(expansion_threshold)      || 0.75;
+  const enRef            = en_text || '';
 
   const maxBorrowable = Math.max(0, slot - budget);
 
@@ -388,6 +394,14 @@ ATTEMPT LEVEL: ${level}`;
     tailSec     = 0;
     needsAttention = true;
   }
+
+  // Append trailing silence-to-EOF for the last segment (tailAudioSilence > 0 only
+  // there; W3 Expand sets it from audio_duration_sec - en_end_sec). If the seg
+  // breath-borrowed into that silence, subtract borrowedSec — what is left is pure
+  // tail. Folded into tailSec so sheet schema stays unchanged (tail_silence_sec
+  // already covers post-speech silence).
+  const extraTrailSec = Math.max(0, tailAudioSilence - borrowedSec);
+  tailSec += extraTrailSec;
 
   const leadBytes = Math.round(leadSec * SAMPLE_RATE) * BPS;
   const tailBytes = Math.round(tailSec * SAMPLE_RATE) * BPS;

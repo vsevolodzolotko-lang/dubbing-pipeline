@@ -24,8 +24,8 @@
       "type": "n8n-nodes-base.googleDriveTrigger",
       "typeVersion": 1,
       "position": [
-        1728,
-        432
+        13888,
+        5088
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -43,8 +43,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1952,
-        432
+        14112,
+        5088
       ]
     },
     {
@@ -56,8 +56,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2080,
-        720
+        13776,
+        4880
       ]
     },
     {
@@ -79,8 +79,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        2304,
-        720
+        14000,
+        4880
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -98,8 +98,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2528,
-        720
+        14224,
+        4880
       ]
     },
     {
@@ -111,11 +111,26 @@
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
-            { "name": "q", "value": "={{ $json.q }}" },
-            { "name": "fields", "value": "files(id,name,mimeType)" },
-            { "name": "pageSize", "value": "1000" },
-            { "name": "supportsAllDrives", "value": "true" },
-            { "name": "includeItemsFromAllDrives", "value": "true" }
+            {
+              "name": "q",
+              "value": "={{ $json.q }}"
+            },
+            {
+              "name": "fields",
+              "value": "files(id,name,mimeType)"
+            },
+            {
+              "name": "pageSize",
+              "value": "1000"
+            },
+            {
+              "name": "supportsAllDrives",
+              "value": "true"
+            },
+            {
+              "name": "includeItemsFromAllDrives",
+              "value": "true"
+            }
           ]
         },
         "options": {}
@@ -125,8 +140,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2752,
-        720
+        14448,
+        4880
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -144,8 +159,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2976,
-        720
+        14672,
+        4880
       ]
     },
     {
@@ -162,7 +177,11 @@
               "id": "has-files-check",
               "leftValue": "={{ $json.skip }}",
               "rightValue": false,
-              "operator": { "type": "boolean", "operation": "false", "singleValue": true }
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
             }
           ],
           "combinator": "and"
@@ -174,8 +193,8 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        3200,
-        720
+        14896,
+        4880
       ]
     },
     {
@@ -187,7 +206,10 @@
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
-            { "name": "supportsAllDrives", "value": "true" }
+            {
+              "name": "supportsAllDrives",
+              "value": "true"
+            }
           ]
         },
         "sendBody": true,
@@ -200,8 +222,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        3424,
-        720
+        15120,
+        4768
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -219,7 +241,10 @@
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
-            { "name": "supportsAllDrives", "value": "true" }
+            {
+              "name": "supportsAllDrives",
+              "value": "true"
+            }
           ]
         },
         "sendBody": true,
@@ -232,8 +257,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        3648,
-        720
+        15344,
+        4768
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -251,8 +276,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3872,
-        720
+        15568,
+        4768
       ]
     },
     {
@@ -264,7 +289,10 @@
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
-            { "name": "supportsAllDrives", "value": "true" }
+            {
+              "name": "supportsAllDrives",
+              "value": "true"
+            }
           ]
         },
         "sendBody": true,
@@ -277,8 +305,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        4096,
-        720
+        15792,
+        4768
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -296,8 +324,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        4320,
-        720
+        16016,
+        4768
       ]
     },
     {
@@ -309,9 +337,18 @@
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
-            { "name": "addParents", "value": "={{ $json.dest_folder }}" },
-            { "name": "removeParents", "value": "={{ $json.src_folder }}" },
-            { "name": "supportsAllDrives", "value": "true" }
+            {
+              "name": "addParents",
+              "value": "={{ $json.dest_folder }}"
+            },
+            {
+              "name": "removeParents",
+              "value": "={{ $json.src_folder }}"
+            },
+            {
+              "name": "supportsAllDrives",
+              "value": "true"
+            }
           ]
         },
         "options": {}
@@ -321,8 +358,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        4544,
-        720
+        16240,
+        4880
       ],
       "retryOnFail": true,
       "maxTries": 3,
@@ -351,8 +388,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        4768,
-        720
+        16416,
+        4880
       ],
       "executeOnce": true,
       "onError": "continueRegularOutput",
@@ -372,8 +409,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        4992,
-        720
+        16608,
+        4880
       ]
     },
     {
@@ -406,8 +443,8 @@
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.2,
       "position": [
-        2176,
-        432
+        14336,
+        5088
       ],
       "retryOnFail": true,
       "maxTries": 2,
@@ -442,8 +479,8 @@
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.2,
       "position": [
-        2400,
-        432
+        14560,
+        5088
       ],
       "retryOnFail": true,
       "maxTries": 2,
@@ -478,8 +515,8 @@
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.2,
       "position": [
-        2624,
-        432
+        14784,
+        5088
       ]
     },
     {
@@ -491,8 +528,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2288,
-        592
+        14448,
+        5248
       ]
     },
     {
@@ -504,8 +541,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2512,
-        592
+        14672,
+        5248
       ]
     },
     {
@@ -517,8 +554,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2736,
-        592
+        14896,
+        5248
       ]
     },
     {
@@ -540,8 +577,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        2960,
-        432
+        15120,
+        5088
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -569,8 +606,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        3184,
-        432
+        15344,
+        5088
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -588,8 +625,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3408,
-        432
+        15568,
+        5088
       ]
     },
     {
@@ -613,8 +650,8 @@
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
       "position": [
-        3632,
-        432
+        15792,
+        5088
       ],
       "webhookId": "36682c9e-8108-46b3-93b2-34f1fda90de1",
       "credentials": {

@@ -4,6 +4,56 @@
 
 ---
 
+### 2026-06-04 — LAST_SEGMENT_TRAILING_SILENCE_SEPARATION
+
+Context: Користувач помітив, що локалізація останньої фрази «з'їдає» хвостову паузу. Корінь — W1 Segment Transcript штучно розтягував `en_end_sec` останнього сегменту до `audioDuration` (data.metadata.duration з Deepgram), щоб сума per-segment слотів дорівнювала EN total. Побічний ефект: `en_duration_sec` для last seg = `last_word_end - en_start_sec + trailing_silence`. `check_timing_and_pad.js` сприймав це як «бюджет на TTS», тому верборозні мови (FR/IT/PT) не скорочувалися, локалізована мова тривала через хвостову тишу. Окремо: для last seg W3 Expand TTS Jobs hard-cap-ив `maxBorrowable = 0` (`isLast ? 0`), хоча trailing silence фізично була доступна для «дихання».
+
+Decision: розділити поняття «slot duration» (для TTS budget) і «physical file duration» (для sum-invariant). Конкретно:
+
+1. **W1 Segment Transcript** (`workflows/W1_STT_and_Segment.json`): видалено блок `if (audioDuration > last.end) last.end = audioDuration`. Last seg's `en_end_sec` тепер = фактичний кінець останнього слова з Deepgram. Додано колонку `audio_duration_sec` у segments sheet — W1 пише `data.metadata.duration` на кожен рядок уроку (lesson-level metadata зберігається per-row, щоб уникнути окремого `lessons` sheet).
+
+2. **W3 Expand TTS Jobs** (`workflows/W3_Synthesize_v2.json`): читає `audio_duration_sec` з segments row. Для last seg обчислює `tailToEOF = audio_duration_sec - en_end_sec` і використовує `nextStart = end + tailToEOF` замість `nextStart = end`. Це робить trailing silence видимою для slot/borrow логіки. Видалено `isLast ? 0` cap на `maxBorrowable` — last seg тепер може breath-borrow як і всі решта (movement-locked still blocked у `check_timing_and_pad`). Транзитне поле `tail_audio_silence_sec` пропускається в job для downstream.
+
+3. **`code_nodes/check_timing_and_pad.js`**: synthOne destructure-ить `tail_audio_silence_sec`. Після існуючої гілки `if/else` що рахує lead/tail/borrow, додано `extraTrailSec = max(0, tailAudioSilence - borrowedSec)` і `tailSec += extraTrailSec`. Trailing silence-to-EOF фізично сидить у кінці WAV останнього сегменту, складена в існуючу колонку `tail_silence_sec` (без нових колонок у localizations).
+
+Invariant `sum(per-seg_{lang}.wav) == full_{lang}.wav` зберігається telescoping-ом: `lead + speech + tail` для всіх non-last сегментів дають `en_end_{N-1}`; last seg додає `lead + speech + (T - borrow) + borrow` = `lead + speech + T` до файлу, тож total = `en_end_{N-1} + T = audio_duration`. `Trim Lead For Sequence` не зачіпає last seg, бо «наступного» немає — last seg's borrow компенсується **всередині нього самого** (через зменшення `extraTrailSec`).
+
+Альтернативи, які розглядались:
+- **Скласти trailing silence у concat-time** (`build_full_audio_per_lang.js`): простіша зміна коду, але per-segment WAV у Drive стають коротшими за EN — оператор у Reaper мусив би додавати тишу вручну в кінці. Відмовлено для consistency з існуючим invariant.
+- **Окремий silence-seg в Drive** (`seg_NNN_silence.wav`): нова сутність у sheet + Drive, лишній файл per lesson. Відмовлено за простоту.
+- **Hard-cap last seg на en_duration** (без borrow): простіше, але FR/IT/PT часом провокує зайвий truncate/needs_attention навіть коли trailing silence доступна. Користувач явно вибрав "знімай блок".
+- **Нова колонка `tail_audio_silence_sec` у localizations**: зайва — фолдиться у `tail_silence_sec` без втрати інформації.
+
+Files changed:
+- `workflows/W1_STT_and_Segment.json` — Segment Transcript jsCode + Write to Sheet column mapping/schema (нова колонка `audio_duration_sec`).
+- `workflows/W3_Synthesize_v2.json` — Expand TTS Jobs jsCode (tailToEOF, removed isLast?0, tail_audio_silence_sec в slotInfo + results).
+- `code_nodes/check_timing_and_pad.js` — destructure + extraTrailSec fold.
+- `docs/sheets_schema.md` — додано `audio_duration_sec` у segments, оновлено `tail_silence_sec` + `borrowed_sec` нотатки про last seg.
+- `DECISIONS.md` — цей запис.
+
+Без змін:
+- `code_nodes/build_full_audio_per_lang.js` — pure concat як був, per-seg WAV-и тепер самодостатні.
+- `code_nodes/trim_lead_for_sequence.js` — не торкається last seg.
+- `code_nodes/regen_synthesize.js` — таргетить наявний `final_duration_sec` з рядка, який після фіксу вже включає trailing silence.
+
+Дія оператора (one-time): вручну додати колонку `audio_duration_sec` у tab `segments` Google Sheets (header у наступну вільну колонку). W1 з нового прогону заповнить її.
+
+Verification:
+- W1 jsCode parses ✓; sheet writer mappings включають `audio_duration_sec`.
+- W3 Expand TTS Jobs jsCode parses ✓; `Read Segments` без explicit column list (auto-passes `audio_duration_sec` після додавання колонки в sheet).
+- `check_timing_and_pad.js` parses ✓; `extraTrailSec = 0` для всіх non-last сегментів (tail_audio_silence_sec=0).
+- Тестування: lesson з відомою хвостовою тишею (~5с), FR-only. Перевірити: last seg row `borrowed_sec > 0` якщо FR overshoot speech-only en_duration; `tail_silence_sec` last seg ≈ `audio_duration_sec - en_end_sec - borrowed_sec` (+ можливий padding within slot); `full_fr.wav` duration ≈ `lesson_en.wav` duration ±100мс.
+
+Edge cases:
+- Legacy уроки без `audio_duration_sec` у segments: `parseFloat() || 0` → `tailToEOF = 0` → graceful degradation (dubbed track коротший за EN). W3 пише warning у консоль.
+- Movement-locked last seg: `canBorrow=false` → `borrowedSec=0` → `extraTrailSec = tailAudioSilence` (вся хвостова тиша зберігається; останнє слово синхронне з відео).
+- Урок без trailing silence (`audio_duration == last_word_end`): `tailToEOF=0`, all logic ідентична до фіксу.
+
+Future work:
+- Якщо захочеться позбутися повторення `audio_duration_sec` на кожному рядку — мігрувати на окремий `lessons` sheet (`lesson_id, audio_duration_sec, drive_folder_id, …`). Поки що over-engineering для одного значення per lesson.
+
+---
+
 ### 2026-06-04 — PERMISSIVE_BORROW_FOR_NONMOVEMENT_SEGMENTS
 
 Context: Користувач знайшов 2 false-positive `needs_attention=TRUE` cells у CSV. У обох випадках TTS overshoot-ив `en_duration_sec` на невелику кількість, АЛЕ після сегмента була тиша (`gap_after_sec > 0`) — фізично безпечно заборгувати ту тишу. Поточна логіка не дозволяла, бо `isShortSeg` gate перевіряв тільки `en_duration < short_seg_threshold_sec` (default 2.0с): короткі афірмації мали право borgувати, довгі narrative сегменти — ні, і навіть з вільною тишою після перетворювалися на truncate + needs_attention.

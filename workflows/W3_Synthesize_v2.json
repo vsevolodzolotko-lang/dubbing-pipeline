@@ -8,8 +8,8 @@
       "type": "n8n-nodes-base.manualTrigger",
       "typeVersion": 1,
       "position": [
-        35840,
-        13392
+        59696,
+        30896
       ]
     },
     {
@@ -19,8 +19,8 @@
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1,
       "position": [
-        35840,
-        13552
+        59696,
+        31056
       ]
     },
     {
@@ -32,8 +32,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        36048,
-        13472
+        59904,
+        30976
       ]
     },
     {
@@ -57,8 +57,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        36208,
-        13472
+        60064,
+        30976
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -86,8 +86,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        36368,
-        13472
+        60224,
+        30976
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -115,8 +115,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        36512,
-        13472
+        60368,
+        30976
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -146,8 +146,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        36656,
-        13472
+        60512,
+        30976
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -158,15 +158,15 @@
     },
     {
       "parameters": {
-        "jsCode": "const lesson_id = $('Get Params').first().json.lesson_id;\nconst configMap = {};\n$('Read Config').all().forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });\nconst activeLangs        = (configMap.active_langs || 'de,es,fr,it,pl,pt,tr').split(',').map(s => s.trim());\nconst MIN_GAP            = parseFloat(configMap.min_inter_segment_gap_sec)  || 0.4;\nconst MAX_BORROW         = parseFloat(configMap.max_borrow_per_segment_sec) || 2.0;\nconst EXPANSION_THRESHOLD= parseFloat(configMap.expansion_threshold)        || 0.85;\nconst SILENCE_LEAD_RATIO = parseFloat(configMap.silence_lead_ratio)         || 0.2;\nconst SILENCE_LEAD_MAX_SEC = parseFloat(configMap.silence_lead_max_sec)    || 0.05;\n\nconst voiceMap = {};\n$('Read Voices').all().forEach(i => { if (i.json.lang) voiceMap[i.json.lang] = i.json; });\n\nconst sortedSegs = $input.all()\n  .filter(i => i.json.segment_id)\n  .filter(i => !lesson_id || i.json.segment_id.startsWith(lesson_id + '_'))\n  .sort((a, b) => (parseFloat(a.json.en_start_sec) || 0) - (parseFloat(b.json.en_start_sec) || 0));\nif (sortedSegs.length === 0) throw new Error('No segments to synthesize' + (lesson_id ? ' for lesson_id=' + lesson_id : ''));\n\nconst slotInfo = {};\nfor (let i = 0; i < sortedSegs.length; i++) {\n  const seg     = sortedSegs[i].json;\n  const prevEnd = i > 0 ? (parseFloat(sortedSegs[i-1].json.en_end_sec) || 0) : 0;\n  const start   = parseFloat(seg.en_start_sec)    || 0;\n  const end     = parseFloat(seg.en_end_sec)      || 0;\n  // Authoritative slot duration: end - start. Stored en_duration_sec can be\n  // corrupted in segments tab (root cause TBD); prefer computed value.\n  const storedDur = parseFloat(seg.en_duration_sec) || 0;\n  const computedDur = Math.max(0, end - start);\n  const dur = computedDur > 0 ? computedDur : storedDur;\n  if (computedDur > 0 && storedDur > 0 && Math.abs(computedDur - storedDur) > 0.5) {\n    console.warn(`W3 Expand TTS Jobs: segment ${seg.segment_id} stored en_duration_sec=${storedDur.toFixed(3)} disagrees with (end-start)=${computedDur.toFixed(3)}. Using computed.`);\n  }\n\n  const isLast = (i === sortedSegs.length - 1);\n  const nextStart = isLast ? end : (parseFloat(sortedSegs[i+1].json.en_start_sec) || 0);\n  const gapAfter = Math.max(0, nextStart - end);\n\n  // Unified signed adjustment: negative = steal needed; positive = borrow available\n  const signedAdj      = gapAfter - MIN_GAP;\n  const trailingSteal  = signedAdj < 0 ? -signedAdj : 0;\n  const maxBorrowable  = isLast ? 0 : Math.max(0, Math.min(signedAdj, MAX_BORROW));\n\n  // Audio budget WITHOUT borrow (steal already accounted)\n  const ttsBudget      = Math.max(dur * 0.5, dur - trailingSteal);\n  // Effective slot WITH borrow allowance\n  const effectiveSlot  = ttsBudget + maxBorrowable;\n\n  slotInfo[seg.segment_id] = {\n    slot_start_sec:           prevEnd,\n    slot_end_sec:             end,\n    lead_silence_natural_sec: Math.max(0, start - prevEnd),\n    tts_budget_sec:           parseFloat(ttsBudget.toFixed(3)),\n    effective_slot_sec:       parseFloat(effectiveSlot.toFixed(3)),\n    max_borrowable_sec:       parseFloat(maxBorrowable.toFixed(3)),\n    trailing_steal_sec:       parseFloat(trailingSteal.toFixed(3)),\n    gap_after_sec:            parseFloat(gapAfter.toFixed(3)),\n  };\n}\n\nconst results = [];\nfor (const item of sortedSegs) {\n  const seg = item.json;\n  // Re-derive dur authoritatively for result row (same logic as slotInfo loop).\n  const _segEnd   = parseFloat(seg.en_end_sec)   || 0;\n  const _segStart = parseFloat(seg.en_start_sec) || 0;\n  const _segDur   = Math.max(0, _segEnd - _segStart) || (parseFloat(seg.en_duration_sec) || 0);\n  for (const lang of activeLangs) {\n    const text = seg[`${lang}_text`];\n    if (!text || !text.trim()) continue;\n    const voice = voiceMap[lang] || {};\n    if (!voice.voice_id) continue;\n    const info = slotInfo[seg.segment_id] || {};\n    results.push({ json: {\n      segment_id:               seg.segment_id,\n      lesson_id:                seg.lesson_id || 'unknown',\n      lang,\n      text,\n      en_text:                  seg.en_text || '',\n      en_duration_sec:          _segDur,\n      en_start_sec:             parseFloat(seg.en_start_sec) || 0,\n      en_end_sec:               parseFloat(seg.en_end_sec) || 0,\n      slot_start_sec:           info.slot_start_sec           || 0,\n      slot_end_sec:             info.slot_end_sec             || 0,\n      lead_silence_natural_sec: info.lead_silence_natural_sec || 0,\n      tts_budget_sec:           info.tts_budget_sec           || (parseFloat(seg.en_duration_sec) || 0),\n      effective_slot_sec:       info.effective_slot_sec       || (parseFloat(seg.en_duration_sec) || 0),\n      max_borrowable_sec:       info.max_borrowable_sec       || 0,\n      trailing_steal_sec:       info.trailing_steal_sec       || 0,\n      gap_after_sec:            info.gap_after_sec            || 0,\n      silence_lead_ratio:       SILENCE_LEAD_RATIO,\n      silence_lead_max_sec:     SILENCE_LEAD_MAX_SEC,\n      expansion_threshold:      EXPANSION_THRESHOLD,\n      voice_id:                 voice.voice_id,\n      stability:                parseFloat(voice.stability)         || 0.5,\n      similarity_boost:         parseFloat(voice.similarity_boost)  || 0.75,\n      style:                    parseFloat(voice.style)             || 0,\n      speed:                    parseFloat(voice.speed)             || 1.0,\n      model:                    voice.model || 'eleven_multilingual_v2',\n      movement_keywords:        (seg.movement_keywords || '').toString().trim(),\n      segment_type:             (seg.segment_type || '').toString().trim(),\n    }});\n  }\n}\nreturn results;"
+        "jsCode": "const lesson_id = $('Get Params').first().json.lesson_id;\nconst configMap = {};\n$('Read Config').all().forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });\nconst activeLangs        = (configMap.active_langs || 'de,es,fr,it,pl,pt,tr').split(',').map(s => s.trim());\nconst MIN_GAP            = parseFloat(configMap.min_inter_segment_gap_sec)  || 0.4;\nconst MAX_BORROW         = parseFloat(configMap.max_borrow_per_segment_sec) || 2.0;\nconst EXPANSION_THRESHOLD= parseFloat(configMap.expansion_threshold)        || 0.85;\nconst SILENCE_LEAD_RATIO = parseFloat(configMap.silence_lead_ratio)         || 0.2;\nconst SILENCE_LEAD_MAX_SEC = parseFloat(configMap.silence_lead_max_sec)    || 0.05;\n\nconst voiceMap = {};\n$('Read Voices').all().forEach(i => { if (i.json.lang) voiceMap[i.json.lang] = i.json; });\n\nconst sortedSegs = $input.all()\n  .filter(i => i.json.segment_id)\n  .filter(i => !lesson_id || i.json.segment_id.startsWith(lesson_id + '_'))\n  .sort((a, b) => (parseFloat(a.json.en_start_sec) || 0) - (parseFloat(b.json.en_start_sec) || 0));\nif (sortedSegs.length === 0) throw new Error('No segments to synthesize' + (lesson_id ? ' for lesson_id=' + lesson_id : ''));\n\nconst slotInfo = {};\nfor (let i = 0; i < sortedSegs.length; i++) {\n  const seg     = sortedSegs[i].json;\n  const prevEnd = i > 0 ? (parseFloat(sortedSegs[i-1].json.en_end_sec) || 0) : 0;\n  const start   = parseFloat(seg.en_start_sec)    || 0;\n  const end     = parseFloat(seg.en_end_sec)      || 0;\n  // Authoritative slot duration: end - start. Stored en_duration_sec can be\n  // corrupted in segments tab (root cause TBD); prefer computed value.\n  const storedDur = parseFloat(seg.en_duration_sec) || 0;\n  const computedDur = Math.max(0, end - start);\n  const dur = computedDur > 0 ? computedDur : storedDur;\n  if (computedDur > 0 && storedDur > 0 && Math.abs(computedDur - storedDur) > 0.5) {\n    console.warn(`W3 Expand TTS Jobs: segment ${seg.segment_id} stored en_duration_sec=${storedDur.toFixed(3)} disagrees with (end-start)=${computedDur.toFixed(3)}. Using computed.`);\n  }\n\n  const isLast    = (i === sortedSegs.length - 1);\n  const audioDur  = parseFloat(seg.audio_duration_sec) || 0;\n  const tailToEOF = isLast && audioDur > end ? (audioDur - end) : 0;\n  if (isLast && audioDur === 0) {\n    console.warn(`W3 Expand TTS Jobs: ${seg.segment_id} missing audio_duration_sec — trailing silence-to-EOF will be lost (re-run W1 to populate).`);\n  }\n\n  // Last seg: 'next start' = end-of-file → exposes trailing silence to slot/borrow logic.\n  // Removed `isLast ? 0` cap on maxBorrowable so the last seg can breath-borrow into\n  // the trailing silence like any other (movement-locked still blocked downstream in\n  // check_timing_and_pad). Trailing silence after borrow is appended inside the last\n  // seg's WAV by check_timing_and_pad, keeping sum(per-seg) == EN total.\n  const nextStart = isLast ? (end + tailToEOF) : (parseFloat(sortedSegs[i+1].json.en_start_sec) || 0);\n  const gapAfter  = Math.max(0, nextStart - end);\n\n  // Unified signed adjustment: negative = steal needed; positive = borrow available\n  const signedAdj      = gapAfter - MIN_GAP;\n  const trailingSteal  = signedAdj < 0 ? -signedAdj : 0;\n  const maxBorrowable  = Math.max(0, Math.min(signedAdj, MAX_BORROW));\n\n  // Audio budget WITHOUT borrow (steal already accounted)\n  const ttsBudget      = Math.max(dur * 0.5, dur - trailingSteal);\n  // Effective slot WITH borrow allowance\n  const effectiveSlot  = ttsBudget + maxBorrowable;\n\n  slotInfo[seg.segment_id] = {\n    slot_start_sec:           prevEnd,\n    slot_end_sec:             end,\n    lead_silence_natural_sec: Math.max(0, start - prevEnd),\n    tts_budget_sec:           parseFloat(ttsBudget.toFixed(3)),\n    effective_slot_sec:       parseFloat(effectiveSlot.toFixed(3)),\n    max_borrowable_sec:       parseFloat(maxBorrowable.toFixed(3)),\n    trailing_steal_sec:       parseFloat(trailingSteal.toFixed(3)),\n    gap_after_sec:            parseFloat(gapAfter.toFixed(3)),\n    tail_audio_silence_sec:   parseFloat(tailToEOF.toFixed(3)),\n  };\n}\n\nconst results = [];\nfor (const item of sortedSegs) {\n  const seg = item.json;\n  // Re-derive dur authoritatively for result row (same logic as slotInfo loop).\n  const _segEnd   = parseFloat(seg.en_end_sec)   || 0;\n  const _segStart = parseFloat(seg.en_start_sec) || 0;\n  const _segDur   = Math.max(0, _segEnd - _segStart) || (parseFloat(seg.en_duration_sec) || 0);\n  for (const lang of activeLangs) {\n    const text = seg[`${lang}_text`];\n    if (!text || !text.trim()) continue;\n    const voice = voiceMap[lang] || {};\n    if (!voice.voice_id) continue;\n    const info = slotInfo[seg.segment_id] || {};\n    results.push({ json: {\n      segment_id:               seg.segment_id,\n      lesson_id:                seg.lesson_id || 'unknown',\n      lang,\n      text,\n      en_text:                  seg.en_text || '',\n      en_duration_sec:          _segDur,\n      en_start_sec:             parseFloat(seg.en_start_sec) || 0,\n      en_end_sec:               parseFloat(seg.en_end_sec) || 0,\n      slot_start_sec:           info.slot_start_sec           || 0,\n      slot_end_sec:             info.slot_end_sec             || 0,\n      lead_silence_natural_sec: info.lead_silence_natural_sec || 0,\n      tts_budget_sec:           info.tts_budget_sec           || (parseFloat(seg.en_duration_sec) || 0),\n      effective_slot_sec:       info.effective_slot_sec       || (parseFloat(seg.en_duration_sec) || 0),\n      max_borrowable_sec:       info.max_borrowable_sec       || 0,\n      trailing_steal_sec:       info.trailing_steal_sec       || 0,\n      gap_after_sec:            info.gap_after_sec            || 0,\n      tail_audio_silence_sec:   info.tail_audio_silence_sec   || 0,\n      silence_lead_ratio:       SILENCE_LEAD_RATIO,\n      silence_lead_max_sec:     SILENCE_LEAD_MAX_SEC,\n      expansion_threshold:      EXPANSION_THRESHOLD,\n      voice_id:                 voice.voice_id,\n      stability:                parseFloat(voice.stability)         || 0.5,\n      similarity_boost:         parseFloat(voice.similarity_boost)  || 0.75,\n      style:                    parseFloat(voice.style)             || 0,\n      speed:                    parseFloat(voice.speed)             || 1.0,\n      model:                    voice.model || 'eleven_multilingual_v2',\n      movement_keywords:        (seg.movement_keywords || '').toString().trim(),\n      segment_type:             (seg.segment_type || '').toString().trim(),\n    }});\n  }\n}\nreturn results;"
       },
       "id": "91f1393a-8f76-4269-98d8-c923162b40c2",
       "name": "Expand TTS Jobs",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        36848,
-        13472
+        60704,
+        30976
       ]
     },
     {
@@ -179,8 +179,8 @@
       "type": "n8n-nodes-base.splitInBatches",
       "typeVersion": 3,
       "position": [
-        37056,
-        13472
+        60912,
+        30976
       ]
     },
     {
@@ -192,8 +192,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        37456,
-        13472
+        61312,
+        30976
       ]
     },
     {
@@ -217,8 +217,8 @@
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
       "position": [
-        37648,
-        13472
+        61504,
+        30976
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -236,8 +236,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        37856,
-        13472
+        61808,
+        30976
       ]
     },
     {
@@ -442,8 +442,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        38048,
-        13472
+        61984,
+        30976
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -461,8 +461,8 @@
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        38256,
-        13472
+        62160,
+        30976
       ],
       "webhookId": "synth-v2-rate-limit"
     },
@@ -485,8 +485,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        37056,
-        13680
+        60512,
+        31200
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -504,8 +504,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        38160,
-        13712
+        62160,
+        31216
       ]
     },
     {
@@ -529,8 +529,8 @@
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
       "position": [
-        38352,
-        13712
+        62352,
+        31216
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -554,8 +554,8 @@
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
       "position": [
-        37952,
-        13712
+        61808,
+        31216
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -573,8 +573,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        37952,
-        13936
+        61808,
+        31632
       ]
     },
     {
@@ -598,8 +598,8 @@
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
       "position": [
-        38160,
-        13936
+        61984,
+        31632
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -617,8 +617,8 @@
       "id": "mpks3aoucttrx7rj",
       "name": "Phase 2: Batch LLM+TTS",
       "position": [
-        37056,
-        13888
+        60720,
+        31392
       ],
       "alwaysOutputData": true
     },
@@ -638,8 +638,8 @@
       "id": "mpks3aout49kux09",
       "name": "Phase 2: Drive Update",
       "position": [
-        37456,
-        13696
+        61120,
+        31216
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -697,8 +697,8 @@
       "id": "mpks3aoulge8uc4k",
       "name": "Phase 2: Update Localizations",
       "position": [
-        37664,
-        13904
+        61504,
+        31392
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -735,8 +735,8 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        37248,
-        13888
+        60912,
+        31392
       ],
       "id": "phase2-has-binary-if",
       "name": "Phase 2: Has Binary?"
@@ -752,8 +752,8 @@
       "id": "phase2-merge-branches",
       "name": "Phase 2: Merge Branches",
       "position": [
-        37520,
-        13888
+        61312,
+        31392
       ]
     },
     {
@@ -766,8 +766,8 @@
       "type": "n8n-nodes-base.splitInBatches",
       "typeVersion": 3,
       "position": [
-        36912,
-        13888
+        60512,
+        31392
       ]
     },
     {
@@ -789,8 +789,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        37808,
-        13760
+        61504,
+        31216
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -808,8 +808,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        38080,
-        13712
+        61984,
+        31216
       ]
     },
     {
@@ -842,8 +842,8 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        38080,
-        13920
+        61808,
+        31440
       ]
     },
     {
@@ -862,8 +862,8 @@
       "id": "save-trimmed-audio-001",
       "name": "Save Trimmed Audio to Drive",
       "position": [
-        38304,
-        13920
+        62160,
+        31440
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -904,8 +904,8 @@
       "id": "update-trimmed-loc-001",
       "name": "Update Trimmed Localizations",
       "position": [
-        38304,
-        14128
+        62160,
+        31616
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {

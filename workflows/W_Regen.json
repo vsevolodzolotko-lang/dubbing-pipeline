@@ -8,8 +8,8 @@
       "type": "n8n-nodes-base.manualTrigger",
       "typeVersion": 1,
       "position": [
-        0,
-        0
+        -14464,
+        12000
       ]
     },
     {
@@ -26,8 +26,8 @@
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
       "position": [
-        0,
-        200
+        -14464,
+        12192
       ],
       "webhookId": "w-regen-public-launch"
     },
@@ -52,8 +52,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        200,
-        0
+        -14256,
+        12000
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -81,8 +81,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        400,
-        0
+        -14064,
+        12000
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -110,8 +110,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        600,
-        0
+        -13856,
+        12000
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -129,8 +129,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        800,
-        0
+        -13664,
+        12000
       ]
     },
     {
@@ -142,8 +142,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1000,
-        0
+        -13456,
+        12000
       ]
     },
     {
@@ -176,8 +176,8 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        1200,
-        0
+        -13264,
+        12000
       ]
     },
     {
@@ -196,8 +196,8 @@
       "id": "3e78c6c7-815d-f4ed-cc5b-f6dc7a7971b2",
       "name": "Drive PATCH",
       "position": [
-        1400,
-        -100
+        -13056,
+        11888
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -213,8 +213,8 @@
       "type": "n8n-nodes-base.merge",
       "typeVersion": 3,
       "position": [
-        1600,
-        0
+        -12864,
+        12000
       ]
     },
     {
@@ -268,8 +268,8 @@
       "id": "dffeaf0e-974f-7ce9-78d3-10f2bd4cbd54",
       "name": "Update Localizations Row",
       "position": [
-        1800,
-        0
+        -12688,
+        12000
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -297,8 +297,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4,
       "position": [
-        2000,
-        0
+        -12352,
+        12000
       ],
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -316,8 +316,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2200,
-        -100
+        -11968,
+        11888
       ]
     },
     {
@@ -341,8 +341,8 @@
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
       "position": [
-        2400,
-        -100
+        -11776,
+        11888
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -360,8 +360,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2200,
-        100
+        -11968,
+        12096
       ]
     },
     {
@@ -385,8 +385,8 @@
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
       "position": [
-        2400,
-        100
+        -11776,
+        12096
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -410,8 +410,8 @@
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
       "position": [
-        2100,
-        -100
+        -12176,
+        11888
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -429,8 +429,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1900,
-        0
+        -12512,
+        12000
       ]
     },
     {
@@ -467,8 +467,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2600,
-        -100
+        -11568,
+        11888
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -486,8 +486,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2800,
-        -100
+        -11376,
+        11888
       ]
     },
     {
@@ -505,8 +505,8 @@
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
       "position": [
-        3000,
-        -100
+        -11168,
+        11888
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -549,8 +549,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2600,
-        100
+        -11568,
+        12096
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -568,8 +568,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2800,
-        100
+        -11376,
+        12096
       ]
     },
     {
@@ -587,8 +587,8 @@
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
       "position": [
-        3000,
-        100
+        -11168,
+        12096
       ],
       "credentials": {
         "googleDriveOAuth2Api": {
@@ -606,8 +606,8 @@
       "type": "n8n-nodes-base.merge",
       "typeVersion": 3,
       "position": [
-        2600,
-        300
+        -11568,
+        12288
       ]
     },
     {
@@ -619,8 +619,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2800,
-        300
+        -11376,
+        12288
       ]
     },
     {
@@ -644,8 +644,8 @@
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
       "position": [
-        3000,
-        300
+        -11168,
+        12288
       ],
       "webhookId": "regen-slack-notify-001",
       "credentials": {
