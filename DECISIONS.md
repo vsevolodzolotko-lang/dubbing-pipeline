@@ -4,6 +4,23 @@
 
 ---
 
+### 2026-06-04 — LLM_SANITIZER_DUPLICATION_WONTFIX
+
+Context: P1-кандидат на «уніфікацію» двох LLM-санітайзерів — `sanitizeClaudeOutput` (`code_nodes/adapt_translations.js`, W2) і `sanitizeLLMOutput` (`code_nodes/check_timing_and_pad.js`, W3). Початкова гіпотеза аудиту: «2 несумісні версії».
+
+Перевірка спростувала гіпотезу: функції **логічно ідентичні** — однаковий ланцюжок (trim → перший рядок до `\n` → strip `*_` → strip лапки `"'\`` → strip trailing parenthesized meta `(… char/cannot/already/…)`). Різниця лише в назві та одному коментарі. Жодного бага чи дивергенції поведінки немає.
+
+Decision: **wontfix.** Не об'єднувати.
+
+Обґрунтування:
+- n8n code-ноди ізольовані в рантаймі — спільний модуль неможливий. Єдиний шлях «уніфікації» — build-time inline injection спільного сніпета через sync-скрипт.
+- Це рівно та негативна асиметрія ризику, яку ми відхилили в `SYNC_INFRASTRUCTURE_EXTENDED_TO_W3_W_REGEN` (альтернатива «Build-time inline injection для DRY»): один баг у централізованому helper ламає переклад у 2 нодах × 7 мов; виграш — ~12 LOC.
+- Якщо логіка колись розійдеться навмисно (різні провайдери — Claude vs Gemini можуть давати різний обрамлюючий шум), окремі копії — це фіча, а не борг.
+
+Якщо в майбутньому з'явиться 3-тя копія або потрібна буде складніша спільна логіка — переглянути; поки що дві ізольовані ідентичні копії дешевші за будь-яку централізацію.
+
+---
+
 ### 2026-06-04 — SYNC_INFRASTRUCTURE_EXTENDED_TO_W3_W_REGEN
 
 Context: Аудит canonical `.js` файлів vs jsCode в workflow JSON знайшов 3 розбіжності. (1) `code_nodes/check_timing_and_pad.js` був на 970 chars більший за JSON — `LAST_SEGMENT_TRAILING_SILENCE_SEPARATION` consumer-side фіча (destructure `tail_audio_silence_sec`, `extraTrailSec` fold) була написана в .js, документована в DECISIONS, але **НЕ deployed у JSON** — попередній sync script (`scripts/sync_w2_jscode.js`) покривав лише 6 W2 нод. (2) `code_nodes/regen_synthesize.js` був на 561 char менший за JSON — у JSON містилася актуальна tri-state логіка (REVIEW yellow на success, Kyiv timezone, empty `return []`), яка прийшла з пізнішого commit `5c32db0`, але reverse-sync у .js не зроблено. (3) `code_nodes/build_vtt_per_lang.js` — тривіальна whitespace розбіжність (1 char).
