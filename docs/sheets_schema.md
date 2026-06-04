@@ -8,6 +8,8 @@ All sheets live in a single Google Spreadsheet linked to n8n via credentials.
 
 Primary data table. One row per EN segment.
 
+Columns are listed in actual sheet order (verified against a CSV export 2026-06-04).
+
 | Column | Type | Description |
 |--------|------|-------------|
 | segment_id | text | e.g. `seg_001` |
@@ -15,30 +17,33 @@ Primary data table. One row per EN segment.
 | en_start_sec | number | Start time in EN audio |
 | en_end_sec | number | End time in EN audio |
 | en_duration_sec | number | `en_end_sec - en_start_sec` — timing budget for all langs. **For the last segment**: covers only the actual speech (not trailing silence to file end). Prior to 2026-06-04 it was inflated to `audio_duration_sec - en_start_sec`, which caused verbose translations (FR/IT/PT) to extend past the natural speech end into what should remain silence. |
-| audio_duration_sec | number | Total duration of the source EN audio (seconds). Same value on every row of a lesson (lesson-level metadata stored per-row to avoid a separate `lessons` sheet). Written by W1 from Deepgram `data.metadata.duration`. Read by W3 Expand TTS Jobs on the last segment to compute trailing silence-to-EOF, which `check_timing_and_pad` then appends to the last seg's WAV so `sum(per-seg) == EN total`. Missing/zero on legacy rows produced before 2026-06-04 — W3 falls back to "end at speech end" with a console warning (dubbed track will be shorter than EN). |
 | segment_type | text | `narrative` / `movement` / `instruction` — from Tone Analysis |
 | movement_keywords | text | Comma-separated movement cues, e.g. `inhale, raise arms` — from Tone Analysis |
 | de_text | text | Final DE translation (after adaptation if needed) |
 | es_text | text | Final ES translation |
 | fr_text | text | Final FR translation |
-| it_text | text | Final IT translation |
 | pl_text | text | Final PL translation |
 | pt_text | text | Final PT translation |
+| it_text | text | Final IT translation |
 | tr_text | text | Final TR translation |
 | de_adaptation_attempts | number | How many adaptation loops ran for DE (0 = first pass fit) |
 | es_adaptation_attempts | number | Same for ES |
 | fr_adaptation_attempts | number | Same for FR |
-| it_adaptation_attempts | number | Same for IT |
 | pl_adaptation_attempts | number | Same for PL |
 | pt_adaptation_attempts | number | Same for PT |
+| it_adaptation_attempts | number | Same for IT |
 | tr_adaptation_attempts | number | Same for TR |
 | status | text | **Legacy / currently unused.** W1 always writes `pending`; W2/W3 don't update it. Kept in the sheet for future state-machine work — safe to leave or delete. |
+| adaptation_attempts | number | Aggregate rollup = `max(*_adaptation_attempts)` across all langs for this segment. Convenience column for scanning which segments needed the most adaptation; per-language detail lives in the `{lang}_adaptation_attempts` columns. Written by W2. |
+| audio_duration_sec | number | Total duration of the source EN audio (seconds). Same value on every row of a lesson (lesson-level metadata stored per-row to avoid a separate `lessons` sheet). Written by W1 from Deepgram `data.metadata.duration`. Read by W3 Expand TTS Jobs on the last segment to compute trailing silence-to-EOF, which `check_timing_and_pad` then appends to the last seg's WAV so `sum(per-seg) == EN total`. Missing/zero on legacy rows produced before 2026-06-04 — W3 falls back to "end at speech end" with a console warning (dubbed track will be shorter than EN). |
 
 ---
 
 ## Sheet: localizations
 
 Run-time table. Populated by Workflow_Synthesize. One row per segment × language combination.
+
+Columns are listed in actual sheet order (verified against a CSV export 2026-06-04).
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -48,23 +53,23 @@ Run-time table. Populated by Workflow_Synthesize. One row per segment × languag
 | text_translated | text | Final text used for TTS (copy from segments after adaptation) |
 | en_start_sec | number | Copy from segments for convenience |
 | en_duration_sec | number | Copy from segments — `en_end_sec - en_start_sec` |
+| real_duration_sec | number | Actual TTS audio duration after all retries (no surrounding silence). |
+| lead_silence_sec | number | Silence prepended at start. Default: natural EN gap = `en_start_sec - prev_en_end_sec` (or `en_start_sec` for first). When EN gap = 0 and `real_duration < en_duration`, may also include `silence_lead_ratio × padding` to soften abrupt starts (v3). |
 | slot_start_sec | number | Position of this file's start in the concatenated dubbing timeline = `prev_en_end_sec` (or 0 for first). Diagnostic. |
 | slot_end_sec | number | Position of this file's end in the concatenated dubbing timeline = `en_end_sec`. Diagnostic. |
-| lead_silence_sec | number | Silence prepended at start. Default: natural EN gap = `en_start_sec - prev_en_end_sec` (or `en_start_sec` for first). When EN gap = 0 and `real_duration < en_duration`, may also include `silence_lead_ratio × padding` to soften abrupt starts (v3). |
 | tts_budget_sec | number | Effective audio budget for TTS = `en_duration_sec - trailing_silence_sec` (v2 carryover). v3 also uses `effective_slot = en_duration_sec + max_borrowable`. Used by Claude adapt + speed retries + hard truncate. |
 | tail_silence_sec | number | Silence appended at end. Combines v2's MIN_GAP-steal (`max(0, MIN_GAP - natural_gap_to_next)`) with v3's 80% padding share when `real_duration < en_duration`. Was named `trailing_silence_sec` in v2 — rename one-time. **For the last segment (since 2026-06-04)**: also includes silence after `slot_end_sec` up to source EN audio duration (`audio_duration_sec - en_end_sec - borrowed_sec`), so the per-segment WAV reaches EN file end. Folded into this column instead of adding a new one. |
+| final_duration_sec | number | Total per-segment file duration = `lead_silence_sec + real_duration_sec + tail_silence_sec`. With borrow: the per-file value can exceed `en_duration_sec - prev_en_end_sec` (its slot) by up to `borrowed_sec`. **The concatenated full WAV is shorter than the sum of `final_duration_sec` because `Build Full Audio Per Lang` trims the borrow back out of the next segment's lead.** Net: full WAV length ≈ EN audio length. |
 | borrowed_sec | number | Seconds this segment's TTS audio extends past `en_duration_sec` into the trailing silence. **Non-zero for any non-movement segment** where the TTS naturally overshot AND there was available trailing silence (`gap_after_sec > min_inter_segment_gap_sec`). Bounded by `max_borrow_per_segment_sec` and available `gap_after_sec - min_inter_segment_gap_sec`. **Movement-locked segments** (`movement_keywords` non-empty OR `segment_type == 'movement'`) stay at `borrowed_sec=0` (strict alignment — these must sync with video movement). At concat time, `Trim Lead For Sequence` trims `borrowed_sec[N]` from the head of segment N+1's lead silence — keeping the full WAV aligned with EN positions despite per-file overshoot, so `sum(per-seg_{lang}.wav) == full_{lang}.wav` per language. **As of 2026-06-04**: previously gated by `short_seg_threshold_sec` (now-dead config key, only short segments could borrow) — gate replaced by movement-keyword check. **Also as of 2026-06-04**: the last segment can now borrow into its trailing silence-to-EOF (previously hard-capped at 0). The borrow is compensated *inside* the last seg's WAV by shortening its `tail_silence_sec` accordingly — no `Trim Lead For Sequence` step on the last segment since there is no seg N+1. |
 | expansion_attempts | number | How many Phase 2 LLM rounds the cell went through. `0` = not a candidate (Phase 1 ratio already ≥ `expansion_threshold`); `1` = Phase 2 attempt 1 ran (may be accepted or rejected — see `phase2_outcome`); `2` = Phase 2 attempt 2 (retry pass) ran. Final accept/skip status is carried by `phase2_outcome`, not by this column. |
-| phase2_outcome | text | (Added 2026-05-26) Per-candidate outcome of Phase 2 expansion pipeline. Values: `accepted` (re-TTS fit within `en_duration` and replaced Phase 1 audio), `no_change` (LLM returned text identical to current — nothing to expand), `overshoot` (re-TTS exceeded `en_duration` — Phase 1 audio kept), `negative_tail` (lead + audio > `en_duration` — Phase 1 kept), `tts_empty` (ElevenLabs returned < 4410 bytes PCM), `llm_dropped` (LLM omitted this cell from its JSON response — no text to re-TTS), `error` (LLM/HTTP exception), empty/missing = `not_candidate` (Phase 1 ratio ≥ threshold OR `lead_silence_sec` ≥ `en_duration_sec × 0.5` structurally-impossible filter — Phase 2 never touched the row). For diagnosing why a cell didn't get expanded after a Phase 2 run. |
 | shorten_retries_in_synthesize | number | (v3) How many of the 3 single-segment shorten attempts fired in W3 Check Timing + Pad. 0 = first TTS fit within `effective_slot`. |
-| real_duration_sec | number | Actual TTS audio duration after all retries (no surrounding silence). |
-| final_duration_sec | number | Total per-segment file duration = `lead_silence_sec + real_duration_sec + tail_silence_sec`. With borrow: the per-file value can exceed `en_duration_sec - prev_en_end_sec` (its slot) by up to `borrowed_sec`. **The concatenated full WAV is shorter than the sum of `final_duration_sec` because `Build Full Audio Per Lang` trims the borrow back out of the next segment's lead.** Net: full WAV length ≈ EN audio length. |
 | final_speed | number | Speed used for TTS: `1.0` / `1.1` / `1.15`. v3 reaches `>1.0` only after all 3 shorten attempts fail. |
 | needs_attention | tri-state text | One of `TRUE` / `FALSE` / `REVIEW`. **TRUE** (red) = automated check detected a problem — `W3` writes this when audio was hard-truncated because TTS still exceeded the allowed timing budget after all 3 shorten attempts and 2 speed-up attempts; `W_Regen` writes this when regeneration ALSO couldn't fit. **FALSE** (green) = no problem detected by either W3 or human review. **REVIEW** (yellow, added 2026-06-04) = `W_Regen` produced a valid file — operator must listen and decide if the fix is acceptable; flip to `FALSE` if good, `TRUE` if still wrong. **Timing budget** (added 2026-06-04): for non-movement segments (segments where both `movement_keywords` is empty AND `segment_type != 'movement'`), TTS may extend past `en_duration_sec` into the trailing silence (gap before the next segment), up to `effective_slot_sec`. For movement-locked segments, TTS must fit strictly within `en_duration_sec` — overshoot still triggers `TRUE`. This permissive borrow eliminates false positives on long narrative cells where the gap-after is comfortable; the previously-gated `short_seg_threshold_sec` config key is no longer read. Concat-time `Trim Lead For Sequence` preserves `sum(per-seg_{lang}.wav) == full_{lang}.wav` per language even when borrows happen. **Recommended Sheets UI**: conditional formatting — `TRUE` red, `FALSE` green, `REVIEW` yellow. Operator workflow: W3 writes TRUE/FALSE → operator listens to TRUE cells → flips `needs_retts=TRUE` and runs W_Regen → cell becomes `REVIEW` → operator listens to new audio → flips to `FALSE` (accept) or `TRUE` (still bad). |
 | audio_drive_file_id | text | Google Drive file ID of the output wav |
+| phase2_outcome | text | (Added 2026-05-26) Per-candidate outcome of Phase 2 expansion pipeline. Values: `accepted` (re-TTS fit within `en_duration` and replaced Phase 1 audio), `no_change` (LLM returned text identical to current — nothing to expand), `overshoot` (re-TTS exceeded `en_duration` — Phase 1 audio kept), `negative_tail` (lead + audio > `en_duration` — Phase 1 kept), `tts_empty` (ElevenLabs returned < 4410 bytes PCM), `llm_dropped` (LLM omitted this cell from its JSON response — no text to re-TTS), `error` (LLM/HTTP exception), empty/missing = `not_candidate` (Phase 1 ratio ≥ threshold OR `lead_silence_sec` ≥ `en_duration_sec × 0.5` structurally-impossible filter — Phase 2 never touched the row). For diagnosing why a cell didn't get expanded after a Phase 2 run. **Note**: `llm_dropped` and the other refusal/diagnostic states are *values* of this single column — there is no separate `llm_dropped` or `phase2_diag` column. |
 | needs_retts | boolean | (Added 2026-05-28) Content-editor flag for W_Regen. Set to `TRUE` to mark this row for manual regeneration: W_Regen reads the (possibly-edited) `text_translated`, re-synthesizes via ElevenLabs, overwrites the Drive file in place, and clears the flag back to `FALSE`. Used together with `regen_comment` and `last_regen_at`. **As of 2026-05-31**: W3 writes `FALSE` to this column on every cell it produces (Phase 1 + Phase 2 + Trim Lead For Sequence). So after a fresh W3 run, the whole column is `FALSE`; the editor flips ONLY the rows they want to regenerate to `TRUE`, then triggers W_Regen. |
+| last_regen_at | text | (Added 2026-05-28) Timestamp of last successful W_Regen run on this row. Set by W_Regen automatically (Kyiv local time, `sv-SE` locale format `YYYY-MM-DD HH:MM:SS`); not edited by hand. |
 | regen_comment | text | (Added 2026-05-28) Optional editor's note explaining why the row was flagged (e.g. "fixed gender in es", "added pause before 'breath'"). Audit-only in MVP — not consumed by W_Regen. Future v2 may use this as an LLM-rewrite instruction. |
-| last_regen_at | text | (Added 2026-05-28) ISO timestamp of last successful W_Regen run on this row. Set by W_Regen automatically; not edited by hand. |
 
 > **Note on Scribe accuracy**: `en_start_sec[0]` (and other timestamps) are auto-detected by ElevenLabs Scribe from the audio file in W1. Scribe can overshoot word boundaries by up to ~0.25s on some recordings. If after running W3 the seg_001 lead silence sounds too long, manually edit `en_start_sec` for that segment in the `segments` sheet and re-run W3.
 
