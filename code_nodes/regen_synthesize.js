@@ -43,10 +43,11 @@ const candidates = allRows.filter(it => {
 });
 
 if (candidates.length === 0) {
-  console.log('W_Regen: no rows flagged needs_retts=TRUE — nothing to do');
-  // Emit a single sentinel item so downstream nodes don't error on empty input;
-  // sentinel has has_audio=false and affected_lessons=[] — Build Full guard skips.
-  return [{ json: { regen_count: 0, affected_lessons: [], has_audio: false } }];
+  console.log('W_Regen: no rows flagged needs_retts=TRUE — exiting cleanly (no Slack notification, no sheet writes).');
+  // Return [] so downstream nodes (Has Audio?, Update Localizations Row, Build Full,
+  // Wait For Saves, Slack Notify) simply don't fire. Workflow ends with success.
+  // This makes spurious triggers (Slack link unfurl, accidental webhook GET) harmless.
+  return [];
 }
 
 console.log(`W_Regen: ${candidates.length} cells flagged for regeneration`);
@@ -213,12 +214,18 @@ async function synthOne(row) {
       expansion_attempts:            parseFloat(j.expansion_attempts) || 0,
       shorten_retries_in_synthesize: parseFloat(j.shorten_retries_in_synthesize) || 0,
       final_speed:                   usedSpeed,
-      needs_attention:               needsAttention ? 'TRUE' : 'FALSE',
+      // Tri-state needs_attention semantics:
+      //   TRUE  = W_Regen still couldn't fit audio in slot (hard-truncated or speech <70%)
+      //   REVIEW = W_Regen produced a valid file — human should listen + flip to FALSE/TRUE
+      //   FALSE = (only W3 writes this; W_Regen never demotes to FALSE — human verifies)
+      // Operator workflow: W3 writes TRUE/FALSE → operator flags TRUE → runs W_Regen →
+      // cell becomes REVIEW (yellow) → operator listens → manually flips to FALSE (green)
+      // or back to TRUE (red) if regen still sounds wrong.
+      needs_attention:               needsAttention ? 'TRUE' : 'REVIEW',
       needs_retts:                   'FALSE',
-      // Sheets-friendly UTC datetime: "2026-05-31 13:05:23" (no T separator,
-      // no fractional ms, no Z suffix). Sortable as text AND recognized by
-      // Google Sheets as a datetime value if the column is formatted as such.
-      last_regen_at:                 new Date().toISOString().replace('T', ' ').slice(0, 19),
+      // Kyiv local time, Sheets-friendly format "YYYY-MM-DD HH:MM:SS".
+      // 'sv-SE' locale uses ISO-like format with space separator, ideal for sorting.
+      last_regen_at:                 new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Kyiv' }),
       regen_comment:                 j.regen_comment || '',
       audio_drive_file_id:           j.audio_drive_file_id,
       phase2_outcome:                j.phase2_outcome || '',

@@ -4,6 +4,57 @@
 
 ---
 
+### 2026-06-04 — SYNC_INFRASTRUCTURE_EXTENDED_TO_W3_W_REGEN
+
+Context: Аудит canonical `.js` файлів vs jsCode в workflow JSON знайшов 3 розбіжності. (1) `code_nodes/check_timing_and_pad.js` був на 970 chars більший за JSON — `LAST_SEGMENT_TRAILING_SILENCE_SEPARATION` consumer-side фіча (destructure `tail_audio_silence_sec`, `extraTrailSec` fold) була написана в .js, документована в DECISIONS, але **НЕ deployed у JSON** — попередній sync script (`scripts/sync_w2_jscode.js`) покривав лише 6 W2 нод. (2) `code_nodes/regen_synthesize.js` був на 561 char менший за JSON — у JSON містилася актуальна tri-state логіка (REVIEW yellow на success, Kyiv timezone, empty `return []`), яка прийшла з пізнішого commit `5c32db0`, але reverse-sync у .js не зроблено. (3) `code_nodes/build_vtt_per_lang.js` — тривіальна whitespace розбіжність (1 char).
+
+Decision: розширити sync-інфраструктуру на всі workflows і додати foundation для безпечних майбутніх edits.
+
+1. **Replace `scripts/sync_w2_jscode.js` → `scripts/sync_jscode.js`**: per-workflow node map покриває 19 нод (W1×1, W2×9, W3×6, W_Regen×3). Idempotent — re-run на синхронізованому стані = no-op. Скрипт — file→workflow напрямок (не reverse).
+
+2. **Resolve 3 divergences**:
+   - `check_timing_and_pad.js`: **forward-sync .js → JSON** (deploy trailing-silence consumer-side). Підтверджено через DECISIONS.md `LAST_SEGMENT_TRAILING_SILENCE_SEPARATION` запис + verification, що Expand TTS Jobs вже висилає поле. Legacy lessons → graceful fallback (`tail_audio_silence_sec=0` → no-op).
+   - `regen_synthesize.js`: **reverse-sync JSON → .js** (JSON canonical, бо тримає production tri-state з commit `5c32db0`).
+   - `build_vtt_per_lang.js`: тривіально (whitespace).
+
+3. **Extract canonical .js for 3 inline-only nodes**: `code_nodes/expand_tts_jobs.js` (W3), `code_nodes/segment_transcript.js` (W1), `code_nodes/verify_translations.js` (W2). Це 3 найбільших і найкритичніших inline-only nodes (4.7K–6.5K chars). W_Master + дрібні Get Params/Plan/Coalesce ноди (≤2.8KB) залишаються inline-only — extract on demand.
+
+4. **package.json**: додано `"sync": "node scripts/sync_jscode.js"`. Workflow: edit .js → `npm run sync` → commit обидва.
+
+5. **`code_nodes/README.md`**: оновлено таблицю файлів (додано 3 нові + Verify Translations), додано inline-only inventory list, додано sync-workflow note в Conventions.
+
+Альтернативи, які розглядались:
+- **Build-time inline injection для DRY** (loadPrompt/ALL_LANGS/retry helpers через template comments в sync скрипті) — overhead > benefit на стабільному проді з повільним змінним cadence. ~80 LOC saved, але додає template magic + ризик одного bug у централізованому helper, який ламає 7 мов. Skip indefinitely.
+- **Split `phase2_batch_llm_tts.js` (1054 LOC)** — потребує bundler, n8n code node = один файл. Reviewability фіксується через цей sync (тепер можна diff'нути). Skip.
+- **Shared 'Load Utils' n8n node** — громіздкіше + потребує зміни workflow layout (memory feedback: не регенерувати layout). Skip.
+
+Files changed:
+- `scripts/sync_jscode.js` — new (replaces `sync_w2_jscode.js`).
+- `scripts/sync_w2_jscode.js` — deleted.
+- `code_nodes/expand_tts_jobs.js`, `code_nodes/segment_transcript.js`, `code_nodes/verify_translations.js` — extracted from JSON.
+- `code_nodes/check_timing_and_pad.js`, `code_nodes/regen_synthesize.js`, `code_nodes/build_vtt_per_lang.js`, `code_nodes/prepare_tone_analysis.js`, `code_nodes/parse_tone_analysis.js` — resolved/reverse-synced.
+- `workflows/W2_Translate_v2.json`, `workflows/W3_Synthesize_v2.json`, `workflows/W_Regen.json` — synced jsCode.
+- `code_nodes/README.md` — updated table + Conventions.
+- `package.json` — `"sync"` npm script.
+
+Verification:
+- `npm run sync` після всіх змін → `no changes — 19 node(s) already in sync` (idempotent).
+- `git diff workflows/` обмежений 4–4–2 рядками escaped JSON (фактичний контент: 970-char trailing-silence fold + 3 trivial whitespace правок).
+- **Recommended manual E2E** (operator): drop test lesson з відомою хвостовою тишею у `01_input/`. Перевірити: last seg FR/IT/PT `borrowed_sec > 0` АБО `tail_silence_sec ≈ audio_duration_sec - en_end_sec`; `full_{lang}.wav` duration ≈ EN ±100мс. Якщо drift > 5% від `tests/golden/test4_baseline.csv` — rollback через `git revert`.
+
+Edge cases:
+- Inline-only ноди (W_Master full chain, всі Get Params, дрібні W_Regen helpers) поки не покриті sync — edit їх вимагає або n8n UI, або manual JSON edit. Це OK на стабільному коді ≤2.8KB; розширити map тільки коли реально треба editувати.
+- Якщо хтось редагує jsCode прямо в n8n UI без reverse-sync у .js → наступний `npm run sync` перепише його зміну з застарілого .js. **Mitigation**: операторський workflow → edit .js → sync → commit. n8n UI стає "view-only" для синкнутих нод.
+
+Future work:
+- **P1.1 Sanitizer unification**: дві версії `sanitizeLLMOutput()` у `adapt_translations.js` і `check_timing_and_pad.js` з трохи різними regex списками — union у обох (inline copy, не централізація). Defer.
+- **P1.2 Docs sync** (з PLAN.md `Should-have`): `docs/sheets_schema.md` — додати `phase2_outcome`, `phase2_diag`, `llm_dropped`, `final_speed`, `last_regen_at`. Defer.
+- **P1.3 Basic ESLint** на code_nodes/scripts — `no-undef`, `no-unused-vars`. Defer (low ROI).
+
+Tag: `SYNC_INFRASTRUCTURE_EXTENDED_TO_W3_W_REGEN`
+
+---
+
 ### 2026-06-04 — LAST_SEGMENT_TRAILING_SILENCE_SEPARATION
 
 Context: Користувач помітив, що локалізація останньої фрази «з'їдає» хвостову паузу. Корінь — W1 Segment Transcript штучно розтягував `en_end_sec` останнього сегменту до `audioDuration` (data.metadata.duration з Deepgram), щоб сума per-segment слотів дорівнювала EN total. Побічний ефект: `en_duration_sec` для last seg = `last_word_end - en_start_sec + trailing_silence`. `check_timing_and_pad.js` сприймав це як «бюджет на TTS», тому верборозні мови (FR/IT/PT) не скорочувалися, локалізована мова тривала через хвостову тишу. Окремо: для last seg W3 Expand TTS Jobs hard-cap-ив `maxBorrowable = 0` (`isLast ? 0`), хоча trailing silence фізично була доступна для «дихання».
