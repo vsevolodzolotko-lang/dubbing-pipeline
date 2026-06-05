@@ -210,21 +210,6 @@
     },
     {
       "parameters": {
-        "mode": "runOnceForAllItems",
-        "language": "javaScript",
-        "jsCode": "// JSON-only mirror of \"Check Timing + Pad\" output. Strips the WAV binary so\n// downstream join nodes (Prepare Localization Row) can read timing metadata via\n// $(\"Check Timing Meta\").all() WITHOUT n8n inlining every per-segment WAV into the\n// task-runner heap. At 44100Hz the full-run binary (~616 cells) doubled vs 22050 and\n// overflowed the runner on long lessons (OOM). Binary still flows to Save to Drive via\n// the parallel main branch — untouched. See DECISIONS 2026-06-05 W3_JOIN_STRIPS_BINARY.\nreturn $input.all().map(i => ({ json: i.json }));\n"
-      },
-      "id": "c7e1a2b4-9d30-4f15-8a6c-1b2c3d4e5f60",
-      "name": "Check Timing Meta",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        61312,
-        31200
-      ]
-    },
-    {
-      "parameters": {
         "name": "={{ $json.file_name }}",
         "driveId": {
           "__rl": true,
@@ -256,7 +241,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Iterate over Drive Save responses (one per uploaded WAV in this batch) and JOIN with\n// Check Timing + Pad + Expand TTS Jobs by file_name. Item-pairing accessors (.item) break\n// when Loop Over Items uses batchSize > 1, so JOIN by file_name is more robust.\nconst checkAll = $('Check Timing Meta').all();\nconst jobAll = $('Expand TTS Jobs').all();\nconst out = [];\nfor (const driveItem of $input.all()) {\n  const driveResp = driveItem.json || {};\n  const fileName = driveResp.name || '';\n  if (!fileName) { console.warn('Save to Drive response missing name; skipping'); continue; }\n\n  const checkEntry = checkAll.find(c => c.json && c.json.file_name === fileName);\n  if (!checkEntry) { console.warn('No Check Timing + Pad entry for', fileName); continue; }\n  const checkItem = checkEntry.json;\n  const jobEntry = jobAll.find(j => j.json && j.json.segment_id === checkItem.segment_id && j.json.lang === checkItem.lang);\n  const job = jobEntry ? jobEntry.json : {};\n\n  out.push({\n    json: {\n      row_key:                       `${checkItem.segment_id}_${checkItem.lang}`,\n      segment_id:                    checkItem.segment_id,\n      lang:                          checkItem.lang,\n      text_translated:               checkItem.final_text || job.text || '',\n      en_start_sec:                  job.en_start_sec,\n      en_duration_sec:               checkItem.en_duration_sec,\n      slot_start_sec:                job.slot_start_sec,\n      slot_end_sec:                  job.slot_end_sec,\n      lead_silence_sec:              checkItem.lead_silence_sec,\n      tts_budget_sec:                checkItem.tts_budget_sec,\n      tail_silence_sec:              checkItem.tail_silence_sec,\n      borrowed_sec:                  checkItem.borrowed_sec,\n      expansion_attempts:            checkItem.expansion_attempts,\n      shorten_retries_in_synthesize: checkItem.shorten_retries_in_synthesize,\n      real_duration_sec:             checkItem.real_duration_sec,\n      final_duration_sec:            checkItem.final_duration_sec,\n      final_speed:                   checkItem.final_speed,\n      needs_attention:               checkItem.needs_attention ? 'TRUE' : 'FALSE',\n      audio_drive_file_id:           driveResp.id || '',\n      needs_retts:                   'FALSE',\n    },\n  });\n}\nreturn out;"
+        "jsCode": "// Iterate over Drive Save responses (one per uploaded WAV in this batch) and JOIN with\n// Check Timing + Pad + Expand TTS Jobs by file_name. Item-pairing accessors (.item) break\n// when Loop Over Items uses batchSize > 1, so JOIN by file_name is more robust.\nconst checkAll = $('Check Timing + Pad').all();\nconst jobAll = $('Expand TTS Jobs').all();\nconst out = [];\nfor (const driveItem of $input.all()) {\n  const driveResp = driveItem.json || {};\n  const fileName = driveResp.name || '';\n  if (!fileName) { console.warn('Save to Drive response missing name; skipping'); continue; }\n\n  const checkEntry = checkAll.find(c => c.json && c.json.file_name === fileName);\n  if (!checkEntry) { console.warn('No Check Timing + Pad entry for', fileName); continue; }\n  const checkItem = checkEntry.json;\n  const jobEntry = jobAll.find(j => j.json && j.json.segment_id === checkItem.segment_id && j.json.lang === checkItem.lang);\n  const job = jobEntry ? jobEntry.json : {};\n\n  out.push({\n    json: {\n      row_key:                       `${checkItem.segment_id}_${checkItem.lang}`,\n      segment_id:                    checkItem.segment_id,\n      lang:                          checkItem.lang,\n      text_translated:               checkItem.final_text || job.text || '',\n      en_start_sec:                  job.en_start_sec,\n      en_duration_sec:               checkItem.en_duration_sec,\n      slot_start_sec:                job.slot_start_sec,\n      slot_end_sec:                  job.slot_end_sec,\n      lead_silence_sec:              checkItem.lead_silence_sec,\n      tts_budget_sec:                checkItem.tts_budget_sec,\n      tail_silence_sec:              checkItem.tail_silence_sec,\n      borrowed_sec:                  checkItem.borrowed_sec,\n      expansion_attempts:            checkItem.expansion_attempts,\n      shorten_retries_in_synthesize: checkItem.shorten_retries_in_synthesize,\n      real_duration_sec:             checkItem.real_duration_sec,\n      final_duration_sec:            checkItem.final_duration_sec,\n      final_speed:                   checkItem.final_speed,\n      needs_attention:               checkItem.needs_attention ? 'TRUE' : 'FALSE',\n      audio_drive_file_id:           driveResp.id || '',\n      needs_retts:                   'FALSE',\n    },\n  });\n}\nreturn out;"
       },
       "id": "32016c65-6d26-4549-a20e-d1e72092612d",
       "name": "Prepare Localization Row",
@@ -1116,11 +1101,6 @@
         [
           {
             "node": "Save to Drive",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Check Timing Meta",
             "type": "main",
             "index": 0
           }
