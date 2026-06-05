@@ -4,6 +4,25 @@
 
 ---
 
+### 2026-06-05 — RETRY_ON_TRANSIENT_GOOGLE_API_ERRORS
+
+**Контекст**: тестовий прогін W_Master впав на самому старті — нода `Read Config (Archive)` повернула `Request failed with status code 500` (транзієнтна серверна помилка Google Sheets API). Жодна Google Sheets/Drive нода в пайплайні не мала `retryOnFail`, тож один випадковий 5xx на будь-якому з ~25 read/write викликів валив увесь прогін. Це той самий клас крихкості, що раніше закрили на Drive httpRequest нодах W3 (`W3_DECOUPLED_...`, timeout+retry).
+
+**Рішення**: додано node-level `retryOnFail:true, maxTries:3, waitBetweenTries:3000` на **29 нод** по всіх 5 воркфлоу — але лише там, де ретрай **ідемпотентний**:
+- **Усі googleSheets ноди** — і read (`Read Config/Prompts/Voices/Segments/Localizations*`), і `appendOrUpdate` (matched по `segment_id`/`row_key` → ретрай переписує той самий рядок, без дублів).
+- **googleDrive `download`** (`Download Audio`, `Download Segment WAV`) — чисте читання.
+
+**Свідомо ВИКЛЮЧЕНО** (ретрай небезпечний):
+- **googleDrive upload/create** (`Save to Drive`, `Save Full/VTT to Drive`) — без `operation` = create; ретрай після часткового успіху створив би **дублікат файлу** в Drive.
+- **googleDrive `deleteFile`** (`Delete Old Full/VTT` у W_Regen) — ретрай після delete, чий 200 загубився, дав би 404 і все одно впав.
+- `googleDriveTrigger` — тригер, ретрай не застосовний.
+
+**Files changed**: 5 воркфлоу JSON (тільки node-level retry; логіку/jsCode/layout не чіпали — `npm run sync` показує 0 drift). Sheet змін не потребує.
+
+**Note**: це лікує лише ТРАНЗІЄНТНІ 5xx. Дублікат-ризик для Drive create/delete лишається відкритим — справжній фікс (upsert-by-name для Save-нод) відкладено; зараз транзієнтний 5xx на Save все ще завалить прогін, але це рідше і без duplication-ризику від авто-ретраю.
+
+---
+
 ### 2026-06-05 — MOVEMENT_CUES_ALLOW_BOUNDED_BREATH_BORROW
 
 **Контекст**: у першому 11-хв прогоні сегменти `sleep_long_seg_036/037/038` («Inhale» / «Hold» / «Exhale») флагнулися `needs_attention=TRUE` по всіх 7 мовах (`shorten_retries_in_synthesize=3`, `final_speed=1.2`, аудіо hard-truncated). Причина: це **movement**-сегменти (`movement_keywords` = inhale/hold/exhale), а movement-сегменти були **строго залочені на `en_duration_sec`** ([check_timing_and_pad.js](code_nodes/check_timing_and_pad.js): `canBorrow = ... && !hasMovement`) — не могли breath-borrow. Але їхні EN-слоти крихітні (0.64 / 0.96 / 0.72с), тоді як переклади — повні фрази (~1.5–2.5с) → shorten/speed-up/truncate → обрізане, ламане аудіо. Це спадщина `PERMISSIVE_BORROW_FOR_NONMOVEMENT_SEGMENTS` (2026-06-04), який свідомо лишив movement строгим «для відео-синку».
