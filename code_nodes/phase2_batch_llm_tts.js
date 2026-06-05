@@ -13,7 +13,7 @@
 // (writes phase2_outcome and expansion_attempts only; Phase 1 audio stays in Drive).
 // needs_attention=true is set for accepted cells where newRealDur < en_dur × 0.70.
 
-const SAMPLE_RATE = 22050;
+const SAMPLE_RATE = 44100;
 const BPS = 2;
 const EXPAND_BATCH_SIZE = 8;
 const CHUNK = 6;                       // Tier 2 Anthropic — higher parallelism than W2's CHUNK=3
@@ -23,7 +23,7 @@ const NEEDS_ATTENTION_THRESHOLD = 0.70;// accepted but newRealDur < en_dur × th
 const STRUCTURALLY_IMPOSSIBLE_LEAD_RATIO = 0.5; // skip cells where lead_silence ≥ en_dur × this — TTS budget too small to ever expand within slot (Phase 1 borrow / first-segment offset / huge inter-segment gap)
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
-const ELEVENLABS_URL = (vid) => `https://api.elevenlabs.io/v1/text-to-speech/${vid}/stream?output_format=pcm_22050`;
+const ELEVENLABS_URL = (vid) => `https://api.elevenlabs.io/v1/text-to-speech/${vid}/stream?output_format=pcm_44100`;
 
 // --- read config + prompts + voices ---
 const configMap = {};
@@ -514,7 +514,7 @@ async function reTtsOne(task) {
 
   try {
     let pcm = await ttsAt(info.voice_speed);
-    if (!pcm || pcm.length < 4410) return { sid, lang, outcome: 'tts_empty', pcmLen: pcm?.length || 0 };
+    if (!pcm || pcm.length < 8820) return { sid, lang, outcome: 'tts_empty', pcmLen: pcm?.length || 0 };
     let real = pcm.length / (SAMPLE_RATE * BPS);
     let usedSpeed = info.voice_speed;
 
@@ -529,7 +529,7 @@ async function reTtsOne(task) {
       ];
       for (const speedTry of speedUpSteps) {
         const fastPcm = await ttsAt(speedTry);
-        if (!fastPcm || fastPcm.length < 4410) continue;
+        if (!fastPcm || fastPcm.length < 8820) continue;
         const fastReal = fastPcm.length / (SAMPLE_RATE * BPS);
         if (fastReal <= speechBudget) {
           pcm = fastPcm;
@@ -553,7 +553,7 @@ async function reTtsOne(task) {
       const slowSpeed = parseFloat(Math.max(floor, wanted).toFixed(3));
       if (slowSpeed < info.voice_speed - 1e-6 && slowSpeed > 0) {
         const slowPcm = await ttsAt(slowSpeed);
-        if (slowPcm && slowPcm.length >= 4410) {
+        if (slowPcm && slowPcm.length >= 8820) {
           const slowReal = slowPcm.length / (SAMPLE_RATE * BPS);
           if (slowReal <= speechBudget) { pcm = slowPcm; real = slowReal; usedSpeed = slowSpeed; }
         }

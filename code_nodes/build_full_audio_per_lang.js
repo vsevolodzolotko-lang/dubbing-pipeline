@@ -2,7 +2,7 @@
 // Memory-conscious: iterates active_langs sequentially, no pre-grouping of all items,
 // explicit reference cleanup after each lang. Pairs with N8N_BINARY_DATA_MODE=filesystem
 // for further heap savings.
-const SAMPLE_RATE = 22050;
+const SAMPLE_RATE = 44100;
 const BPS         = 2;
 
 const lesson_id = $('Get Params').first().json.lesson_id;
@@ -84,7 +84,7 @@ for (const lang of activeLangs) {
   pcmChunks.length = 0;  // explicit ref clear — helps GC reclaim per-segment buffers
   const n = fullPcm.length;
 
-  // Build fresh WAV header (22050Hz mono 16-bit — matches segments)
+  // Build fresh WAV header (44100Hz mono 16-bit — matches segments)
   const h = Buffer.alloc(44);
   h.write('RIFF', 0);          h.writeUInt32LE(36 + n, 4);
   h.write('WAVE', 8);          h.write('fmt ', 12);

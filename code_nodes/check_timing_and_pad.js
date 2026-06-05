@@ -1,4 +1,4 @@
-const SAMPLE_RATE          = 22050;
+const SAMPLE_RATE          = 44100;
 const BPS                  = 2;
 const BUDGET_FACTOR        = 1.05;
 const MIN_RETAIN           = 0.45;
@@ -11,9 +11,9 @@ const CPS_DEFAULTS = { de: 12, es: 15, fr: 15, pl: 14, pt: 16, it: 14, tr: 14 };
 // across all 3 retries with a "cannot shorten further" meta tag, hitting the slot
 // truncation path). Gemini Flash is also significantly cheaper. See DECISIONS.md.
 const SHORTEN_MODEL        = 'gemini-3.5-flash';
-// Failure threshold: anything shorter than 100ms of PCM (4410 bytes at 22050Hz
+// Failure threshold: anything shorter than 100ms of PCM (8820 bytes at 44100Hz
 // mono 16-bit) is treated as a failed TTS response.
-const MIN_VALID_PCM_BYTES = 4410;  // 0.1s × 22050 × 2
+const MIN_VALID_PCM_BYTES = 8820;  // 0.1s × 44100 × 2
 
 // ---------------------------------------------------------------------------
 // Shared context (identical for every job in the batch) — built ONCE.
@@ -210,7 +210,7 @@ async function synthOne(job) {
       try {
         const resp = await this.helpers.httpRequest({
           method: 'POST',
-          url: `https://api.elevenlabs.io/v1/text-to-speech/${voice_id}?output_format=pcm_22050`,
+          url: `https://api.elevenlabs.io/v1/text-to-speech/${voice_id}?output_format=pcm_44100`,
           headers: { 'xi-api-key': EL_KEY, 'content-type': 'application/json' },
           body: { text: t, model_id: 'eleven_multilingual_v2', voice_settings: { stability, similarity_boost, speed } },
           json: true, returnFullResponse: true, encoding: 'arraybuffer',

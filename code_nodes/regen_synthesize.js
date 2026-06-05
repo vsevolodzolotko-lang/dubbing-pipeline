@@ -16,9 +16,9 @@
 // downstream so Build Full Audio + VTT regenerates only the lessons that had at least
 // one cell touched.
 
-const SAMPLE_RATE = 22050;
+const SAMPLE_RATE = 44100;
 const BPS = 2;
-const MIN_VALID_PCM_BYTES = 4410;
+const MIN_VALID_PCM_BYTES = 8820;
 const NEEDS_ATTENTION_THRESHOLD = 0.70;
 
 const configMap = {};
@@ -107,7 +107,7 @@ async function synthOne(row) {
       try {
         const resp = await this.helpers.httpRequest({
           method: 'POST',
-          url: `https://api.elevenlabs.io/v1/text-to-speech/${voice.voice_id}/stream?output_format=pcm_22050`,
+          url: `https://api.elevenlabs.io/v1/text-to-speech/${voice.voice_id}/stream?output_format=pcm_44100`,
           headers: { 'xi-api-key': EL_KEY, 'content-type': 'application/json', accept: 'audio/pcm' },
           body: {
             text,

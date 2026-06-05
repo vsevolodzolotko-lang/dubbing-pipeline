@@ -4,6 +4,51 @@
 
 ---
 
+### 2026-06-05 — W3_JOIN_STRIPS_BINARY (OOM fix після bump до 44100)
+
+**Контекст**: перший повний прогін на 44100 ([AUDIO_OUTPUT_BUMPED_22050_TO_44100](DECISIONS.md)) ліг на довгому уроці (`sleep_long2`, ~88 сегментів × 7 мов = ~616 клітинок). Нода **`Prepare Localization Row`** (inline Code) джойнить Drive-save-відповіді з метаданими таймінгу через `$('Check Timing + Pad').all()`. Вивід `Check Timing + Pad` **несе per-segment WAV-бінарі**, і n8n інлайнить їх у процес зовнішнього task-runner'а при доступі через `$()`. На 44100 ці бінарі вдвічі більші (~400MB проти ~200MB) → heap runner'а переповнився → `Node execution failed` з підказкою про `N8N_RUNNERS_MAX_OLD_SPACE_SIZE`. Той самий урок на 22050 вліз — тому й працював. Це **латентний баг масштабування**: `Prepare Localization Row` ніколи не використовує бінарі (лише `.json`-поля), вони їхали в runner намарно; 44100 просто перетнув поріг раніше.
+
+**Рішення**: додано json-only дзеркало-ноду **`Check Timing Meta`** (`return $input.all().map(i => ({ json: i.json }))`), під'єднану **паралельною гілкою** від `Check Timing + Pad` (fan-out: `main[0]` → `[Save to Drive, Check Timing Meta]`). `Prepare Localization Row` тепер читає `$('Check Timing Meta').all()` замість `$('Check Timing + Pad').all()`. Join-payload у runner = чистий json (~КБ), бінарі туди більше не потрапляють. Бінарі й далі течуть у `Save to Drive` основною гілкою — незмінно. `Expand TTS Jobs` (другий `.all()` у джойні) бінарів не несе (pre-synth job-список) — стрипати не треба.
+
+**Чому code-fix, а не heap**: обрано користувачем серед {code-fix / `N8N_RUNNERS_MAX_OLD_SPACE_SIZE=4096` / даунгрейд до `pcm_24000`}. Code-fix довговічний, hosting-agnostic (працює і на n8n Cloud, де env runner'а недоступна), тримає повну якість 44100 і закриває латентний баг назавжди — а не лише до наступного, ще довшого уроку.
+
+**Деталі реалізації**: `Check Timing Meta` — inline-only (як і сам `Prepare Localization Row`, не в `sync_jscode.js`-мапі), id `c7e1a2b4-…`, typeVersion 2, позиція під `Check Timing + Pad` ([61312, 31200]). Dead-end-нода виконується штатно (n8n проганяє всі downstream-гілки), тож `$('Check Timing Meta')` доступна до моменту запуску `Prepare Localization Row` далеко нижче по графу.
+
+Files changed: `workflows/W3_Synthesize_v2.json` (нова нода + fan-out connection + repoint у `Prepare Localization Row`).
+
+**User-action (КРИТИЧНО)**: переімпортувати `W3_Synthesize_v2.json` у n8n → перепрогнати довгий урок.
+
+Уточнює `AUDIO_OUTPUT_BUMPED_22050_TO_44100` (2026-06-05) — закриває memory-ризик, явно зафіксований там як наслідок №2.
+
+---
+
+### 2026-06-05 — AUDIO_OUTPUT_BUMPED_22050_TO_44100
+
+**Контекст**: користувач спитав про якість аудіо на виході та чи можна її підняти. Вся pipeline синтезувала ElevenLabs TTS у форматі `pcm_22050` (raw PCM **22050Hz mono 16-bit**), вибраному в `SYNTHESIZE_PCM_NO_FFPROBE` (2026-05-16) заради raw-PCM-склейки без ffprobe/mp3 — 22050 був побічним вибором, не самоціллю. Найквіст 22050 = ~11kHz: фрикативи/сибілянти (s/ш/ц/t) і «повітря» голосу зрізались → звук глухіший за можливий.
+
+**Рішення**: підняти sample rate до **44100Hz** (`pcm_44100`), моно/16-bit без змін. Перевірено реальним тест-запитом до ElevenLabs нашим ключем (tier `grant_tier_2_2025_07_23`): `pcm_44100` → HTTP 200 з аудіо, тариф дозволяє. `pcm_24000` теж доступний як дешевший fallback — не обрано.
+
+Зміна скоординована по **5 code-нодах** (вся pipeline склеює сирий PCM, зрізаючи 44-байтний header — будь-яке розходження SR зламало б тривалості):
+- [check_timing_and_pad.js](code_nodes/check_timing_and_pad.js): `SAMPLE_RATE` 22050→44100, `output_format=pcm_44100`, `MIN_VALID_PCM_BYTES` 4410→8820 (зберігає семантику «<100ms = failed TTS» при новій частоті).
+- [phase2_batch_llm_tts.js](code_nodes/phase2_batch_llm_tts.js): `SAMPLE_RATE`, `ELEVENLABS_URL` → `pcm_44100`, три захардкоджені guard-пороги 4410→8820.
+- [regen_synthesize.js](code_nodes/regen_synthesize.js): `SAMPLE_RATE`, `MIN_VALID_PCM_BYTES`, `output_format`.
+- [build_full_audio_per_lang.js](code_nodes/build_full_audio_per_lang.js): `SAMPLE_RATE` (повний трек) + коментар header.
+- [trim_lead_for_sequence.js](code_nodes/trim_lead_for_sequence.js): `SAMPLE_RATE` (sample-aware trim).
+
+Синкнуто в JSON через `scripts/sync_jscode.js` (зберігає layout нод): W3 (4 ноди) + W_Regen (2 ноди).
+
+**Наслідки**:
+- Розмір WAV подвоюється (~5.3MB/хв/мову замість ~2.6). Для ~60-сек уроку × 7 мов некритично для Drive.
+- Уся timing/borrow-логіка в **секундах**, не байтах → не зачеплена; правки чисто механічні.
+- **Не змішувати** старі (22050) per-segment WAV у Drive з новими (44100): потрібен свіжий повний прогін W3, щоб трек був однорідним. W_Regen теж ребілдить повний трек, тож точковий regen на новому коді → консистентно.
+- Модель `eleven_multilingual_v2` лишена без змін — зміна моделі (більший важіль якості) свідомо відкладена як окремий, ризикованіший крок (інша поведінка speed-контролю, на якій тримається borrow-механізм).
+
+Files changed: 5 code-нодів + `workflows/W3_Synthesize_v2.json` + `workflows/W_Regen.json` + `docs/external_review_briefing.md` + `docs/sheets_schema.md`.
+
+Амендить `SYNTHESIZE_PCM_NO_FFPROBE` (2026-05-16) — той встановив `pcm_22050`; raw-PCM-без-ffprobe підхід лишається, змінено лише частоту.
+
+---
+
 ### 2026-06-05 — RETRY_ON_TRANSIENT_GOOGLE_API_ERRORS
 
 **Контекст**: тестовий прогін W_Master впав на самому старті — нода `Read Config (Archive)` повернула `Request failed with status code 500` (транзієнтна серверна помилка Google Sheets API). Жодна Google Sheets/Drive нода в пайплайні не мала `retryOnFail`, тож один випадковий 5xx на будь-якому з ~25 read/write викликів валив увесь прогін. Це той самий клас крихкості, що раніше закрили на Drive httpRequest нодах W3 (`W3_DECOUPLED_...`, timeout+retry).

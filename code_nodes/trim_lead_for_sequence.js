@@ -23,7 +23,7 @@
 // downstream "Has Trim?" IF routes those to a Drive PATCH so the new audio
 // overwrites the Drive copies; non-trimmed items flow through unchanged.
 
-const SAMPLE_RATE = 22050;
+const SAMPLE_RATE = 44100;
 const BPS         = 2;
 
 const lesson_id = $('Get Params').first().json.lesson_id;

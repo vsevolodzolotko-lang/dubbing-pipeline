@@ -126,7 +126,7 @@ After translations are finalized, W3 reads each (segment × active_lang), calls 
 
 **Breath-borrow timing** (revised 2026-06-04): any non-movement segment whose TTS overshoots `en_duration_sec` may extend past `en_end_sec` into the trailing silence before the next EN segment, bounded by `max_borrow_per_segment_sec` and the available `gap_after_sec - min_inter_segment_gap_sec`. Movement-locked segments (`movement_keywords` non-empty OR `segment_type == 'movement'`) stay strict — they MUST sync with video movement, so overshoot still hard-truncates + flags `needs_attention=TRUE`. At full-WAV concat time (`Trim Lead For Sequence` node), the borrowed duration is trimmed from the next segment's lead silence — preserving EN-timeline alignment cumulatively per language. So `sum(per-segment_{lang}.wav) == full_{lang}.wav` per lang, and every speech-onset hits its EN-aligned absolute timeline position.
 
-**TTS via ElevenLabs**: 7 voices (one per lang) configured in `voices` sheet. Format: PCM 22050Hz mono 16-bit (`pcm_22050`). Loop Over Items processes one segment at a time (batchSize=1) to respect ElevenLabs concurrency limits.
+**TTS via ElevenLabs**: 7 voices (one per lang) configured in `voices` sheet. Format: PCM 44100Hz mono 16-bit (`pcm_44100`; bumped from `pcm_22050` on 2026-06-05). Loop Over Items processes one segment at a time (batchSize=1) to respect ElevenLabs concurrency limits.
 
 ---
 
