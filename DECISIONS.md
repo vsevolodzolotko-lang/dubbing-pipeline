@@ -4,6 +4,62 @@
 
 ---
 
+### 2026-06-05 — MOVEMENT_CUES_ALLOW_BOUNDED_BREATH_BORROW
+
+**Контекст**: у першому 11-хв прогоні сегменти `sleep_long_seg_036/037/038` («Inhale» / «Hold» / «Exhale») флагнулися `needs_attention=TRUE` по всіх 7 мовах (`shorten_retries_in_synthesize=3`, `final_speed=1.2`, аудіо hard-truncated). Причина: це **movement**-сегменти (`movement_keywords` = inhale/hold/exhale), а movement-сегменти були **строго залочені на `en_duration_sec`** ([check_timing_and_pad.js](code_nodes/check_timing_and_pad.js): `canBorrow = ... && !hasMovement`) — не могли breath-borrow. Але їхні EN-слоти крихітні (0.64 / 0.96 / 0.72с), тоді як переклади — повні фрази (~1.5–2.5с) → shorten/speed-up/truncate → обрізане, ламане аудіо. Це спадщина `PERMISSIVE_BORROW_FOR_NONMOVEMENT_SEGMENTS` (2026-06-04), який свідомо лишив movement строгим «для відео-синку».
+
+**Спостереження по даних**: вільне місце для цих cue майже все **трейлінгове** — дихальна пауза йде ПІСЛЯ слова: `gap_after` = 5.3с / 7.4с / 10.9с відповідно. Тобто bounded трейлінг-borrow дає фразі стартувати точно на EN-cue і тягнутись у паузу — природно для дихальної інструкції, onset лишається EN-вирівняним.
+
+**Рішення** (audio-first, підтверджено користувачем — жорсткого відео-синку немає): дозволити movement-сегментам breath-borrow у трейлінг-тишу, але з окремим, тіснішим капом `movement_borrow_max_sec` (default 2.0; `0` = відновити строгий lock). Зміна ізольована в [code_nodes/check_timing_and_pad.js](code_nodes/check_timing_and_pad.js):
+```js
+const hasGap     = enDur > 0 && slot > enDur;
+const canBorrow  = hasGap && (!hasMovement || MOVEMENT_BORROW_MAX > 0);
+const maxAllowed = !canBorrow  ? enDur
+                 : hasMovement ? Math.min(slot, enDur + MOVEMENT_BORROW_MAX)
+                 :               slot;
+```
+Non-movement поведінка не змінена (повний borrow до `effective_slot_sec`).
+
+**Чому low-risk**: borrow-гілка вже існує і працює для всіх non-movement сегментів. Movement-cue тепер потрапляє в наявну гілку `enDur < realDur <= maxAllowed` → `borrowed_sec = realDur − enDur` (трейлінг), `leadSec = naturalLead`, `tailSec = 0`, **needs_attention НЕ ставиться** → флаги зникають. Concat-інваріант `sum(per-seg_{lang}.wav) == full_{lang}.wav` зберігається без змін: `Trim Lead For Sequence` тримить лідер наступного сегмента на `borrowed_sec` поточного — це працює для movement-borrow ідентично. `Expand TTS Jobs` змін не потребує (він і так рахує `effective_slot_sec` без movement-гейту; кап 2.0 вже стоїть через `max_borrow_per_segment_sec`). Phase 2 movement-гейту не має і стосується under-fill, а не цих over-fill кейсів.
+
+**Чому НЕ centered/symmetric borrow** (відхилений альтернативний варіант): центрування фрази на EN-слоті потребувало б НОВОЇ leading-borrow логіки, якої concat-шар не моделює (`borrowed_sec` — лише трейлінг), + ризик cross-lang drift; а для цих сегментів вільне місце майже все праворуч → виграш мінімальний. Трейлінг також КРАЩЕ для будь-якого відео-синку (onset збігається з EN), на відміну від центрування (зсуває onset раніше EN).
+
+**Files changed**:
+- `code_nodes/check_timing_and_pad.js` — `MOVEMENT_BORROW_MAX` const + relaxed gate (synced у W3 JSON через `npm run sync`)
+- `docs/config_keys.md` — новий ключ `movement_borrow_max_sec`; уточнено нотатку `short_seg_threshold_sec`
+
+**Sheet**: змін не потрібно — код дефолтить 2.0; рядок `movement_borrow_max_sec` додавати лише для override (напр. `0`).
+
+**Conflict with prior decisions**: амендить `PERMISSIVE_BORROW_FOR_NONMOVEMENT_SEGMENTS` (2026-06-04) — той лишив movement строгим; тепер movement має bounded borrow (реверсибельно через config). Концептуальне продовження лінії `CONDITIONAL_BREATH_BORROW_FOR_SHORT_SEGMENTS` (2026-05-19) → `PERMISSIVE_BORROW` (2026-06-04) → цей запис.
+
+---
+
+### 2026-06-05 — W3_DECOUPLED_FROM_W_MASTER_PLUS_W2_NONFATAL_RECOVERY
+
+**Контекст (інцидент)**: перший повний прогін 11-хв / 88-сегментної лекції (`sleep_long_seg_*`, 7 мов = 616 клітинок) через `W_Master` виявив три проблеми:
+1. `W2 Extract Translations` кинув hard-throw на `sleep_long_seg_084` — Sonnet 4.6 «тихо» викинув сегмент з батчу, і 3 спроби auto-recovery теж повернули порожньо (транзієнтне перевантаження). `W_Master` retry перезапустив **весь** W2, щоб відновити 1 сегмент.
+2. `W_Master → Execute W3` (`waitForSubWorkflow:true`, без `executionTimeout`) синхронно чекав W3 ~1.5 год → global timeout n8n → помилка «Execute W3 … item at index 0». Дитина-W3 лишилась осиротілою і крутилась далі. **Фінальний Slack** (needs_attention % + лінки) так і не відправився, бо ланцюг сповіщення жив **лише в W_Master** після `Execute W3`.
+3. W3 — НЕ нескінченний цикл: обидва `splitInBatches` (`Loop Over Items`, `Loop Phase 2`) штатні (out0=done, out1=loop), обидві done-гілки спрацювали. W3 просто **сильно серійний** (616 TTS через batchSize=7 + по 1 `appendOrUpdate`/рядок + 616 Drive-аплоадів + 0.2с guard + Phase 2 Opus + фінальна збірка), що для лекції такого розміру дає ~1.5–3 год.
+
+**Рішення** (три пов'язані зміни; перф-рефактор W3 свідомо відкладено — див. PLAN.md):
+
+1. **Decouple W_Master↔W3** ([workflows/W_Master.json](workflows/W_Master.json), [workflows/W3_Synthesize_v2.json](workflows/W3_Synthesize_v2.json)): `Execute W3` → `waitForSubWorkflow:false`. W_Master стартує W3 і одразу завершується (Success), більше не тримає багатогодинне синхронне очікування → зникає «index 0» timeout, і Drive-тригер вільний для наступного файлу. Сповіщення **перенесено в W3**: нові ноди `Build Slack Message` (порт логіки з W_Master, runOnceForAllItems, читає `Read Config` + `Read Localizations Fresh 2` + `Get Params.lesson_id`) → `Slack Notify` (slackApi cred `ogtQ2NONkRrXj2kl`), під'єднані після `Save Full to Drive` (найдовша гілка → VTT уже збережено). У W_Master ланцюг `Pass Lessons (after W3) → … → Slack Notify` від'єднано (зв'язок `Execute W3 → Pass Lessons (after W3)` видалено); самі ноди лишаються на canvas (dormant, layout збережено). Safety net: `executionTimeout=14400` (4 год) у settings W3, щоб довга дитина не вбивалась global default-ом.
+
+2. **W2 silent-drop тепер non-fatal** ([code_nodes/extract_translations.js](code_nodes/extract_translations.js)): per-segment recovery 3→5 спроб з довшим backoff (2/4/8/16с). При фінальному фейлі **більше не кидаємо** (`throw` → `console.error`): сегмент емітиться з порожніми `*_text` (downstream-safe — verify лишає original, adapt/formality `if(!text) continue`, Update Sheet auto-map по `segment_id`), оператор бачить порожні клітинки в `segments` і перезапускає W2/W_Regen точково. Прибирає сценарій, де 1 дроп змушує `W_Master.maxTries:2` ретранслювати всі 616 клітинок. Уточнює `W2_EXTRACT_AUTO_RECOVERY_FOR_DROPPED_SEGMENTS` (2026-05-31), який запровадив recovery, але лишав hard-throw на фіналі.
+
+3. **Timeouts на W3 Drive HTTP** ([workflows/W3_Synthesize_v2.json](workflows/W3_Synthesize_v2.json)): `Phase 2: Drive Update` і `Save Trimmed Audio to Drive` отримали `options.timeout=90000` + `retryOnFail:true, maxTries:3, waitBetweenTries:3000` (раніше — без timeout, ризик зависання на застряглому Drive-виклику).
+
+**Rationale**: користувач явно обрав «розчепити W_Master↔W3» замість перф-фіксу W3 → decouple робить багатогодинний W3 терпимим (W_Master не заручник), а сповіщення лишається інформативним, бо тепер походить з W3 з реальними результатами. Non-fatal W2 узгоджується з тим самим принципом «один збій не валить увесь прогін».
+
+**Files changed**:
+- `code_nodes/extract_translations.js` — 5 спроб, non-fatal blank-emit (synced у W2 JSON через `npm run sync`)
+- `workflows/W3_Synthesize_v2.json` — `executionTimeout`, 2× HTTP timeout+retry, нові `Build Slack Message` + `Slack Notify`
+- `workflows/W_Master.json` — `Execute W3.waitForSubWorkflow=false`, видалено зв'язок до notify-ланцюга
+
+**Conflict with prior decisions**: переносить Slack-поверхню з `SLACK_SURFACE_REDESIGN_NEEDS_ATTENTION_REGEN_BUTTON` (2026-06-03) з W_Master у W3 (та сама розмітка повідомлення/лінки, інший хост-воркфлоу). Уточнює `W2_EXTRACT_AUTO_RECOVERY_FOR_DROPPED_SEGMENTS` (2026-05-31).
+
+---
+
 ### 2026-06-04 — LLM_SANITIZER_DUPLICATION_WONTFIX
 
 Context: P1-кандидат на «уніфікацію» двох LLM-санітайзерів — `sanitizeClaudeOutput` (`code_nodes/adapt_translations.js`, W2) і `sanitizeLLMOutput` (`code_nodes/check_timing_and_pad.js`, W3). Початкова гіпотеза аудиту: «2 несумісні версії».

@@ -63,6 +63,12 @@ if (!EL_KEY)  throw new Error('elevenlabs_api_key missing from config sheet');
 if (!GEM_KEY) throw new Error('gemini_api_key missing from config sheet');
 
 const MAX_SPEED_UP_DELTA  = parseFloat(configMap.max_speed_up_delta) || 0.20;
+// Movement cues (Inhale/Hold/Exhale) may breath-borrow into trailing silence too,
+// bounded by this many seconds (default 2.0). Set movement_borrow_max_sec=0 to restore
+// the strict en_duration lock (for hard video-synced lessons). Still capped by
+// effective_slot_sec (= max_borrow_per_segment_sec) regardless.
+const MOVEMENT_BORROW_MAX  = (configMap.movement_borrow_max_sec != null && configMap.movement_borrow_max_sec !== '')
+  ? parseFloat(configMap.movement_borrow_max_sec) : 2.0;
 const SHORTEN_STATIC      = loadPrompt('w3_shorten_system', { tov: TOV });
 
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -163,19 +169,27 @@ async function synthOne(job) {
 
   const maxBorrowable = Math.max(0, slot - budget);
 
-  // Permissive breath-borrow (2026-06-04): any segment with available trailing silence
-  // (slot > enDur) may extend past en_duration into the gap — bounded by effective_slot_sec
-  // (= en_duration + maxBorrowable). EXCEPTION: movement-locked segments (yoga/meditation
-  // movement cues that MUST sync with video) stay strict at en_duration. Signal:
-  // movement_keywords non-empty OR segment_type === 'movement' (defensive — either fires).
-  // Previously gated on SHORT_SEG_THRESHOLD (now removed) — false positives on long
-  // narrative segments with trailing silence motivated the change.
+  // Breath-borrow: a segment with available trailing silence (slot > enDur) may extend
+  // past en_duration into the gap — bounded by effective_slot_sec (= en_duration +
+  // maxBorrowable, itself capped at max_borrow_per_segment_sec).
+  //  - NON-movement: full borrow up to effective_slot_sec (2026-06-04 permissive borrow).
+  //  - movement (yoga/meditation cues, signal: movement_keywords non-empty OR
+  //    segment_type === 'movement'): borrow allowed but TIGHTER-capped at
+  //    MOVEMENT_BORROW_MAX (default 2.0; set 0 to restore the strict en_duration lock for
+  //    hard video-synced lessons). Added 2026-06-05 — strict-lock was hard-truncating
+  //    one-word cues (Inhale/Hold/Exhale) whose translations are full phrases but whose
+  //    EN slots are <1s with multi-second breathing pauses right after. Trailing borrow
+  //    keeps the phrase ONSET aligned with the EN cue (good for any video sync) and just
+  //    trails into the pause.
   // Concat-time `Trim Lead For Sequence` continues to preserve sum(per-seg) == full per lang.
   const movementKw  = (movement_keywords || '').toString().trim();
   const segType     = (segment_type || '').toString().trim().toLowerCase();
   const hasMovement = movementKw !== '' || segType === 'movement';
-  const canBorrow   = enDur > 0 && slot > enDur && !hasMovement;
-  const maxAllowed  = canBorrow ? slot : enDur;
+  const hasGap      = enDur > 0 && slot > enDur;
+  const canBorrow   = hasGap && (!hasMovement || MOVEMENT_BORROW_MAX > 0);
+  const maxAllowed  = !canBorrow   ? enDur
+                    : hasMovement  ? Math.min(slot, enDur + MOVEMENT_BORROW_MAX)
+                    :                slot;
 
   // Dynamic speed-up ceiling for the shorten path, RELATIVE to this voice's configured
   // speed (replaces the old absolute 1.15 / dead max_speed config key). A 0.8-speed voice

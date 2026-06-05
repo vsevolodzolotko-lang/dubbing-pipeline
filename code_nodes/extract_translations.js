@@ -5,10 +5,17 @@
 // As of 2026-05-31: instead of immediately throwing, attempt auto-recovery by
 // re-translating each dropped segment INDIVIDUALLY (one segment per Claude call,
 // no prompt cache). Single-segment calls are effectively immune to silent-drop —
-// Claude can't "forget" the only segment it was asked to translate. Only if
-// individual retries also fail (genuine API error or refusal), then throw with
-// the remaining unrecovered list. This makes W2 resilient to the silent-drop
-// pattern that bit us when Sonnet 4.6 occasionally drops 1 entire batch per run.
+// Claude can't "forget" the only segment it was asked to translate. This makes W2
+// resilient to the silent-drop pattern that bit us when Sonnet 4.6 occasionally
+// drops 1 entire batch per run.
+// As of 2026-06-05: recovery is now 5 tries (was 3) with longer backoff, and a
+// final failure NO LONGER throws. Unrecovered segments are emitted with blank
+// *_text and logged loudly. Rationale: a hard throw aborted the whole W2 run, and
+// W_Master's retryOnFail then re-translated ALL 616 cells to recover one segment.
+// Downstream verify/editor/adapt/formality all skip empty *_text, so a blank cell
+// flows through harmlessly; W3 surfaces the gap (empty audio → needs_attention) and
+// the operator sees the blank cells in the segments sheet to re-run W2/W_Regen for
+// just those segments.
 //
 // active_langs gate: when set, REQUIRED_LANGS narrows to that subset so partial
 // translator output is not flagged as "dropped" for inactive langs, and emitted
@@ -107,7 +114,7 @@ async function retryOneSegment(seg) {
     messages: [{ role: 'user', content: userContent }],
   };
 
-  const MAX_TRIES = 3;
+  const MAX_TRIES = 5;
   for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
     try {
       const resp = await this.helpers.httpRequest({
@@ -124,34 +131,56 @@ async function retryOneSegment(seg) {
     } catch (e) {
       console.error(`Recovery for ${seg.segment_id} attempt ${attempt + 1} threw: ${e.message}`);
     }
-    if (attempt < MAX_TRIES - 1) await sleep(2000 * Math.pow(2, attempt));
+    if (attempt < MAX_TRIES - 1) await sleep(2000 * Math.pow(2, attempt)); // 2s, 4s, 8s, 16s
   }
   return null;
 }
 
+// Emit a dropped segment with blank translations so the run continues. Verified
+// downstream-safe: verify keeps original on empty, adapt/formality skip empty cells,
+// Update Sheet auto-maps on segment_id. The blank cells are the operator's signal.
+function emitBlank(seg) {
+  const out = {
+    segment_id:      seg.segment_id,
+    en_text:         seg.en_text || '',
+    en_duration_sec: seg.en_duration_sec || 0,
+  };
+  for (const lang of REQUIRED_LANGS) out[`${lang}_text`] = '';
+  results.push({ json: out });
+}
+
 const stillDropped = [];
 if (dropped.length > 0) {
-  if (!ANT_KEY) throw new Error(`Extract Translations: ${dropped.length} segments dropped and anthropic_api_key missing from config — cannot auto-recover`);
-  console.log(`Extract Translations: ${dropped.length} dropped, attempting per-segment recovery`);
-  for (const seg of dropped) {
-    const translations = await retryOneSegment.call(this, seg);
-    if (translations) {
-      const out = {
-        segment_id:      seg.segment_id,
-        en_text:         seg.en_text || '',
-        en_duration_sec: seg.en_duration_sec || 0,
-      };
-      for (const lang of REQUIRED_LANGS) out[`${lang}_text`] = translations[lang] || '';
-      results.push({ json: out });
-      console.log(`Recovered ${seg.segment_id}`);
-    } else {
-      stillDropped.push(seg.segment_id);
+  if (!ANT_KEY) {
+    // No key → recovery impossible. Emit blanks rather than aborting the whole run.
+    console.error(`Extract Translations: ${dropped.length} segment(s) dropped and anthropic_api_key missing from config — cannot auto-recover. Emitting blank translations: ${dropped.map(s => s.segment_id).join(', ')}`);
+    for (const seg of dropped) { emitBlank(seg); stillDropped.push(seg.segment_id); }
+  } else {
+    console.log(`Extract Translations: ${dropped.length} dropped, attempting per-segment recovery`);
+    for (const seg of dropped) {
+      const translations = await retryOneSegment.call(this, seg);
+      if (translations) {
+        const out = {
+          segment_id:      seg.segment_id,
+          en_text:         seg.en_text || '',
+          en_duration_sec: seg.en_duration_sec || 0,
+        };
+        for (const lang of REQUIRED_LANGS) out[`${lang}_text`] = translations[lang] || '';
+        results.push({ json: out });
+        console.log(`Recovered ${seg.segment_id}`);
+      } else {
+        emitBlank(seg);
+        stillDropped.push(seg.segment_id);
+      }
     }
   }
 }
 
+// Non-fatal: unrecovered drops are emitted blank (above) and logged loudly here so
+// the operator can spot the blank cells in the segments sheet and re-run W2 / W_Regen
+// for just those segments — instead of a hard throw that re-translates all 616 cells.
 if (stillDropped.length > 0) {
-  const partialNote = partial.length ? ` Partial: ${partial.map(p => p.segment_id + '(' + p.missing.join(',') + ')').join('; ')}.` : '';
-  throw new Error(`Translator dropped ${stillDropped.length} segment(s) and auto-recovery failed: ${stillDropped.join(', ')}. Re-run W2 to recover.${partialNote}`);
+  const partialNote = partial.length ? ` Partial (some langs missing): ${partial.map(p => p.segment_id + '(' + p.missing.join(',') + ')').join('; ')}.` : '';
+  console.error(`⚠️ Extract Translations: ${stillDropped.length} segment(s) left BLANK after auto-recovery failed: ${stillDropped.join(', ')}. Review the blank cells and re-run W2.${partialNote}`);
 }
 return results;

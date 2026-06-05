@@ -507,7 +507,7 @@
         },
         "mode": "each",
         "options": {
-          "waitForSubWorkflow": true
+          "waitForSubWorkflow": false
         }
       },
       "id": "ade1c420-c27e-406c-b3eb-c4ed657818ce",
@@ -885,17 +885,6 @@
         [
           {
             "node": "Execute W3 (Synthesize)",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Execute W3 (Synthesize)": {
-      "main": [
-        [
-          {
-            "node": "Pass Lessons (after W3)",
             "type": "main",
             "index": 0
           }
