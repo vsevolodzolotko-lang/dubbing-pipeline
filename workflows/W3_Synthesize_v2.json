@@ -25,7 +25,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Accept params from parent (orchestrator / W_Master) via Execute Workflow Trigger.\n// lesson_id: scopes Code nodes to one lesson (null on Manual Trigger → all segments, legacy).\n// active_langs: per-lang dispatch override (B2) — orchestrator passes `lang`; Expand TTS Jobs /\n//   Build Full / Build VTT scope to it. Absent → null → config active_langs (all langs).\n// is_last_lang: gates Slack so only the final lang run posts. The caller executeWorkflow may\n//   stringify inputs (convertFieldsToString), so accept boolean OR 'true'/'false'. Absent →\n//   null → send (single-run/legacy behavior).\nconst incoming = $input.first()?.json || {};\nconst lesson_id = incoming.lesson_id || null;\nconst active_langs = incoming.lang || incoming.active_langs || null;\nconst rawLast = incoming.is_last_lang;\nconst is_last_lang = (rawLast === undefined || rawLast === null || rawLast === '')\n  ? null\n  : (rawLast === true || rawLast === 'true');\nreturn [{ json: { lesson_id, active_langs, is_last_lang } }];\n"
+        "jsCode": "// Accept params from parent (dispatcher / W_Master) via Execute Workflow Trigger.\n// lesson_id: scopes Code nodes to one lesson (null on Manual Trigger → all segments, legacy).\n// active_langs: single-lang override (the dispatcher passes `lang`). Absent → null → config\n//   active_langs (all langs). Expand TTS Jobs / Build Full / Build VTT honor it.\n// is_last_lang / next_index: continuation-chain control. executeWorkflow stringifies inputs\n//   (convertFieldsToString), so coerce: is_last_lang accepts boolean OR 'true'/'false';\n//   next_index is numeric. Both null on legacy/manual runs (no chaining, Slack sends).\nconst incoming = $input.first()?.json || {};\nconst lesson_id = incoming.lesson_id || null;\nconst active_langs = incoming.lang || incoming.active_langs || null;\nconst rawLast = incoming.is_last_lang;\nconst is_last_lang = (rawLast === undefined || rawLast === null || rawLast === '')\n  ? null\n  : (rawLast === true || rawLast === 'true');\nconst rawNext = incoming.next_index;\nconst next_index = (rawNext === undefined || rawNext === null || rawNext === '') ? null : Number(rawNext);\nreturn [{ json: { lesson_id, active_langs, is_last_lang, next_index } }];\n"
       },
       "id": "fa28a272-c157-4428-a26f-398ee21a2775",
       "name": "Get Params",
@@ -556,6 +556,53 @@
           "name": "Google Drive account"
         }
       }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Continuation chain: if this run handled a NON-final language, emit a job to fire the\n// dispatcher for the next one. Downstream Execute is fire-and-forget → no blocking wait →\n// no 300s task timeout. is_last_lang===false only in chain mode; null (legacy/manual) → stop.\nconst gp = $('Get Params').first().json;\nif (gp.is_last_lang !== false) return [];\nif (gp.next_index == null) return [];\nreturn [{ json: { lesson_id: gp.lesson_id, lang_index: gp.next_index } }];\n"
+      },
+      "id": "b2000000-0000-4000-8000-000000000001",
+      "name": "Prepare Next Lang",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        62352,
+        31416
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "tKWQr2u81BvxtWfV",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/tKWQr2u81BvxtWfV",
+          "cachedResultName": "W3 Dispatch (per-lang)"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lesson_id": "={{ $json.lesson_id }}",
+            "lang_index": "={{ $json.lang_index }}"
+          },
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "id": "b2000000-0000-4000-8000-000000000002",
+      "name": "Fire Next Lang",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        62592,
+        31416
+      ]
     },
     {
       "parameters": {
@@ -1342,6 +1389,11 @@
             "node": "Build Slack Message",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "Prepare Next Lang",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -1351,6 +1403,17 @@
         [
           {
             "node": "Slack Notify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Next Lang": {
+      "main": [
+        [
+          {
+            "node": "Fire Next Lang",
             "type": "main",
             "index": 0
           }

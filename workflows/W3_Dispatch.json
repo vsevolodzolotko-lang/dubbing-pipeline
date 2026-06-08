@@ -25,7 +25,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Orchestrator entry. lesson_id from parent (W_Master) or null (manual run → W3 treats\n// null as all-segments, legacy). The per-lang fan-out happens in Build Lang Jobs.\nconst incoming = $input.first()?.json || {};\nreturn [{ json: { lesson_id: incoming.lesson_id || null } }];\n"
+        "jsCode": "// Continuation-chain kickoff/step. lesson_id from parent (W_Master/manual). lang_index =\n// which language to process this hop (default 0 = start of chain). The chain advances by\n// W3 calling this dispatcher back with the next index when a language finishes.\nconst incoming = $input.first()?.json || {};\nconst lesson_id = incoming.lesson_id || null;\nconst lang_index = Number(incoming.lang_index) || 0;\nreturn [{ json: { lesson_id, lang_index } }];\n"
       },
       "id": "a1000000-0000-4000-8000-000000000003",
       "name": "Get Params",
@@ -72,28 +72,14 @@
     },
     {
       "parameters": {
-        "jsCode": "// Fan out one job per active language. Each drives a SEPARATE W3 sub-execution, run\n// strictly sequentially by the batchSize=1 loop → peak runner memory stays at ~1 lang\n// (the 44100 OOM fix). is_last_lang flags the final lang so only its W3 run posts Slack\n// (by then all langs are written to the sheet → the report is complete).\nconst cfg = {};\n$('Read Config').all().forEach(i => { if (i.json && i.json.key) cfg[i.json.key] = i.json.value; });\nconst lesson_id = $('Get Params').first().json.lesson_id;\nconst langs = (cfg.active_langs || 'de,es,fr,it,pl,pt,tr')\n  .split(',').map(s => s.trim()).filter(Boolean);\nif (!langs.length) throw new Error('active_langs produced empty list — check config');\nreturn langs.map((lang, i) => ({\n  json: { lesson_id, lang, is_last_lang: i === langs.length - 1 },\n}));\n"
+        "jsCode": "// Resolve langs[lang_index] from config active_langs and hand W3 an explicit single lang +\n// the flags it needs to (a) gate Slack to the final language and (b) chain to the next one.\nconst cfg = {};\n$('Read Config').all().forEach(i => { if (i.json && i.json.key) cfg[i.json.key] = i.json.value; });\nconst langs = (cfg.active_langs || 'de,es,fr,it,pl,pt,tr').split(',').map(s => s.trim()).filter(Boolean);\nif (!langs.length) throw new Error('active_langs produced empty list — check config');\nconst { lesson_id, lang_index } = $('Get Params').first().json;\nconst idx = Math.min(Math.max(lang_index, 0), langs.length - 1);\nreturn [{ json: {\n  lesson_id,\n  lang: langs[idx],\n  is_last_lang: idx === langs.length - 1,\n  next_index: idx + 1,\n} }];\n"
       },
       "id": "a1000000-0000-4000-8000-000000000005",
-      "name": "Build Lang Jobs",
+      "name": "Resolve Lang",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
         720,
-        100
-      ]
-    },
-    {
-      "parameters": {
-        "batchSize": 1,
-        "options": {}
-      },
-      "id": "a1000000-0000-4000-8000-000000000006",
-      "name": "Loop Over Langs",
-      "type": "n8n-nodes-base.splitInBatches",
-      "typeVersion": 3,
-      "position": [
-        960,
         100
       ]
     },
@@ -111,7 +97,8 @@
           "value": {
             "lesson_id": "={{ $json.lesson_id }}",
             "lang": "={{ $json.lang }}",
-            "is_last_lang": "={{ $json.is_last_lang }}"
+            "is_last_lang": "={{ $json.is_last_lang }}",
+            "next_index": "={{ $json.next_index }}"
           },
           "matchingColumns": [],
           "schema": [],
@@ -120,16 +107,16 @@
         },
         "mode": "once",
         "options": {
-          "waitForSubWorkflow": true
+          "waitForSubWorkflow": false
         }
       },
-      "id": "a1000000-0000-4000-8000-000000000007",
-      "name": "Execute W3 Per Lang",
+      "id": "a1000000-0000-4000-8000-000000000006",
+      "name": "Fire W3",
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.2,
       "position": [
-        1200,
-        220
+        960,
+        100
       ]
     }
   ],
@@ -171,41 +158,18 @@
       "main": [
         [
           {
-            "node": "Build Lang Jobs",
+            "node": "Resolve Lang",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Build Lang Jobs": {
+    "Resolve Lang": {
       "main": [
         [
           {
-            "node": "Loop Over Langs",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Loop Over Langs": {
-      "main": [
-        [],
-        [
-          {
-            "node": "Execute W3 Per Lang",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Execute W3 Per Lang": {
-      "main": [
-        [
-          {
-            "node": "Loop Over Langs",
+            "node": "Fire W3",
             "type": "main",
             "index": 0
           }
@@ -219,5 +183,6 @@
     "executionOrder": "v1",
     "executionTimeout": 14400
   },
+  "id": "tKWQr2u81BvxtWfV",
   "tags": []
 }
