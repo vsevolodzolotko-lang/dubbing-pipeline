@@ -4,6 +4,34 @@
 
 ---
 
+### 2026-06-08 — W3_PER_LANG_CONTINUATION_CHAIN (B2, фінальна форма) ⏳ очікує наскрізного тесту
+
+**Контекст**: 44100 спричинив OOM на довгих уроках (всі 7 мов в одній виконавці ≈ 400MB бінарів у task-runner). Per-lang ізоляція (1 мова/виконавка ≈ 58MB) — правильний напрям, підтверджено: окремий de-прогін на 44100 проходить повністю. Питання було лише як **автоматизувати** послідовний прогін 7 мов.
+
+**Три стіни, по яких били (усі — нетестовані обмеження n8n 1.123.5 self-hosted, без доступу до env):**
+1. **OOM** (`InternalTaskRunnerDisconnectAnalyzer` → WS disconnect): runner мре від накопичувальної пам'яті. Фікс — per-lang.
+2. **Хибний фікс `Check Timing Meta`** (відкочено, див. нижче): джерело — `.all()` усередині циклу повертає лише поточний батч, тож стрипання бінарів нічого не дало; ще й dead-end-нода не встигала виконатись (порядок гілок у циклі).
+3. **`N8N_RUNNERS_TASK_TIMEOUT` (300с)**: диспетчер з `Execute W3 + waitForSubWorkflow:true` блокував очікування, обмежене 300с; повний прогін однієї мови > 5 хв → wait убивали після синтезу, до Build Full / VTT.
+
+**Рішення — continuation chain без блокуючого очікування** (єдине, що задовольняє «послідовно + жодного wait>300с + без env»):
+```
+W_Master ─(fire-and-forget)─► W3 Dispatch(idx=0)
+Dispatcher: resolve langs[idx] з config → Fire W3 (no wait) {lesson_id, lang, is_last_lang, next_index} → завершується миттєво
+W3: повний прогін однієї мови (власний 4-год timeout, БЕЗ батьківського wait)
+   хвіст після Save Full to Drive: НЕ остання → fire-and-forget Dispatcher(idx+1); остання → Slack, ланцюг спиняється
+```
+Жодна нода не тримає wait > 300с. Суворо послідовно (наступна мова стартує лише коли поточна досягла Save Full to Drive). Пік пам'яті ~1 мова. Tradeoff: 2 виконавки на мову (dispatcher+W3), Slack лише на останній мові (на той момент усі мови в таблиці → повний звіт).
+
+**Реалізація**: `W3_Dispatch` переписано як stateless-resolver (id `tKWQr2u81BvxtWfV`); `W3 Get Params` пропускає `next_index`; хвіст W3 = `Prepare Next Lang` (gate `is_last_lang===false`) → `Fire Next Lang` (executeWorkflow → dispatcher, no-wait). W_Master без змін (уже fire-and-forget). Усі lang-override/Slack-gate з кроків 1-2 збережено.
+
+**Важливо про дані**: `localizations` — це вихід W3 (рядок на кожну синтезовану seg×lang). Переклади живуть на листі `segments` (`de_text`…`tr_text`, вихід W2). Неповна `localizations` (напр. 077-088 лише de) — нормально, W3 добудує; вирішальне — `*_text` у segments.
+
+Files changed: `workflows/W3_Synthesize_v2.json`, `workflows/W3_Dispatch.json`, (W_Master без змін у цьому кроці). Передісторія кроків B2 1-4 — у комітах 7a26f00 / 7e75a8b / daf1c84 / 614e17d.
+
+**User-action**: переімпортувати `W3_Synthesize_v2.json` + `W3_Dispatch.json` (в той самий воркфлоу за id) → прогнати на довгому уроці з повним `active_langs`.
+
+---
+
 ### 2026-06-05 — W3_JOIN_STRIPS_BINARY (OOM fix після bump до 44100)
 
 > **❌ ВІДКОЧЕНО того ж дня (2026-06-05).** Дві причини. (1) **Misdiagnosis**: справжній OOM — це смерть процесу task-runner'а від *накопичувальної* пам'яті через ~88 батчів Phase-1 циклу (стек-трейс: `InternalTaskRunnerDisconnectAnalyzer` → WebSocket disconnect), а не разовий `.all()` на джойні. Усередині `Loop Over Items` (batchSize=7) `$('Check Timing + Pad').all()` повертає лише поточний батч (7 клітинок ≈ 4.6MB), тож стрипання бінарів там нічого не важило. Проблема ще й багатофазна — фаза збірки (`Download Segment WAV → Trim → Build Full`) теж тягне всі WAV. (2) **Зламав прогін**: dead-end fan-out нода `Check Timing Meta` не встигала виконатись до `Prepare Localization Row` — n8n усередині циклу проходив гілку `Save to Drive → Prepare Localization Row` раніше за сиблінг-гілку `Check Timing Meta` → `$('Check Timing Meta').all()` кидав `Node hasn't been executed`. Відкочено: нода + fan-out connection видалені, `Prepare Localization Row` повернуто на `$('Check Timing + Pad').all()`. Зміни 44100 збережено. **Справжній фікс — per-lang ізоляція** (ганяти W3 по одній мові через `active_langs` → пік пам'яті ÷7); автоматизація через оркестратор-по-мовах розглядається окремо.
