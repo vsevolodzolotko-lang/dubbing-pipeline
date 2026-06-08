@@ -9,7 +9,10 @@ const lesson_id = $('Get Params').first().json.lesson_id;
 
 const configMap = {};
 $('Read Config').all().forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });
-const activeLangs = (configMap.active_langs || 'de,es,fr,it,pl,pt,tr')
+// Per-lang dispatch (B2): scope to the single lang the orchestrator passed (via Get
+// Params active_langs); absent → config (all langs). Keeps peak memory at ~1 lang.
+const langOverride = $('Get Params').first().json.active_langs;
+const activeLangs = (langOverride || configMap.active_langs || 'de,es,fr,it,pl,pt,tr')
   .split(',').map(s => s.trim()).filter(Boolean).sort();
 
 // As of 2026-05-31 refactor: borrow compensation is now done UPSTREAM by the

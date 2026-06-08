@@ -1,7 +1,10 @@
 const lesson_id = $('Get Params').first().json.lesson_id;
 const configMap = {};
 $('Read Config').all().forEach(i => { if (i.json.key) configMap[i.json.key] = i.json.value; });
-const activeLangs        = (configMap.active_langs || 'de,es,fr,it,pl,pt,tr').split(',').map(s => s.trim());
+// Per-lang dispatch (B2): orchestrator calls W3 once per language via `lang` param,
+// surfaced by Get Params as active_langs. Absent (manual/legacy run) → config (all langs).
+const langOverride       = $('Get Params').first().json.active_langs;
+const activeLangs        = (langOverride || configMap.active_langs || 'de,es,fr,it,pl,pt,tr').split(',').map(s => s.trim());
 const MIN_GAP            = parseFloat(configMap.min_inter_segment_gap_sec)  || 0.4;
 const MAX_BORROW         = parseFloat(configMap.max_borrow_per_segment_sec) || 2.0;
 const EXPANSION_THRESHOLD= parseFloat(configMap.expansion_threshold)        || 0.85;
