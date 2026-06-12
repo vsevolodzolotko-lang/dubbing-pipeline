@@ -1,0 +1,135 @@
+{
+  "name": "W_Error — Failure notifier (Slack)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "c3000000-0000-4000-8000-000000000001",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "config",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "c3000000-0000-4000-8000-000000000002",
+      "name": "Read Config",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        220,
+        0
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "// W_Error — Build Error Slack. Fires from a global Error Trigger whenever a production workflow\n// (W_Master / W3_Synthesize_v2 / W3_Dispatch / W_Abort) dies with an uncaught error. This is the\n// ONLY negative/failure signal in the pipeline — without it, a crashed run is silent and the\n// operator never learns whether it's safe to start a new one.\n//\n// Reads:\n//   $('Read Config').all()        — slack_channel, localization_run_token (hint: which run)\n//   $('Error Trigger').first().json — { workflow:{name}, execution:{lastNodeExecuted, error, url} }\n// Emits { channel, text } for the native Slack node. Returns [] if slack_channel is unset.\nconst cfg = {};\n$('Read Config').all().forEach(i => { if (i.json && i.json.key) cfg[i.json.key] = i.json.value; });\n\nconst channel = cfg.slack_channel;\nif (!channel) { console.log('W_Error: slack_channel missing — cannot notify'); return []; }\n\nconst err = $('Error Trigger').first().json || {};\nconst wf = err.workflow || {};\nconst ex = err.execution || {};\n\nconst wfName = wf.name || '(unknown)';\nconst step = ex.lastNodeExecuted || '(unknown)';\nlet msg = (ex.error && (ex.error.message || ex.error.description)) || 'no message';\nmsg = msg.toString();\nif (msg.length > 500) msg = msg.slice(0, 500) + '…';\nconst url = ex.url || '';\nconst runToken = cfg.localization_run_token || '(unknown)';\n\nconst lines = [\n  ':x: *Localization aborted on error*',\n  '',\n  `*Workflow:* ${wfName}`,\n  `*Step:* ${step}`,\n  `*Error:* ${msg}`,\n  `*Run:* ${runToken}`,\n];\nif (url) lines.push(`*Execution:* ${url}`);\nlines.push('');\nlines.push('Check the cause in n8n before re-running. A new run will archive the current (possibly incomplete) state and start fresh — but first make sure the error is not infrastructural (API, limits, connection).');\n\nreturn [{ json: { channel, text: lines.join('\\n') } }];\n"
+      },
+      "id": "c3000000-0000-4000-8000-000000000003",
+      "name": "Build Error Slack",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $json.channel }}",
+          "mode": "id"
+        },
+        "text": "={{ $json.text }}",
+        "otherOptions": {
+          "mrkdwn": true,
+          "unfurl_links": false,
+          "unfurl_media": false,
+          "includeLinkToWorkflow": false
+        }
+      },
+      "id": "c3000000-0000-4000-8000-000000000004",
+      "name": "Slack Notify (Error)",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        0
+      ],
+      "webhookId": "w-error-slack-notify",
+      "credentials": {
+        "slackApi": {
+          "id": "ogtQ2NONkRrXj2kl",
+          "name": "Slack account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Config": {
+      "main": [
+        [
+          {
+            "node": "Build Error Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Error Slack": {
+      "main": [
+        [
+          {
+            "node": "Slack Notify (Error)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "WErrorNotify01",
+  "tags": []
+}

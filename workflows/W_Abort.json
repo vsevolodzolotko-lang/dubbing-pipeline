@@ -1,0 +1,323 @@
+{
+  "name": "W_Abort — Stop localization (Slack button)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "b2000000-0000-4000-8000-000000000001",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "slack-actions",
+        "responseMode": "onReceived",
+        "responseCode": 200,
+        "responseData": "",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "b2000000-0000-4000-8000-000000000002",
+      "name": "Slack Actions Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        200
+      ],
+      "webhookId": "w-abort-slack-actions"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "config",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000003",
+      "name": "Read Config",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        240,
+        100
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "// W_Abort — Prep Signature. Assembles everything the Crypto (HMAC) node and the verifier need\n// to authenticate a Slack interactivity POST before we act on it.\n//\n// Slack signs each request: signature = 'v0=' + HMAC_SHA256(signing_secret, `v0:{ts}:{raw_body}`).\n// We must hash the EXACT raw body bytes, so the Slack Actions Webhook node has \"Raw Body\" enabled\n// (the body arrives as binary). Headers carry the signature and timestamp; the signing secret\n// comes from the config sheet (slack_signing_secret).\n//\n// Reads:\n//   $('Read Config').all()            — slack_signing_secret\n//   $('Slack Actions Webhook').first()— headers + raw binary body\n// Emits one item: { base, secret, given_sig, ts, payload } → HMAC node → Verify & Parse Action.\nconst cfg = {};\n$('Read Config').all().forEach(i => { if (i.json && i.json.key) cfg[i.json.key] = i.json.value; });\nconst secret = (cfg.slack_signing_secret || '').toString();\n\nconst wh = $('Slack Actions Webhook').first() || {};\nconst headers = (wh.json && wh.json.headers) || {};\nconst given_sig = (headers['x-slack-signature'] || headers['X-Slack-Signature'] || '').toString();\nconst ts = (headers['x-slack-request-timestamp'] || headers['X-Slack-Request-Timestamp'] || '').toString();\n\n// Raw body: prefer the exact bytes from the webhook's binary (Raw Body = ON). Fall back to a\n// string body or a reconstructed form-encoding — the fallbacks won't match Slack's signature,\n// so verification will (correctly) reject if Raw Body wasn't enabled.\nlet raw = '';\nconst b = wh.binary;\nif (b && b.data && b.data.data) {\n  raw = Buffer.from(b.data.data, 'base64').toString('utf8');\n} else if (typeof (wh.json && wh.json.body) === 'string') {\n  raw = wh.json.body;\n} else if (wh.json && wh.json.body && wh.json.body.payload) {\n  raw = 'payload=' + encodeURIComponent(wh.json.body.payload);\n}\n\n// Extract the `payload` field from the form-encoded raw body. We parse it by hand\n// (regex + decodeURIComponent) rather than URLSearchParams — the latter is unreliable in\n// the n8n Code-node sandbox and silently yielded '' even though the raw body is intact\n// (the HMAC over `base` still matches, proving raw is correct). '+' → space per form rules.\nlet payload = '';\nconst m = raw.match(/(?:^|&)payload=([^&]*)/);\nif (m) {\n  try { payload = decodeURIComponent(m[1].replace(/\\+/g, ' ')); }\n  catch (e) { payload = m[1]; }\n}\n\nreturn [{ json: { base: `v0:${ts}:${raw}`, secret, given_sig, ts, payload } }];\n"
+      },
+      "id": "b2000000-0000-4000-8000-000000000004",
+      "name": "Prep Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "action": "hmac",
+        "type": "SHA256",
+        "value": "={{ $json.base }}",
+        "dataPropertyName": "computed_sig",
+        "secret": "={{ $json.secret }}",
+        "encoding": "hex"
+      },
+      "id": "b2000000-0000-4000-8000-000000000005",
+      "name": "HMAC",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 1,
+      "position": [
+        720,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// W_Abort — Verify & Parse Action. Authenticates the Slack request, then extracts the stop intent.\n// This is the security gate for an otherwise public POST webhook: if anything fails to verify we\n// return [] (no abort is written, no Slack posted). Only a genuine, fresh, correctly-signed\n// \"abort_localization\" button click gets through.\n//\n// Reads:\n//   $('Prep Signature').first().json — base, secret, given_sig, ts, payload\n//   $json.computed_sig               — hex HMAC produced by the Crypto (HMAC) node\n// Emits one item { run_token, slack_user, response_url } on success; [] on any rejection.\nconst prep = $('Prep Signature').first().json || {};\nconst computed = ($json.computed_sig || '').toString();\nconst given = (prep.given_sig || '').toString();\nconst tsNum = Number(prep.ts);\nconst now = Math.floor(Date.now() / 1000);\n\nif (!prep.secret) { console.warn('W_Abort: slack_signing_secret missing from config — rejecting'); return []; }\nif (!given || !computed) { console.warn('W_Abort: missing signature/hash — rejecting'); return []; }\nif (!tsNum || Math.abs(now - tsNum) > 300) { console.warn('W_Abort: stale or invalid timestamp — rejecting (replay guard)'); return []; }\n\nconst expected = 'v0=' + computed;\nif (expected.length !== given.length || expected !== given) {\n  console.warn('W_Abort: Slack signature mismatch — rejecting');\n  return [];\n}\n\nlet payload;\ntry { payload = JSON.parse(prep.payload); } catch (e) { console.warn('W_Abort: could not parse interaction payload — rejecting'); return []; }\n\nconst action = (payload.actions && payload.actions[0]) || {};\nif (action.action_id !== 'abort_localization') { console.log('W_Abort: ignoring non-abort action_id', action.action_id); return []; }\n\nconst runToken = (action.value || '').toString();\nif (!runToken) { console.warn('W_Abort: stop button carried no run_token — rejecting'); return []; }\n\nconst user = (payload.user && (payload.user.username || payload.user.name || payload.user.id)) || 'unknown';\nconst responseUrl = (payload.response_url || '').toString();\n\nconsole.log(`W_Abort: verified stop request for run ${runToken} by ${user}`);\nreturn [{ json: { run_token: runToken, slack_user: user, response_url: responseUrl } }];\n"
+      },
+      "id": "b2000000-0000-4000-8000-000000000006",
+      "name": "Verify & Parse Action",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// W_Abort — Prepare Abort Row. Turns the verified stop request into the single config row the\n// following Sheets appendOrUpdate writes: localization_abort_token = run_token. A checkpoint\n// halts the run only when localization_abort_token === localization_run_token.\nconst v = $('Verify & Parse Action').first().json || {};\nconst runToken = (v.run_token || '').toString();\nreturn [{ json: { key: 'localization_abort_token', value: runToken } }];\n"
+      },
+      "id": "b2000000-0000-4000-8000-000000000007",
+      "name": "Prepare Abort Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "config",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "key": "={{ $json.key }}",
+            "value": "={{ $json.value }}"
+          },
+          "matchingColumns": [
+            "key"
+          ]
+        },
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000008",
+      "name": "Write Abort",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        1440,
+        100
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "// W_Abort — Build Confirm Slack. Posts a plain-text confirmation back to the channel so the team\n// sees the stop was registered and understands when it takes effect. Emits { channel, text } for\n// the native Slack node (same idiom as W_Master / W_Regen completion messages).\nconst cfg = {};\n$('Read Config').all().forEach(i => { if (i.json && i.json.key) cfg[i.json.key] = i.json.value; });\nconst channel = cfg.slack_channel;\nif (!channel) { console.log('W_Abort: slack_channel missing — skipping confirmation'); return []; }\n\nconst v = $('Verify & Parse Action').first().json || {};\nconst lines = [\n  ':octagonal_sign: *Localization stopped*',\n  '',\n  `*Initiated by:* ${v.slack_user || 'unknown'}`,\n  'The current language will finish. No new languages will start. Active processes run to completion.',\n  '',\n  ':hourglass_flowing_sand: Awaiting confirmation in the next message.',\n];\nreturn [{ json: { channel, text: lines.join('\\n') } }];\n"
+      },
+      "id": "b2000000-0000-4000-8000-000000000009",
+      "name": "Build Confirm Slack",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $json.channel }}",
+          "mode": "id"
+        },
+        "text": "={{ $json.text }}",
+        "otherOptions": {
+          "mrkdwn": true,
+          "unfurl_links": false,
+          "unfurl_media": false,
+          "includeLinkToWorkflow": false
+        }
+      },
+      "id": "b2000000-0000-4000-8000-00000000000a",
+      "name": "Slack Confirm Stop",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        1920,
+        100
+      ],
+      "webhookId": "w-abort-slack-confirm",
+      "credentials": {
+        "slackApi": {
+          "id": "ogtQ2NONkRrXj2kl",
+          "name": "Slack account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack Actions Webhook": {
+      "main": [
+        [
+          {
+            "node": "Read Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Config": {
+      "main": [
+        [
+          {
+            "node": "Prep Signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep Signature": {
+      "main": [
+        [
+          {
+            "node": "HMAC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HMAC": {
+      "main": [
+        [
+          {
+            "node": "Verify & Parse Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify & Parse Action": {
+      "main": [
+        [
+          {
+            "node": "Prepare Abort Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Abort Row": {
+      "main": [
+        [
+          {
+            "node": "Write Abort",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Abort": {
+      "main": [
+        [
+          {
+            "node": "Build Confirm Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Confirm Slack": {
+      "main": [
+        [
+          {
+            "node": "Slack Confirm Stop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "WErrorNotify01"
+  },
+  "id": "WAbortStopLoc01",
+  "tags": []
+}

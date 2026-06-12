@@ -72,6 +72,98 @@
     },
     {
       "parameters": {
+        "jsCode": "// Check Abort — cooperative kill switch for the W3 per-language continuation chain.\n// Sits between Read Config and the \"Aborted?\" IF in W3 Dispatch. The dispatcher is re-entered\n// once per language (this is where the multi-hour run actually spends its time), so this is\n// the checkpoint that matters most.\n//\n// Stop semantics: W_Master writes localization_run_token at run start; the Slack stop button\n// (via W_Abort) writes localization_abort_token = that same run_token. When the two match,\n// the operator asked to stop THIS run. We emit a single sentinel item with an `aborted` flag so\n// the downstream IF routes: true → post \"✅ Локалізацію зупинено\" (the confirmation the operator\n// awaits) and halt; false → Resolve Lang → Fire W3 (chain continues).\n//\n// Because Execute W3 enters here at lang_index 0, a stop clicked during W1/W2 is also honored.\n// The confirmation fires exactly once — on the hop where the halt is detected — and by then\n// nothing of this run is running (the dispatcher runs after W2; the prior language already\n// reached Save Full to Drive), so it genuinely means \"safe to start a new run\".\nconst cfg = {};\n$('Read Config').all().forEach(i => { if (i.json && i.json.key) cfg[i.json.key] = i.json.value; });\n\nconst runToken = (cfg.localization_run_token || '').toString().trim();\nconst abortToken = (cfg.localization_abort_token || '').toString().trim();\nconst aborted = !!(runToken && abortToken && abortToken === runToken);\n\nconst p = $('Get Params').first().json || {};\nif (aborted) {\n  console.log(`W3 Dispatch: stop confirmed for run ${runToken} — halting chain at lang_index=${p.lang_index} (lesson ${p.lesson_id})`);\n}\n\nreturn [{ json: { aborted, run_token: runToken, lesson_id: p.lesson_id, lang_index: p.lang_index } }];\n"
+      },
+      "id": "a1000000-0000-4000-8000-000000000007",
+      "name": "Check Abort",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "aborted-check",
+              "leftValue": "={{ $json.aborted }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000008",
+      "name": "Aborted?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        780,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// W3 Dispatch — Build Stopped Slack. Posts the confirmation the operator awaits after pressing\n// Stop: the cooperative kill-switch has actually halted the continuation chain (vs W_Abort's\n// click-time \"зупиняю…\" message). Fired from the Aborted?=true branch, exactly once.\n//\n// Reads:\n//   $('Read Config').all()     — slack_channel\n//   $('Check Abort').first()   — lesson_id (sentinel)\n// Emits { channel, text } for the native Slack node. Returns [] if slack_channel is unset.\nconst cfg = {};\n$('Read Config').all().forEach(i => { if (i.json && i.json.key) cfg[i.json.key] = i.json.value; });\n\nconst channel = cfg.slack_channel;\nif (!channel) { console.log('W3 Dispatch: slack_channel missing — skipping stop confirmation'); return []; }\n\nconst s = $('Check Abort').first().json || {};\nconst lines = [\n  ':white_check_mark: *Localization stopped — confirmed*',\n  '',\n  `*Lesson:* ${s.lesson_id || '—'}`,\n  'All processes finished. Safe to start a new run.',\n];\nreturn [{ json: { channel, text: lines.join('\\n') } }];\n"
+      },
+      "id": "a1000000-0000-4000-8000-000000000009",
+      "name": "Build Stopped Slack",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $json.channel }}",
+          "mode": "id"
+        },
+        "text": "={{ $json.text }}",
+        "otherOptions": {
+          "mrkdwn": true,
+          "unfurl_links": false,
+          "unfurl_media": false,
+          "includeLinkToWorkflow": false
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000010",
+      "name": "Slack Notify (Stopped)",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        1220,
+        -40
+      ],
+      "webhookId": "w3-stopped-slack-notify",
+      "credentials": {
+        "slackApi": {
+          "id": "ogtQ2NONkRrXj2kl",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
         "jsCode": "// Resolve langs[lang_index] from config active_langs and hand W3 an explicit single lang +\n// the flags it needs to (a) gate Slack to the final language and (b) chain to the next one.\nconst cfg = {};\n$('Read Config').all().forEach(i => { if (i.json && i.json.key) cfg[i.json.key] = i.json.value; });\nconst langs = (cfg.active_langs || 'de,es,fr,it,pl,pt,tr').split(',').map(s => s.trim()).filter(Boolean);\nif (!langs.length) throw new Error('active_langs produced empty list — check config');\nconst { lesson_id, lang_index } = $('Get Params').first().json;\nconst idx = Math.min(Math.max(lang_index, 0), langs.length - 1);\nreturn [{ json: {\n  lesson_id,\n  lang: langs[idx],\n  is_last_lang: idx === langs.length - 1,\n  next_index: idx + 1,\n} }];\n"
       },
       "id": "a1000000-0000-4000-8000-000000000005",
@@ -79,8 +171,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        720,
-        100
+        1000,
+        220
       ]
     },
     {
@@ -115,8 +207,8 @@
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.2,
       "position": [
-        960,
-        100
+        1220,
+        220
       ]
     }
   ],
@@ -158,7 +250,47 @@
       "main": [
         [
           {
+            "node": "Check Abort",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Abort": {
+      "main": [
+        [
+          {
+            "node": "Aborted?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aborted?": {
+      "main": [
+        [
+          {
+            "node": "Build Stopped Slack",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
             "node": "Resolve Lang",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Stopped Slack": {
+      "main": [
+        [
+          {
+            "node": "Slack Notify (Stopped)",
             "type": "main",
             "index": 0
           }
@@ -181,7 +313,8 @@
   "active": false,
   "settings": {
     "executionOrder": "v1",
-    "executionTimeout": 14400
+    "executionTimeout": 14400,
+    "errorWorkflow": "WErrorNotify01"
   },
   "id": "tKWQr2u81BvxtWfV",
   "tags": []

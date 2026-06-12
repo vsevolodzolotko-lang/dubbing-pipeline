@@ -14,6 +14,23 @@ const CODE_DIR = path.join(ROOT, 'code_nodes');
 const WF_DIR = path.join(ROOT, 'workflows');
 
 const WORKFLOWS = {
+  'W_Master.json': {
+    'Prepare Token Rows':         'prepare_run_token.js',
+    'Build Started Slack Message':'build_started_slack.js',
+  },
+  'W3_Dispatch.json': {
+    'Check Abort':                'check_abort_w3dispatch.js',
+    'Build Stopped Slack':        'build_stopped_slack.js',
+  },
+  'W_Abort.json': {
+    'Prep Signature':             'w_abort_prep_signature.js',
+    'Verify & Parse Action':      'w_abort_verify_parse.js',
+    'Prepare Abort Row':          'w_abort_prepare_row.js',
+    'Build Confirm Slack':        'w_abort_build_confirm.js',
+  },
+  'W_Error.json': {
+    'Build Error Slack':          'build_error_slack.js',
+  },
   'W1_STT_and_Segment.json': {
     'Segment Transcript':    'segment_transcript.js',
   },

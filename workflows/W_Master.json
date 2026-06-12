@@ -669,6 +669,137 @@
           "name": "Slack account"
         }
       }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "config",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "f10a0001-0000-4000-8000-readcfgstart1",
+      "name": "Read Config (Start)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        14000,
+        4640
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepare the two config rows that scope the cooperative kill-switch to THIS run (W_Master,\n// runs right after Once Per Run). Emits two items that the following Sheets appendOrUpdate\n// node writes to the config tab (matching on `key`):\n//   localization_run_token   = archive_run_at  → identifies the current run\n//   localization_abort_token = ''              → clears any stale stop from a previous run\n//\n// A checkpoint aborts only when localization_abort_token === localization_run_token (both\n// non-empty). Resetting abort_token here guarantees a fresh run is never blocked by an old stop.\nconst run = $('Once Per Run').first().json || {};\nconst runToken = (run.archive_run_at || '').toString();\nif (!runToken) {\n  console.warn('Prepare Run Token: Once Per Run produced no archive_run_at — run_token will be empty');\n}\nreturn [\n  { json: { key: 'localization_run_token', value: runToken } },\n  { json: { key: 'localization_abort_token', value: '' } },\n];\n"
+      },
+      "id": "f10a0002-0000-4000-8000-preptoken0001",
+      "name": "Prepare Token Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        14224,
+        4640
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "config",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "key": "={{ $json.key }}",
+            "value": "={{ $json.value }}"
+          },
+          "matchingColumns": [
+            "key"
+          ]
+        },
+        "options": {}
+      },
+      "id": "f10a0003-0000-4000-8000-writeruntok01",
+      "name": "Write Run Token",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        14448,
+        4640
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the \"localization started\" Slack message (W_Master, fires right after Once Per Run,\n// before the archive chain). Emits ONE item { channel, text, blocks } consumed by an HTTP\n// Request node that POSTs to Slack chat.postMessage (blocks need the raw API — the native\n// Slack node can't author a Block Kit `confirm` dialog by hand).\n//\n// The message carries an interactive danger button \"🛑 Зупинити локалізацію\" with a native\n// Slack confirm dialog. The button's `value` is the run_token (= Once Per Run's archive_run_at);\n// clicking it routes to W_Abort, which writes localization_abort_token = run_token. Cooperative\n// checkpoints (W3 Dispatch) compare the two tokens and halt the run.\n//\n// Reads:\n//   $('Read Config (Start)').all()  — slack_channel\n//   $('Once Per Run').first().json  — archive_run_at (run_token), new_file_names\nconst cfg = {};\n$('Read Config (Start)').all().forEach(i => { if (i.json && i.json.key) cfg[i.json.key] = i.json.value; });\n\nconst channel = cfg.slack_channel;\nif (!channel) {\n  // Don't hard-fail the run just because Slack isn't configured — skip the heads-up message.\n  console.log('Build Started Slack: slack_channel missing — skipping start notification');\n  return [];\n}\n\nconst run = $('Once Per Run').first().json || {};\nconst runToken = (run.archive_run_at || '').toString();\nconst names = (run.new_file_names || []).filter(Boolean);\nconst filesLine = names.length ? names.join(', ') : '(unknown)';\n\nconst headerText = [\n  ':rocket: *Localization started*',\n  '',\n  `*Source file(s):* ${filesLine}`,\n  '',\n  \":warning: Don't edit Drive or Sheets until localization finishes.\",\n].join('\\n');\n\nconst blocks = [\n  { type: 'section', text: { type: 'mrkdwn', text: headerText } },\n  {\n    type: 'actions',\n    elements: [\n      {\n        type: 'button',\n        text: { type: 'plain_text', text: '🛑 Stop localization', emoji: true },\n        style: 'danger',\n        action_id: 'abort_localization',\n        value: runToken,\n        confirm: {\n          title: { type: 'plain_text', text: 'Stop localization?' },\n          text: { type: 'mrkdwn', text: \"All processes of the current run will stop at the next checkpoint. The current language will finish generating first. This can't be undone.\" },\n          confirm: { type: 'plain_text', text: 'Stop' },\n          deny: { type: 'plain_text', text: 'Cancel' },\n          style: 'danger',\n        },\n      },\n    ],\n  },\n];\n\n// `text` is the notification/fallback string Slack shows in push/preview when blocks can't render.\nreturn [{ json: { channel, text: \"Localization started — don't touch Drive\", blocks } }];\n"
+      },
+      "id": "f10a0004-0000-4000-8000-buildstarted1",
+      "name": "Build Started Slack Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        14672,
+        4640
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "slackApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ channel: $json.channel, text: $json.text, blocks: $json.blocks, unfurl_links: false, unfurl_media: false }) }}",
+        "options": {}
+      },
+      "id": "f10a0005-0000-4000-8000-slackstarted1",
+      "name": "Slack Notify (Started)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        14896,
+        4640
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "slackApi": {
+          "id": "ogtQ2NONkRrXj2kl",
+          "name": "Slack account"
+        }
+      }
     }
   ],
   "pinData": {},
@@ -700,6 +831,55 @@
         [
           {
             "node": "Read Config (Archive)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Read Config (Start)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Config (Start)": {
+      "main": [
+        [
+          {
+            "node": "Prepare Token Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Token Rows": {
+      "main": [
+        [
+          {
+            "node": "Write Run Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Run Token": {
+      "main": [
+        [
+          {
+            "node": "Build Started Slack Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Started Slack Message": {
+      "main": [
+        [
+          {
+            "node": "Slack Notify (Started)",
             "type": "main",
             "index": 0
           }
@@ -947,7 +1127,8 @@
   },
   "active": false,
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "errorWorkflow": "WErrorNotify01"
   },
   "versionId": "d0097226-4fc5-4c64-90a8-eab4d8e94ece",
   "meta": {

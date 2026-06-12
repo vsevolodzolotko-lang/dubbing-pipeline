@@ -4,6 +4,51 @@
 
 ---
 
+### 2026-06-12 — SLACK_ERROR_NOTIFICATION_WORKFLOW
+
+**Контекст**: аудит логіки Slack-повідомлень (після `SLACK_RUN_STARTED_AND_COOPERATIVE_STOP_BUTTON`) виявив, що **всі** повідомлення сидять на happy-path, а Error Trigger / `errorWorkflow` не налаштований **ніде** (перевірено grep'ом). Термінальних позитивних сигналів два — ✅ `Dubbing complete` (W3, остання мова) і 🛑 `Локалізацію зупинено` (клік). Будь-яке інше завершення = тиша: оператор бачить лише 🚀 «запущено» і не знає, чи ран живий і чи можна запускати новий. Тихі сценарії: W3 падає/зависає на мові, W1/W2 падають, ланка ланцюга не запустила наступну мову, W_Abort збій.
+
+**Рішення**: один глобальний error-handler workflow `W_Error.json` (`Error Trigger → Read Config → Build Error Slack → Slack Notify (Error)`), прописаний як `settings.errorWorkflow = "WErrorNotify01"` у W_Master, W3_Synthesize_v2, W3_Dispatch, W_Abort. На будь-який неперехоплений збій постить `❌ Локалізація впала` з `workflow.name`, `lastNodeExecuted`, `error.message` (truncate 500), `localization_run_token` і лінком на виконання.
+
+**Покриття / межі:**
+- W1/W2 викликаються з `waitForSubWorkflow:true` → їхні збої бульбашаться в W_Master, тож `errorWorkflow` на них **не** ставимо (уникаємо дубль-алертів; одне ❌ від W_Master зі step=`Execute W1/W2`).
+- W3 decoupled (fire-and-forget) → збої НЕ бульбашаться → W3_Synthesize_v2 і W3_Dispatch мають власний `errorWorkflow`.
+- **НЕ ловиться**: повний даун n8n (Error Trigger потребує живого n8n) — задокументовано в operator_manual як єдиний справді тихий випадок (watchdog/heartbeat — майбутній крок). Тихе «зависання без throw» спрацює лише по 4-год `executionTimeout` → fail → алерт.
+
+**Інженерія**: Error Trigger payload (`execution`/`workflow`) читається через `$('Error Trigger').first().json`; `slack_channel` — з config (якщо Sheets теж ліг, нотифікація не пройде — прийнятний edge, бо error-workflow не ретригерить сам себе). Прив'язка `errorWorkflow` — best-effort id у JSON, але надійно лише через UI-дропдаун (n8n може перепризначити id на імпорті) — описано в README Setup. Нова code-нода `build_error_slack.js` додана в `scripts/sync_jscode.js` (27 нод). Новий config-ключ не потрібен — використовує наявний `slack_channel`.
+
+---
+
+### 2026-06-12 — SLACK_RUN_STARTED_AND_COOPERATIVE_STOP_BUTTON
+
+**Контекст**: ран стартував тихо — перше Slack-повідомлення (`Dubbing complete`) приходило аж після W3, через години. Дві проблеми: (1) ніхто в команді не знав, що ран іде → хтось міг редагувати ті самі Sheets/Drive (відкритий пункт «Lock/черга при multi-file drop»); (2) якщо оператор закинув не той файл — зупинити нічим (нема kill-switch, нема n8n API в `.env`, лишався тільки n8n UI → Stop, чого оператор не вміє).
+
+**Рішення**: дві фічі — стартове Slack-повідомлення + інтерактивна кнопка зупинки.
+
+1. **«Локалізацію запущено»** — W_Master, гілка fan-out від `Once Per Run` (паралельно архівному ланцюгу, **до** будь-яких мутацій): `Read Config (Start)` → `Prepare Token Rows` → `Write Run Token` → `Build Started Slack Message` → `Slack Notify (Started)`. Постить `:rocket: Локалізацію запущено` зі списком файлів + heads-up «не чіпайте Drive/Sheets».
+
+2. **Кнопка 🛑 Зупинити локалізацію** — справжня Block Kit `actions`-кнопка `style:danger` з нативним `confirm`-діалогом (вибір користувача: справжня кнопка + підтвердження, а не mrkdwn-лінк). `value` кнопки = run_token. Клік+підтвердження → підписаний Slack interactivity POST → новий workflow **`W_Abort`** (`/webhook/slack-actions`).
+
+**Архітектура abort (token-scoped кооперативний прапорець, БЕЗ n8n API):**
+- `localization_run_token` — W_Master стампить на старті (= `archive_run_at`); одночасно чистить `localization_abort_token=''` → застарілий стоп не блокує новий ран.
+- `W_Abort` верифікує Slack-підпис (`slack_signing_secret`, `HMAC-SHA256('v0:{ts}:{raw}')` + 5-хв replay guard) і лише тоді пише `localization_abort_token = run_token`.
+- Чекпоінт `Check Abort` у `W3_Dispatch` (між `Read Config` і `Resolve Lang`) — re-entered раз на мову, **там ран проводить години**. Якщо `abort_token === run_token` → `return []` → `Resolve Lang`/`Fire W3` не виконуються → continuation-chain спиняється чисто (без error). Бо Execute W3 заходить сюди на `lang_index=0`, стоп натиснутий під час W1/W2 теж honored — синтез просто не стартує.
+
+**Ключові інженерні рішення (через обмеження sandbox, див. `code_nodes/README.md`):**
+- **Block Kit blocks шлемо через HTTP Request → `chat.postMessage`** (`authentication: predefinedCredentialType`, `nodeCredentialType: slackApi`), бо нативна n8n Slack-нода не вміє авторити `confirm`-діалог. Plain-text confirm від W_Abort лишився на нативній Slack-ноді.
+- **HMAC через Crypto-ноду** (`n8n-nodes-base.crypto`, action `hmac`), НЕ `require('crypto')` у Code-ноді (gated `NODE_FUNCTION_ALLOW_BUILTIN`). Raw body для підпису — через webhook option `rawBody:true` (binary) + fallback.
+- **Підтвердження = нативний Slack `confirm`-діалог**, не окрема веб-сторінка — idiomatic для справжньої кнопки й кращий UX (лишається в Slack).
+
+**Обмеження (свідомі):**
+- Стоп **кооперативний, не миттєвий**: поточна мова догрaється; W1/W2 у польоті завершуються, але синтез не стартує. Миттєвий hard-kill вимагав би n8n REST API (нема в `.env`) і міг лишити частково записані файли — відхилено.
+- **W2 чекпоінт не робимо**: `W3_Dispatch` index-0 Check Abort уже не дає синтезу при кліку під час W1/W2 — окрема хірургія в батч-лупі W2 надлишкова (план дозволяв skip if invasive).
+- **Multi-file drop НЕ закрито**: `localization_run_token` last-wins; при двох одночасних ранах стоп прив'яжеться лише до останнього. Той самий відкритий пункт «Lock/черга» — run_token стане основою lock'а, коли робитимемо.
+- **W_Regen webhook auth** (окремий TODO) частково мітигується тим самим патерном (підпис/токен у query) — але W_Regen НЕ чіпали в цій зміні.
+
+**Реалізація**: новий `workflows/W_Abort.json` (id `WAbortStopLoc01`); 5 нових нод у `W_Master.json`; 1 нова нода `Check Abort` у `W3_Dispatch.json`. 7 нових `code_nodes/*.js` (`build_started_slack`, `prepare_run_token`, `check_abort_w3dispatch`, `w_abort_prep_signature`, `w_abort_verify_parse`, `w_abort_prepare_row`, `w_abort_build_confirm`) додані в `scripts/sync_jscode.js` (тепер 26 нод; вперше покрито `W3_Dispatch`). Нові config-ключі: `slack_signing_secret` + runtime `localization_run_token`/`localization_abort_token`. Передумова (ручна, не з коду): у Slack-app увімкнути Interactivity → Request URL на `slack-actions` webhook, скопіювати Signing Secret у config, активувати `W_Abort`.
+
+---
+
 ### 2026-06-08 — W3_PER_LANG_CONTINUATION_CHAIN (B2, фінальна форма) ✅ верифіковано
 
 > **Верифіковано 2026-06-08**: наскрізний прогін на довгому уроці (sleep_long2, 7 мов) пройшов чисто — ланцюг дійшов до кінця, без OOM, без 300с-таймауту, без `phase2_outcome=error`.

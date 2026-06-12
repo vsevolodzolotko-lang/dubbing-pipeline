@@ -22,7 +22,9 @@ Automated dubbing for wellness/meditation video courses. English audio in → 7 
 ## Pipeline at a glance
 
 ```
-[W_Master]  Drive Trigger (01_input/) → Parse Filename
+[W_Master]  Drive Trigger (01_input/) → Parse Filename → Once Per Run
+              ↓
+              (branch) write run_token / clear abort_token → Slack "🚀 Localization started" + 🛑 Stop button
               ↓
               Archive chain (11 nodes): list 4 working folders → exclude just-dropped trigger files
                   → create 05_archive/{prev_basename}_{YYYY-MM-DD_HH-MM} (Kyiv tz)
@@ -69,6 +71,8 @@ EN audio (Drive)
 
 Both paths read `needs_retts=TRUE` rows from the `localizations` sheet — operator flags rows manually before triggering. W_Regen re-TTSes each flagged cell with Phase 1-style timing logic, overwrites the per-segment Drive WAV in place (no duplicates), rebuilds full WAV + VTT for affected lessons, and posts a Slack notification on completion. On successful regen, `needs_attention` becomes `REVIEW` (yellow) for human verification — operator listens and flips to `FALSE` (accept) or `TRUE` (still bad).
 
+**W_Abort** (cooperative stop) backs the **🛑 Stop localization** button on W_Master's start message. The button is a real Block Kit action with a native confirm dialog; clicking + confirming sends a signed Slack interactivity POST to W_Abort's `…/webhook/slack-actions`. W_Abort verifies the Slack signature (`slack_signing_secret`, HMAC-SHA256 + 5-min replay guard) via an n8n Crypto node, then writes `localization_abort_token` = the run's token. The W3 Dispatch `Check Abort` node — re-entered once per language, where a long run actually spends its hours — halts the continuation chain as soon as `abort_token === run_token`. Stop is **cooperative**: the current language finishes, no further language synthesizes; in-flight W1/W2 complete but synthesis never starts. Each run's token is fresh (W_Master clears the abort flag at start), so a stale stop never blocks a new run.
+
 Output in Drive (the operator's folder layout):
 - `01_input/` (`drive_input_folder_id`) — source mp3s
 - `02_output/` (`drive_output_folder_id`) — per-segment WAVs `{lesson_id}_seg_NNN_{lang}.wav`
@@ -80,18 +84,20 @@ Output in Drive (the operator's folder layout):
 
 ## Quick start
 
-1. **Google Sheet** — create a sheet with **5 tabs**: `config`, `segments`, `voices`, `localizations`, `prompts`. Schema details in [`docs/sheets_schema.md`](docs/sheets_schema.md). Required config keys: `anthropic_api_key`, `gemini_api_key`, `elevenlabs_api_key`, `tone_of_voice`, `drive_input_folder_id`, `drive_output_folder_id`, `drive_output_full_folder_id`, `drive_output_vtt_folder_id`, `drive_archive_folder_id`, `slack_channel`, `w_regen_workflow_url`. Full list (with defaults + dead keys): [`docs/config_keys.md`](docs/config_keys.md).
+1. **Google Sheet** — create a sheet with **5 tabs**: `config`, `segments`, `voices`, `localizations`, `prompts`. Schema details in [`docs/sheets_schema.md`](docs/sheets_schema.md). Required config keys: `anthropic_api_key`, `gemini_api_key`, `elevenlabs_api_key`, `tone_of_voice`, `drive_input_folder_id`, `drive_output_folder_id`, `drive_output_full_folder_id`, `drive_output_vtt_folder_id`, `drive_archive_folder_id`, `slack_channel`, `w_regen_workflow_url`, `slack_signing_secret` (for the Stop button). Full list (with defaults + dead keys): [`docs/config_keys.md`](docs/config_keys.md).
 2. **n8n credentials** — bind:
     - Google Sheets account (for all Sheets nodes; ALSO bound on W_Master `Archive Previous Run`-step Sheets-clear HTTP node)
     - Google Drive account (for all Drive nodes, including W_Master's Drive Trigger and the 5 archive HTTP nodes)
     - Deepgram Header Auth (`Authorization: Token <key>`) — for W1 STT
     - ElevenLabs Header Auth (`xi-api-key: <key>`) — for W3 TTS
-    - Slack account (Bot User OAuth Token `xoxb-...`) — for W_Master + W_Regen Slack notifications
+    - Slack account (Bot User OAuth Token `xoxb-...`) — for W_Master + W_Regen + W_Abort Slack notifications (scope `chat:write`)
 3. **Drive folders** — create 5 folders: `01_input/`, `02_output/`, `03_full/`, `04_vtt/`, `05_archive/`. Copy their IDs into the config sheet (`drive_input_folder_id`, `drive_output_folder_id`, `drive_output_full_folder_id`, `drive_output_vtt_folder_id`, `drive_archive_folder_id`). See [`docs/drive_structure.md`](docs/drive_structure.md) for what each holds.
 4. **Voices tab** — fill in voice IDs from ElevenLabs Studio for the 7 langs.
 5. **Prompts tab** — populate the `prompts` tab with 11 prompts + ToV (keys, templates, placeholders). See [`docs/external_review_briefing.md`](docs/external_review_briefing.md) for the index of prompt keys and roles. Missing-key → fail-fast at runtime.
-6. **Import workflows** — `workflows/W1_STT_and_Segment.json`, `workflows/W2_Translate_v2.json`, `workflows/W3_Synthesize_v2.json`, then `workflows/W_Master.json` and `workflows/W_Regen.json` into n8n. Re-bind credentials on each node after import. In W_Master: re-bind the three Execute Workflow nodes to the IDs n8n assigned to W1/W2/W3.
+6. **Import workflows** — `workflows/W1_STT_and_Segment.json`, `workflows/W2_Translate_v2.json`, `workflows/W3_Synthesize_v2.json`, then `workflows/W_Master.json`, `workflows/W_Regen.json`, `workflows/W3_Dispatch.json`, `workflows/W_Abort.json`, and `workflows/W_Error.json` into n8n. Re-bind credentials on each node after import. In W_Master: re-bind the three Execute Workflow nodes to the IDs n8n assigned to W1/W2/W3.
+6b. **Wire the failure notifier** — after importing `W_Error`, open **each** of W_Master / W3_Synthesize_v2 / W3_Dispatch / W_Abort → **Settings → Error Workflow → select "W_Error"** (UI dropdown by name — more reliable than the hardcoded id, which n8n may reassign on import). Now any uncaught crash posts `❌ Локалізація впала` to Slack with the failing workflow, step, error, and execution link. (W1/W2 are intentionally left unset — their failures bubble up to W_Master, so they're covered once without duplicate alerts.)
 7. **Activate W_Regen** in n8n UI (top-right toggle) → open the `Webhook Trigger` node → copy the **Production URL** (e.g. `https://your-n8n/webhook/w-regen`) → paste into config sheet as `w_regen_workflow_url`. Without an active webhook + URL, the Slack "Regen Segments" link is omitted.
+7b. **Activate W_Abort + wire the Slack Stop button** — (a) activate `W_Abort` in n8n, open its `Slack Actions Webhook` node, copy the **Production URL** (ends in `/webhook/slack-actions`); (b) in your Slack app → **Interactivity & Shortcuts** → toggle ON → set **Request URL** to that webhook URL; (c) copy the app's **Signing Secret** (Basic Information → App Credentials) into config sheet as `slack_signing_secret`. Now the "🛑 Stop localization" button on W_Master's start message works. Without this, the start message still posts but the button is inert (and any unsigned POST to the webhook is rejected).
 8. **Sheets UI: conditional formatting** on `needs_attention` column — `TRUE` red / `FALSE` green / `REVIEW` yellow. On `needs_retts` — `TRUE` green / `FALSE` red. See [`docs/sheets_schema.md`](docs/sheets_schema.md) for setup steps.
 9. **Run**:
     - **Auto**: drop an EN audio file (named `{lesson_id}.mp3`, e.g. `sleep_002.mp3`) into the Drive `01_input/` folder. W_Master picks it up within ~1 min, archives the previous run, then runs W1 → W2 → W3 and posts to Slack.
@@ -112,7 +118,8 @@ One row = one key. Read by all workflows. **Edit manually** when you need to twe
 |---|---|---|
 | **API auth** | `anthropic_api_key`, `gemini_api_key`, `elevenlabs_api_key`, `deepgram_api_key` (optional — actual auth via n8n credentials) | W1, W2, W3 |
 | **Drive folders** | `drive_input_folder_id`, `drive_output_folder_id`, `drive_output_full_folder_id`, `drive_output_vtt_folder_id`, `drive_archive_folder_id`, `sheets_document_id` (optional) | W_Master archive, W3 |
-| **Slack** | `slack_channel`, `w_regen_workflow_url` (optional — Slack link omitted if missing) | W_Master + W_Regen Slack messages |
+| **Slack** | `slack_channel`, `w_regen_workflow_url` (optional — Slack link omitted if missing), `slack_signing_secret` (verifies the Stop button) | W_Master + W_Regen + W_Abort Slack messages |
+| **Run state** *(managed by workflows — do not edit)* | `localization_run_token` (stamped at run start), `localization_abort_token` (set by Stop button) | W_Master, W_Abort, W3 Dispatch |
 | **Translation** | `tone_of_voice` (long ToV doc), `active_langs` (default `de,es,fr,it,pl,pt,tr` — gates every stage of W2 and W3; set to e.g. `de` for a single-lang dry-run) | W2, W3 |
 | **Timing** | `min_inter_segment_gap_sec` (0.4), `max_borrow_per_segment_sec` (2.0), `silence_lead_ratio` (0.2), `silence_lead_max_sec` (0.05), `expansion_threshold` (0.75) | W3 |
 | **Speed/retry** | `max_speed_up_delta` (0.20), `max_slow_down_delta` (0.15), `regen_concurrency` (5) | W2, W3, W_Regen |
@@ -185,12 +192,23 @@ Read by W2/W3 at runtime. 11 prompts + ToV. Edit a row to re-tune any prompt wit
 ├── PLAN.md                              # MVP done; post-MVP R1-R7+Phase 2 done; open ship items
 ├── DECISIONS.md                         # architecture decisions log (chronological)
 ├── workflows/                           # n8n workflow exports
-│   ├── W_Master.json                    # Drive folder trigger → W1 → W2 → W3 → Slack
+│   ├── W_Master.json                    # Drive folder trigger → start Slack (🛑 Stop) → archive → W1 → W2 → W3
 │   ├── W1_STT_and_Segment.json          # Deepgram STT → segments sheet
 │   ├── W2_Translate_v2.json             # Tone + Translate + Verify + Editor + Formality + Adapt
 │   ├── W3_Synthesize_v2.json            # TTS + Phase 1 timing + Phase 2 slowdown-to-fill + Concat + VTT
-│   └── W_Regen.json                     # webhook: atomic single-segment regenerate (in-place overwrite)
+│   ├── W3_Dispatch.json                 # per-lang continuation chain + cooperative abort checkpoint
+│   ├── W_Regen.json                     # webhook: atomic single-segment regenerate (in-place overwrite)
+│   ├── W_Abort.json                     # Slack interactivity webhook: verify signature → set abort flag
+│   └── W_Error.json                     # Error Trigger → Slack "❌ Локалізація впала" (failure notifier)
 ├── code_nodes/                          # JS for n8n Code-node bodies (reference copies)
+│   ├── build_started_slack.js           # W_Master: "localization started" Block Kit msg + Stop button
+│   ├── build_error_slack.js             # W_Error: failure notification message
+│   ├── prepare_run_token.js             # W_Master: write run_token / clear abort_token
+│   ├── check_abort_w3dispatch.js        # W3 Dispatch: halt chain if Stop was clicked for this run
+│   ├── w_abort_prep_signature.js        # W_Abort: assemble Slack signature base + raw body
+│   ├── w_abort_verify_parse.js          # W_Abort: verify HMAC + parse stop intent
+│   ├── w_abort_prepare_row.js           # W_Abort: build abort-token config row
+│   ├── w_abort_build_confirm.js         # W_Abort: confirmation Slack message
 │   ├── prepare_tone_analysis.js
 │   ├── parse_tone_analysis.js
 │   ├── prepare_and_expand.js
