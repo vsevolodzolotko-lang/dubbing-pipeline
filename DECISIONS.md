@@ -4,6 +4,86 @@
 
 ---
 
+### 2026-06-16 — SINGLE_FLIGHT_GUARD_AGAINST_DUPLICATE_DRIVE_TRIGGER
+
+**Контекст**: оператор кинув ОДИН файл `som_th_3` в `input/`, але n8n Google Drive Trigger (`fileCreated` + полінг) стрельнув **кілька разів** → кілька паралельних W_Master (Executions: запуски ~07:07 / 07:14 / 07:20, один W_Master ERROR «Starting soon»). Кожен W_Master на старті робить `Clear Sheet Tabs`. Другий ран очистив таблицю **посеред запису** першого: попередній W3 (мова pt, exec 336268) дописував `localizations`, його стерли, він продовжив і дописав **pt 050–073 у вже порожню табу**. Потім новий ран дописав pl 001–073 і pt 001–049. Підтверджено порядком рядків у CSV-експорті: блоки `pt[050–073]` → `pl[001–073]` → `pt[001–049]`, it/tr відсутні. Також один W3-hop відпрацював за 1.09s (0 джобів) — мова потрапила у вікно, коли переклади саме чистились.
+
+**Діагноз**: continuation-chain (B2) **сам по собі коректний** — послідовний, по парі `W3 Dispatch → W3 Synthesize` на мову. Зламали його **повторні тригери**: не було жодного захисту, що не дає другому W_Master стартувати/чистити, поки перший ще синтезує. Існував лише abort-токен ([check_abort_w3dispatch.js](code_nodes/check_abort_w3dispatch.js)), але він не про «уже виконується».
+
+**Рішення**: **single-flight guard** на старті W_Master + **release-маркер** у кінці синтезу (W3, остання мова). Лок тримається весь час життя рану — від старту W_Master до того, як W3 завершить ОСТАННЮ мову (саме там реальний фінал, бо W_Master завершується раніше через fire-and-forget W3).
+
+Лог вважає ран **активним** (новий тригер тихо виходить), коли config `localization_run_token`:
+- стоїть, AND
+- не аборнутий (`abort_token !== run_token`), AND
+- не завершений (`completed_token !== run_token`), AND
+- свіжий (`age < localization_stale_run_minutes`, дефолт 60).
+
+Happy-path звільнення — миттєве (W3 пише `completed_token = run_token` на `is_last_lang`), без часового вікна. Freshness-escape — лише страховка від **зірваного** рану (W2 ERROR / W_Master «Starting soon» реально були в цьому інциденті), щоб мертвий лок не заклинив пайплайн назавжди.
+
+**Чому маркер завершення в W3, а не в W_Master**: хвіст W_Master (`Pass Lessons (after W3) → … → Slack Notify`) **відключений** — Execute W3 fire-and-forget (`waitForSubWorkflow:false`, рішення B2), тож W_Master завершується ще до кінця синтезу. Єдина точка, що знає про справжній фінал — W3 на `is_last_lang` (там само шлеться ✅ Slack). Тому release пишемо там.
+
+**Покриття / межі:**
+- Ловить спостережений сценарій (тригери з різницею в хвилини, що накладаються на активний ран) — другий W_Master бачить незавершений свіжий токен і **не чистить таблицю**.
+- **НЕ** ловить два майже-одночасні тригери (суб-секунда), коли нічого не активне: обидва прочитають «не активно» до того, як перший впише токен (TOCTOU). Sheets не дає атомарного локу. Свідомо прийнято: спостережувана патерн — хвилини, не суб-секунди; W_Master вписує токен за секунди. File-id дедуп на тригері мав би ту саму TOCTOU-діру, тож НЕ додано (обговорено з оператором).
+- Аборт коректно звільняє лок (`abort_token === run_token` → не активно), новий ран дозволено.
+
+**Files changed:**
+- `workflows/W_Master.json` — +3 ноди: `Read Config (Guard)` (Sheets) → `Check Single-Flight` (code) → `Already Running?` (IF). Once Per Run тепер фанить у guard; гілка IF false(не активно) → відновлені `Read Config (Archive)` + `Read Config (Start)`; true(активно) → dead-end (code логує skip). Нод 40 → 43. Позиції наявних нод збережено ([feedback_workflow_node_layout]), нові на row y=5240.
+- `workflows/W3_Synthesize_v2.json` — +2 ноди: `Save Full to Drive` → `Prepare Completion Marker` (code, гейт `is_last_lang!==false`) → `Mark Run Completed` (Sheets appendOrUpdate). Нод 35 → 37. Існуючий фан-аут Save Full (Build Slack + Prepare Next Lang) збережено, додано 3-тю гілку.
+- `code_nodes/check_single_flight.js`, `code_nodes/prepare_completion_marker.js` — нові, додані в мапінг `scripts/sync_jscode.js` (30 нод у синку). `sync_jscode.js` ідемпотентний.
+- `docs/config_keys.md` — нові ключі `localization_run_completed_token` (auto), `localization_stale_run_minutes` (дефолт 60).
+
+**Verification:**
+- Обидва JSON парсяться ✓, усі connection endpoints резолвляться ✓, висячих немає ✓. `Once Per Run → Read Config (Guard) → Check Single-Flight → Already Running? →(false) Read Config Archive+Start` ✓; `Save Full to Drive → Prepare Completion Marker → Mark Run Completed` ✓.
+- `node scripts/sync_jscode.js` → «no changes — 30 node(s) already in sync» (код-ноди байт-у-байт з JSON).
+- **e2e — pending**: чистий перезапуск `som_th_3` після зупинки поточного зіпсованого рану; перевірити, що дубль-тригер під час активного рану дає skip (console.warn «IGNORING duplicate trigger») і таблицю не чистить.
+
+**Future work:**
+- Якщо суб-секундні дублі тригера колись стануть реальними — потрібен справжній атомарний лок (напр. n8n Static Data з read-after-write, або зовнішній mutex), бо Sheets TOCTOU не закрити.
+- Watchdog/heartbeat для повного дауну n8n (уже згадано в [SLACK_ERROR_NOTIFICATION_WORKFLOW]).
+
+---
+
+### 2026-06-16 — ARCHIVE_SNAPSHOT_SETTINGS_CARRYOVER
+
+**Контекст**: snapshot живої таблиці (`Copy Sheet Snapshot`) знімається на **старті нового рану** — у гілці архіву W_Master, до `Clear Sheet Tabs`. Але оператор міняє налаштування (`config`/`voices`/`prompts`) під новий ран ще ДО того, як кидає файл. Тож на момент копіювання таби налаштувань уже містять значення НОВОГО рану, а не того, що архівується. Дані (`segments`/`localizations`) на цей момент ще СТАРОГО рану (clear іде пізніше), тому вони коректні — кривими виходять саме налаштування. Снепшот = франкенштейн: дані старого рану + налаштування нового.
+
+**Чому не можна просто «зняти раніше»**: повні дані старого рану існують лише в КІНЦІ рану (W3 дописує `localizations`), а чисті налаштування — лише на СТАРТІ. Один момент знімку не ловить обидва. Або зсувати знімок у кінець рану (варіант A), або перекладати значення між двома знімками (варіант B). Обрано **B** (зберігає пост-ран регени, весь фікс у W_Master, стійкий до абортів). З двох форм B обрано **B1 — один чистий файл снепшоту** (проти B2 — два файли в архіві; B1 = простіший restore, рівно як описує поточний restore-розділ).
+
+**Рішення**: standing JSON-файл `_run_settings_carryover.json` у archive parent (`drive_archive_folder_id`), що тримає налаштування рану, який ЗАРАЗ виконується. Кожен крок архіву **послідовно**: (1) перезаписує таби `config`/`voices`/`prompts` свіжого снепшоту значеннями з carry-over (= налаштування ПОПЕРЕДНЬОГО рану), (2) перезаписує carry-over поточними живими налаштуваннями — для НАСТУПНОГО архіву. Інваріант: carry-over, записаний на архіві рану X = налаштування X (бо на момент архіву X живі налаштування — це X); споживається на архіві X+1 для фіксу снепшоту X.
+
+**Чому 9 нод, а не одна code-нода**: `this.helpers.httpRequestWithAuthentication` заблокований у Code-нодах на цій версії n8n (див. [code_nodes/README.md](code_nodes/README.md) — тому `predelete_drive_files.js` лежить невикористаним). Тож carry-over зроблено в стилі решти архівного ланцюга: Code-планувальники + окремі HTTP Request ноди (`authentication: predefinedCredentialType`). Ланцюг (між `Copy Sheet Snapshot` і `Plan Subfolders`, новий row y=5024):
+
+`Plan Settings Carryover` (code — будує URL-и + ids) → `Read Live Settings` (Sheets `values:batchGet` живих config/voices/prompts) → `Find Carryover` (Drive search by name, `orderBy=createdTime desc`) → `Read Carryover Content` (Drive `alt=media`) → `Build Snapshot Patch + Carryover` (code — будує batchUpdate-body + carry-over payload) → `Patch Snapshot Settings` (Sheets `values:batchUpdate` на КОПІЇ снепшоту) → `Delete Old Carryover` (Drive DELETE) → `Create Carryover File` (Drive create) → `Upload Carryover Content` (Drive PATCH `uploadType=media`).
+
+**Інженерні рішення:**
+- **Best-effort, ніколи не блокує ран**: усі 9 нод мають `onError: continueRegularOutput`, code-ноди не кидають винятків. Будь-який збій Drive/Sheets → снепшот лишається з живими налаштуваннями (= сьогоднішня поведінка), ран іде далі (Move/Clear/W1/W2/W3). Свідомо слабше за гарантію `Copy Sheet Snapshot` (яка throws перед деструктивом): дані не втрачаються в жодному разі, а зіпсовані налаштування в снепшоті раз на збій — прийнятно.
+- **Без рейсу**: весь carry-over в ОДНІЙ (архівній) гілці, послідовно — читаємо попередній carry-over ДО того, як перезаписуємо поточним. Стартова гілка (`Read Config (Start) → Write Run Token`) НЕ чіпається.
+- **Bootstrap (перший ран)**: carry-over ще нема → `Read Carryover Content` 404 (continue) → `Build` фолбекає на живі налаштування як source патчу → патч стає no-op (снепшот і так має живі налаштування) + сіється carry-over. Один перехідний снепшот лишається з живими налаштуваннями; з рану 2 — повністю коректно.
+- **Стійкість до абортів**: carry-over пишеться в архівній гілці на КОЖНОМУ старті рану, не залежить від завершення. Зірваний/аборнутий ран → наступний архів усе одно має коректні налаштування того рану, що реально виконувався.
+- **Патч без окремого clear**: `Build` пробиває кожен таб до фіксованого блоку (200 рядків × 2/26/3 кол., порожні `''`), тож коротша попередня таблиця обнуляє хвостові рядки, які притягнула жива копія. Запис у КОПІЮ (`Copy Sheet Snapshot.id`), не в живу.
+- **Carry-over як JSON через `uploadType=media` + `specifyBody: json`**: тіло запиту (JSON-рядок) стає вмістом файлу, на download n8n парсить назад. Без ручного multipart. Auto-managed (delete-old + create-new щоразу) — без operator setup і без нового config key.
+
+**Альтернативи:**
+- **A (знімок у кінці рану)** — один Drive-copy, коли і налаштування, і дані «живі». Відхилено: губить пост-ран регени (морозиться до них), чіпає W3_Synthesize (`is_last_lang` на hot-path), потребує fallback для зірваних ранів (standing-знімок розсинхронізується з раном, що архівується).
+- **B2 (два файли)** — теперішній снепшот = файл даних + окремий `settings_snapshot` зі старту рану (тільки Drive copy/move, ~4 ноди). Відхилено оператором: restore читає дані й налаштування з різних файлів.
+- **Fixed carry-over Sheet (ID у config)** — прибрав би Find/Create dance (~3 ноди менше), але +1 config key + one-time setup. Відхилено на користь auto-managed JSON (нуль setup; шанує [feedback_verify_sheet_columns]).
+
+**Files changed:**
+- `workflows/W_Master.json` — +9 нод (inline, best-effort), rewire `Copy Sheet Snapshot → … → Plan Subfolders`. Нод тепер 40 (було 31). Усі існуючі positions збережено ([feedback_workflow_node_layout]) — нові на row y=5024. diff суто адитивний (332 insert, 1 delete = перевита конекція).
+- `docs/drive_structure.md`, `README.md`, `docs/config_keys.md`, `docs/operator_manual.md`, `code_nodes/README.md`, `PLAN.md` — синхронізовано.
+
+**Verification:**
+- W_Master.json парситься ✓, ids унікальні ✓, всі connection endpoints резолвляться ✓, ланцюг `Copy Sheet Snapshot → Plan Settings Carryover → … → Upload Carryover Content → Plan Subfolders` ✓. Optional chaining прибрано з URL-виразів (`(( … )[0] || {}).id`) для сумісності зі старішим движком виразів n8n.
+- **Деплой + смоук-тест пройдено 2026-06-16**: W_Master імпортовано, 9 нод зелені, `_run_settings_carryover.json` створюється в archive parent.
+- **Повний correctness e2e — pending** (зараз нема часу): процедура в [docs/archive_carryover_e2e_test.md](docs/archive_carryover_e2e_test.md) — 2 рани з config-ключем `_carryover_test` A→B, перевірити, що `sheet_snapshot_{run_1}` тримає `A`, а carry-over — `B`. Окремо підтвердити, що `Patch Snapshot Settings` пише в КОПІЮ, не в живу таблицю.
+
+**Future work:**
+- Straggler carry-over файли, якщо `Delete Old` колись фейлить (зараз беремо newest через `orderBy=createdTime desc`, тож зайві ігноруються, але теоретично накопичуються).
+- Якщо знадобиться точність налаштувань НА МОМЕНТ старту (а не архіву) — стартова гілка могла б сіяти carry-over; зараз архівна гілка читає живі налаштування на старті наступного рану, що тотожно (між старт-гілкою і clear ніщо не міняє config/voices/prompts).
+
+---
+
 ### 2026-06-12 — SLACK_ERROR_NOTIFICATION_WORKFLOW
 
 **Контекст**: аудит логіки Slack-повідомлень (після `SLACK_RUN_STARTED_AND_COOPERATIVE_STOP_BUTTON`) виявив, що **всі** повідомлення сидять на happy-path, а Error Trigger / `errorWorkflow` не налаштований **ніде** (перевірено grep'ом). Термінальних позитивних сигналів два — ✅ `Dubbing complete` (W3, остання мова) і 🛑 `Локалізацію зупинено` (клік). Будь-яке інше завершення = тиша: оператор бачить лише 🚀 «запущено» і не знає, чи ран живий і чи можна запускати новий. Тихі сценарії: W3 падає/зависає на мові, W1/W2 падають, ланка ланцюга не запустила наступну мову, W_Abort збій.

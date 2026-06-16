@@ -237,7 +237,10 @@
           "id": "MoWG4XRaoJGU18eu",
           "name": "Google Drive account"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
     },
     {
       "parameters": {
@@ -555,7 +558,10 @@
           "id": "MoWG4XRaoJGU18eu",
           "name": "Google Drive account"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
     },
     {
       "parameters": {
@@ -674,7 +680,10 @@
           "id": "MoWG4XRaoJGU18eu",
           "name": "Google Drive account"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
     },
     {
       "parameters": {
@@ -1044,6 +1053,62 @@
           "name": "Slack account"
         }
       }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Release the single-flight lock when the WHOLE run finishes. Runs on the FINAL language only\n// (is_last_lang===true, or null for a legacy single-run that did every lang at once) — the same\n// gate as the completion Slack. Writes localization_run_completed_token = current run_token so the\n// next W_Master start sees the lock released (W_Master \"Check Single-Flight\" guard).\n// is_last_lang===false → a mid-chain hop → emit nothing (lock stays held until the last language).\nif ($('Get Params').first().json.is_last_lang === false) return [];\nconst cfg = {};\n$('Read Config').all().forEach(i => { if (i.json && i.json.key) cfg[i.json.key] = i.json.value; });\nconst runToken = (cfg.localization_run_token || '').toString().trim();\nif (!runToken) return [];   // manual/legacy run with no token — nothing to release\nreturn [{ json: { key: 'localization_run_completed_token', value: runToken } }];\n"
+      },
+      "id": "fbc60010-0000-4000-8000-prepcomplmrk1",
+      "name": "Prepare Completion Marker",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        62352,
+        31616
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "config",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "key": "={{ $json.key }}",
+            "value": "={{ $json.value }}"
+          },
+          "matchingColumns": [
+            "key"
+          ]
+        },
+        "options": {}
+      },
+      "id": "fbc60011-0000-4000-8000-markruncmpl01",
+      "name": "Mark Run Completed",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        62592,
+        31616
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
     }
   ],
   "pinData": {},
@@ -1394,6 +1459,11 @@
             "node": "Prepare Next Lang",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "Prepare Completion Marker",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -1414,6 +1484,17 @@
         [
           {
             "node": "Fire Next Lang",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Completion Marker": {
+      "main": [
+        [
+          {
+            "node": "Mark Run Completed",
             "type": "main",
             "index": 0
           }

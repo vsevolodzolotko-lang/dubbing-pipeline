@@ -23,6 +23,10 @@ The pipeline uses 5 Drive folders, identified in the operator's UI as `01_input`
                                      Cue text   = text_translated column from localizations
 
 05_archive/                          ← drive_archive_folder_id
+├── _run_settings_carryover.json          standing file (auto-managed): config/voices/prompts of
+│                                         the run currently executing; folds into the NEXT run's
+│                                         snapshot so its settings match the archived run, not the
+│                                         edits already made for the next run (settings carry-over)
 └── {prev_basename}_{YYYY-MM-DD_HH-MM}/    one subfolder per W_Master run, Kyiv-local time
     ├── 01_input/{prev_lesson}.mp3         the EN source from the previous run
     ├── 02_output/{prev_lesson}_seg_*.wav  all per-segment WAVs from previous run
@@ -30,7 +34,8 @@ The pipeline uses 5 Drive folders, identified in the operator's UI as `01_input`
     ├── 04_vtt/{prev_lesson}_full_*.vtt    all VTT files (one per lang)
     └── sheet_snapshot_{archive_name}      Drive copy of the live Google Sheet at archive time
                                            (independent Sheet — edits to the original after this
-                                            point don't affect the snapshot)
+                                            point don't affect the snapshot). config/voices/prompts
+                                            tabs reflect the ARCHIVED run via settings carry-over.
 ```
 
 ## File-name conventions
@@ -54,9 +59,9 @@ So while individual files can drift in size, the full-lesson WAV per language is
 
 Triggered every time a new file is dropped into `01_input/`:
 
-1. **Before W1 fires**: W_Master's `Archive Previous Run` chain (11 nodes) lists all files in `01_input/`, `02_output/`, `03_full/`, `04_vtt/`, excludes any file whose Drive ID matches the just-dropped trigger file(s), and moves the remainder via Drive PATCH `addParents/removeParents` (not copy) into `05_archive/{prev_basename}_{YYYY-MM-DD_HH-MM}/{01_input,02_output,03_full,04_vtt}/`.
+1. **Before W1 fires**: W_Master's `Archive Previous Run` chain (20 nodes) lists all files in `01_input/`, `02_output/`, `03_full/`, `04_vtt/`, excludes any file whose Drive ID matches the just-dropped trigger file(s), and moves the remainder via Drive PATCH `addParents/removeParents` (not copy) into `05_archive/{prev_basename}_{YYYY-MM-DD_HH-MM}/{01_input,02_output,03_full,04_vtt}/`.
 
-2. **Sheet snapshot**: also copies the live Google Sheet (all 5 tabs: `config`, `segments`, `voices`, `localizations`, `prompts`) into the archive root as `sheet_snapshot_{archive_name}` via Drive's file-copy API. Result is an independent Sheet — future edits to the original don't change it. If this copy fails → the workflow halts BEFORE any destructive operation (no data loss possible).
+2. **Sheet snapshot + settings carry-over**: also copies the live Google Sheet (all 5 tabs: `config`, `segments`, `voices`, `localizations`, `prompts`) into the archive root as `sheet_snapshot_{archive_name}` via Drive's file-copy API. Result is an independent Sheet — future edits to the original don't change it. Because the copy is taken at the *start* of the new run, its `config`/`voices`/`prompts` tabs would otherwise hold the settings the operator already entered for the NEW run; a follow-on **settings carry-over** chain (9 nodes) overwrites those three tabs with the *previous* run's settings, read from a standing `_run_settings_carryover.json` in the archive parent, so the snapshot faithfully matches the archived run. The carry-over file is then refreshed with the current live settings for the next cycle. The data tabs (`segments`/`localizations`) are still the previous run's at this point (cleared only in step 3), so they need no carry-over. All carry-over nodes are best-effort (`onError: continueRegularOutput`) — a carry-over failure leaves live settings in the snapshot and never blocks the run. If the file-copy itself fails → the workflow halts BEFORE any destructive operation (no data loss possible).
 
 3. **Tab clear**: after moves complete, `segments!A2:ZZ` and `localizations!A2:ZZ` of the LIVE sheet are batch-cleared via Sheets `values:batchClear` so W1/W2/W3 start fresh. `voices`, `prompts`, `config` tabs are NOT touched (persistent setup data).
 

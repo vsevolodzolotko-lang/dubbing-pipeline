@@ -26,9 +26,10 @@ Automated dubbing for wellness/meditation video courses. English audio in → 7 
               ↓
               (branch) write run_token / clear abort_token → Slack "🚀 Localization started" + 🛑 Stop button
               ↓
-              Archive chain (11 nodes): list 4 working folders → exclude just-dropped trigger files
+              Archive chain (20 nodes): list 4 working folders → exclude just-dropped trigger files
                   → create 05_archive/{prev_basename}_{YYYY-MM-DD_HH-MM} (Kyiv tz)
                   → copy live Sheet as sheet_snapshot_{archive_name}
+                  → settings carry-over: rewrite snapshot's config/voices/prompts with prev run's settings
                   → move stale files via Drive PATCH addParents/removeParents
                   → clear segments+localizations tabs (voices/prompts/config untouched)
               ↓
@@ -86,8 +87,8 @@ Output in Drive (the operator's folder layout):
 
 1. **Google Sheet** — create a sheet with **5 tabs**: `config`, `segments`, `voices`, `localizations`, `prompts`. Schema details in [`docs/sheets_schema.md`](docs/sheets_schema.md). Required config keys: `anthropic_api_key`, `gemini_api_key`, `elevenlabs_api_key`, `tone_of_voice`, `drive_input_folder_id`, `drive_output_folder_id`, `drive_output_full_folder_id`, `drive_output_vtt_folder_id`, `drive_archive_folder_id`, `slack_channel`, `w_regen_workflow_url`, `slack_signing_secret` (for the Stop button). Full list (with defaults + dead keys): [`docs/config_keys.md`](docs/config_keys.md).
 2. **n8n credentials** — bind:
-    - Google Sheets account (for all Sheets nodes; ALSO bound on W_Master `Archive Previous Run`-step Sheets-clear HTTP node)
-    - Google Drive account (for all Drive nodes, including W_Master's Drive Trigger and the 5 archive HTTP nodes)
+    - Google Sheets account (for all Sheets nodes; ALSO bound on W_Master archive-step Sheets HTTP nodes: `Clear Sheet Tabs`, `Read Live Settings`, `Patch Snapshot Settings`)
+    - Google Drive account (for all Drive nodes, including W_Master's Drive Trigger and the archive HTTP nodes: `Create Archive Root`, `Copy Sheet Snapshot`, `Create Subfolder`, `Move File`, plus the 5 settings-carry-over nodes `Find`/`Read`/`Delete Old`/`Create`/`Upload Carryover`)
     - Deepgram Header Auth (`Authorization: Token <key>`) — for W1 STT
     - ElevenLabs Header Auth (`xi-api-key: <key>`) — for W3 TTS
     - Slack account (Bot User OAuth Token `xoxb-...`) — for W_Master + W_Regen + W_Abort Slack notifications (scope `chat:write`)
@@ -161,7 +162,7 @@ One row per lang. Read by **W3** during TTS. Set up once, rarely touched.
 
 ### `localizations` — run-time per-segment-per-lang diagnostics
 
-Written by **W3** during synthesize loop. One row per `(segment_id × lang)` combo. **Wiped at the start of every W_Master run** (rows 2+ batch-cleared by Archive Previous Run; previous data preserved in `05_archive/{archive_name}/sheet_snapshot_{archive_name}`).
+Written by **W3** during synthesize loop. One row per `(segment_id × lang)` combo. **Wiped at the start of every W_Master run** (rows 2+ batch-cleared by Archive Previous Run; previous data preserved in `05_archive/{archive_name}/sheet_snapshot_{archive_name}`). The snapshot's `config`/`voices`/`prompts` tabs reflect the archived run's settings via the settings carry-over (`_run_settings_carryover.json`), not edits already entered for the next run.
 
 Columns to watch when debugging:
 - `final_duration_sec` — per-language file duration. May differ across langs for non-movement segments (one lang borrowed into trailing silence, another didn't). Concat-time Trim Lead For Sequence keeps full WAVs EN-aligned.
