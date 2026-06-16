@@ -272,6 +272,238 @@
     },
     {
       "parameters": {
+        "jsCode": "// Plan Settings Carryover — first node of the settings carry-over chain that fixes the\n// archive snapshot's settings tabs. See DECISIONS ARCHIVE_SNAPSHOT_SETTINGS_CARRYOVER.\n//\n// THE BUG: Copy Sheet Snapshot runs at the START of the NEW run, so the snapshot's\n// config/voices/prompts tabs hold the settings the operator already entered for the NEW run\n// — not the run being archived. (segments/localizations are still the previous run's — they\n// get cleared only later — so DATA is correct; only the settings tabs are wrong.)\n//\n// THE FIX: keep a standing JSON carry-over file in the archive parent folder holding the\n// CURRENTLY-EXECUTING run's settings. Each archive step (a) overwrites the fresh snapshot's\n// settings tabs from the carry-over (= the PREVIOUS run's settings), then (b) rewrites the\n// carry-over with the current live settings for the NEXT archive to consume.\n//\n// Best-effort: every node in this chain has onError=continueRegularOutput and the code never\n// throws, so any Drive/Sheets hiccup just leaves the snapshot with live settings (today's\n// behaviour) and the run proceeds — no data loss, no halt before the W1/W2/W3 fan-out.\nconst plan = $('Plan Archive').first().json;\nconst snap = $('Copy Sheet Snapshot').first().json || {};\n\nconst SETTING_TABS = ['config', 'voices', 'prompts'];\nconst RANGES = { config: 'config!A:B', voices: 'voices!A:Z', prompts: 'prompts!A:C' };\nconst CARRYOVER_NAME = '_run_settings_carryover.json';\n\nconst liveSheetId = plan.sheet_id;\nconst snapshotId = snap.id || null;\nconst archiveParent = plan.archive_parent;\nconst enc = encodeURIComponent;\n\nconst live_batchget_url =\n  `https://sheets.googleapis.com/v4/spreadsheets/${liveSheetId}/values:batchGet?` +\n  SETTING_TABS.map((t) => `ranges=${enc(RANGES[t])}`).join('&') + '&majorDimension=ROWS';\n\nconst q = `name = '${CARRYOVER_NAME}' and '${archiveParent}' in parents and trashed = false`;\nconst find_url =\n  `https://www.googleapis.com/drive/v3/files?q=${enc(q)}` +\n  `&orderBy=${enc('createdTime desc')}&fields=${enc('files(id,name)')}` +\n  '&supportsAllDrives=true&includeItemsFromAllDrives=true';\n\nif (!snapshotId) console.warn('[Carryover] Copy Sheet Snapshot returned no file id — snapshot patch will no-op; run continues');\n\nreturn [{ json: {\n  setting_tabs: SETTING_TABS, ranges: RANGES, carryover_name: CARRYOVER_NAME,\n  live_sheet_id: liveSheetId, snapshot_id: snapshotId, archive_parent: archiveParent,\n  live_batchget_url, find_url,\n} }];\n"
+      },
+      "id": "bbbb0001-0001-0001-0001-carryplan0001",
+      "name": "Plan Settings Carryover",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        15344,
+        5024
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "predefinedCredentialType",
+        "method": "GET",
+        "url": "={{ $('Plan Settings Carryover').first().json.live_batchget_url }}",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "options": {}
+      },
+      "id": "bbbb0002-0002-0002-0002-readlivecfg01",
+      "name": "Read Live Settings",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        15544,
+        5024
+      ],
+      "executeOnce": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "predefinedCredentialType",
+        "method": "GET",
+        "url": "={{ $('Plan Settings Carryover').first().json.find_url }}",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "options": {}
+      },
+      "id": "bbbb0003-0003-0003-0003-findcarry0001",
+      "name": "Find Carryover",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        15744,
+        5024
+      ],
+      "executeOnce": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "MoWG4XRaoJGU18eu",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "predefinedCredentialType",
+        "method": "GET",
+        "url": "=https://www.googleapis.com/drive/v3/files/{{ (($('Find Carryover').first().json.files || [])[0] || {}).id || 'missing' }}?alt=media&supportsAllDrives=true",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "options": {}
+      },
+      "id": "bbbb0004-0004-0004-0004-readcarry0001",
+      "name": "Read Carryover Content",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        15944,
+        5024
+      ],
+      "executeOnce": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "MoWG4XRaoJGU18eu",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build Snapshot Patch + Carryover — assembles (1) the Sheets batchUpdate body that rewrites\n// the snapshot's settings tabs with the PREVIOUS run's settings, and (2) the carry-over JSON\n// payload holding the CURRENT live settings for the next archive. See DECISIONS\n// ARCHIVE_SNAPSHOT_SETTINGS_CARRYOVER. Never throws (best-effort chain).\n//\n// Inputs (by name):\n//   Plan Settings Carryover — tab list / ids\n//   Read Live Settings      — batchGet valueRanges of LIVE config/voices/prompts\n//   Read Carryover Content  — previous run's carry-over JSON, or an error item on first run\n//\n// First run (no carry-over yet): we fall back to the live settings as the patch source, which\n// makes the snapshot patch a harmless no-op (the snapshot already holds live settings) and we\n// just seed the carry-over file.\nconst plan = $('Plan Settings Carryover').first().json;\nconst TABS = plan.setting_tabs;\n\n// LIVE settings → { config:[[...]], voices:[[...]], prompts:[[...]] }\nconst liveVR = ($('Read Live Settings').first().json || {}).valueRanges || [];\nconst live = {};\nTABS.forEach((t, i) => { live[t] = (liveVR[i] && liveVR[i].values) || []; });\n\n// PREVIOUS run's settings from the carry-over file (defensive about shape / first run)\nlet prevRaw = null;\ntry { prevRaw = $('Read Carryover Content').first().json; } catch (e) { prevRaw = null; }\nconst prev = prevRaw && prevRaw.tabs ? prevRaw.tabs\n  : (prevRaw && prevRaw.data && prevRaw.data.tabs ? prevRaw.data.tabs : null);\n\nconst usedPrev = !!(prev && TABS.some((t) => Array.isArray(prev[t]) && prev[t].length));\nconst source = usedPrev ? prev : live;\n\n// Pad each tab to a generous fixed block so a SHORTER previous table also blanks any trailing\n// rows the live copy carried — no separate batchClear node needed.\nconst PAD_ROWS = 200;\nconst COLS = { config: 2, voices: 26, prompts: 3 };\nconst endCol = (n) => { let s = ''; let x = n; while (x > 0) { const m = (x - 1) % 26; s = String.fromCharCode(65 + m) + s; x = Math.floor((x - 1) / 26); } return s; };\nfunction pad(values, cols) {\n  const out = [];\n  for (let r = 0; r < PAD_ROWS; r++) {\n    const row = (values[r] || []).slice(0, cols);\n    while (row.length < cols) row.push('');\n    out.push(row);\n  }\n  return out;\n}\nconst data = TABS.map((t) => {\n  const cols = COLS[t] || 26;\n  return { range: `${t}!A1:${endCol(cols)}${PAD_ROWS}`, majorDimension: 'ROWS', values: pad(source[t] || [], cols) };\n});\n\nconst carryover_doc = {\n  saved_at_archive: $('Plan Archive').first().json.archive_name,\n  saved_for_run: ($('Once Per Run').first().json.new_file_names || []).join(','),\n  tabs: live,\n};\n\nconsole.log(`[Carryover] snapshot patch source = ${usedPrev ? 'previous-run carry-over' : 'live (first run / no carry-over — no-op)'}`);\nreturn [{ json: { snapshot_patch: { valueInputOption: 'RAW', data }, carryover_doc, used_prev: usedPrev } }];\n"
+      },
+      "id": "bbbb0005-0005-0005-0005-buildpatch001",
+      "name": "Build Snapshot Patch + Carryover",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        16144,
+        5024
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "predefinedCredentialType",
+        "method": "POST",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/{{ $('Plan Settings Carryover').first().json.snapshot_id }}/values:batchUpdate",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Build Snapshot Patch + Carryover').first().json.snapshot_patch) }}",
+        "options": {}
+      },
+      "id": "bbbb0006-0006-0006-0006-patchsnap0001",
+      "name": "Patch Snapshot Settings",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        16344,
+        5024
+      ],
+      "executeOnce": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "predefinedCredentialType",
+        "method": "DELETE",
+        "url": "=https://www.googleapis.com/drive/v3/files/{{ (($('Find Carryover').first().json.files || [])[0] || {}).id || 'missing' }}?supportsAllDrives=true",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "options": {}
+      },
+      "id": "bbbb0007-0007-0007-0007-delcarry00001",
+      "name": "Delete Old Carryover",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        16544,
+        5024
+      ],
+      "executeOnce": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "MoWG4XRaoJGU18eu",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "predefinedCredentialType",
+        "method": "POST",
+        "url": "https://www.googleapis.com/drive/v3/files",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "supportsAllDrives",
+              "value": "true"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ name: $('Plan Settings Carryover').first().json.carryover_name, mimeType: 'application/json', parents: [$('Plan Settings Carryover').first().json.archive_parent] }) }}",
+        "options": {}
+      },
+      "id": "bbbb0008-0008-0008-0008-createcarry01",
+      "name": "Create Carryover File",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        16744,
+        5024
+      ],
+      "executeOnce": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "MoWG4XRaoJGU18eu",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "predefinedCredentialType",
+        "method": "PATCH",
+        "url": "=https://www.googleapis.com/upload/drive/v3/files/{{ $('Create Carryover File').first().json.id }}",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "uploadType",
+              "value": "media"
+            },
+            {
+              "name": "supportsAllDrives",
+              "value": "true"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Build Snapshot Patch + Carryover').first().json.carryover_doc) }}",
+        "options": {}
+      },
+      "id": "bbbb0009-0009-0009-0009-uploadcarry01",
+      "name": "Upload Carryover Content",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        16944,
+        5024
+      ],
+      "executeOnce": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "MoWG4XRaoJGU18eu",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
         "jsCode": "// Plan Subfolders — emits one item per archive subfolder we need to create.\n// Skips any src_key that has no files in the plan (e.g. if 04_vtt had 0 leftovers,\n// we don't create an empty 04_vtt subfolder).\nconst plan = $('Plan Archive').first().json;\nconst rootId = $('Create Archive Root').first().json.id;\nconst presentKeys = new Set(plan.files.map(f => f.src_key));\nconst order = ['01_input', '02_output', '03_full', '04_vtt'];\nreturn order\n  .filter(k => presentKeys.has(k))\n  .map(k => ({ json: { name: k, parent: rootId } }));"
       },
       "id": "aaaa7777-7777-7777-7777-plansubfldrs01",
@@ -800,6 +1032,85 @@
           "name": "Slack account"
         }
       }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "config",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "f10a0010-0000-4000-8000-readcfgguard1",
+      "name": "Read Config (Guard)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        13776,
+        5240
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Single-flight guard (W_Master, runs right after Once Per Run, BEFORE the archive/clear chain).\n// Prevents a duplicate Drive trigger (n8n googleDriveTrigger can fire several times for ONE\n// upload) from starting a SECOND run that would Clear Sheet Tabs mid-write of the first run —\n// the root cause of the 2026-06-16 som_th_3 stomp (pl/pt fragmented, it/tr lost).\n//\n// A run is ACTIVE (so THIS execution must bail) when the config run_token:\n//   - is set, AND\n//   - was NOT aborted    (abort_token     !== run_token), AND\n//   - has NOT completed  (completed_token !== run_token), AND\n//   - is still fresh     (age < stale window — a crashed run never marks completion, so the\n//                         freshness escape prevents it from wedging the pipeline forever).\n// W3 writes localization_run_completed_token = run_token on the final language (is_last_lang),\n// so a normally-finished run releases the lock immediately — no time window needed in the happy path.\nconst cfg = {};\n$('Read Config (Guard)').all().forEach(i => { if (i.json && i.json.key) cfg[i.json.key] = i.json.value; });\n\nconst runToken       = (cfg.localization_run_token || '').toString().trim();\nconst abortToken     = (cfg.localization_abort_token || '').toString().trim();\nconst completedToken = (cfg.localization_run_completed_token || '').toString().trim();\nconst STALE_MIN      = parseFloat(cfg.localization_stale_run_minutes) || 60;\n\nlet ageMin = Infinity;\nconst started = Date.parse(runToken);            // run_token is an ISO timestamp (archive_run_at)\nif (!isNaN(started)) ageMin = (Date.now() - started) / 60000;\n\nconst runActive = !!(\n  runToken &&\n  abortToken     !== runToken &&\n  completedToken !== runToken &&\n  ageMin < STALE_MIN\n);\n\nconst once = $('Once Per Run').first().json || {};\nif (runActive) {\n  console.warn(`W_Master single-flight: run ${runToken} still active (age ${ageMin.toFixed(1)}m < ${STALE_MIN}m, not aborted, not completed) — IGNORING duplicate trigger for: ${(once.new_file_names||[]).join(', ') || '(unknown)'}`);\n} else {\n  console.log(`W_Master single-flight: clear to start (prev run_token=${runToken||'(none)'}, completed=${completedToken||'(none)'}, age=${ageMin===Infinity?'n/a':ageMin.toFixed(1)+'m'}).`);\n}\n// Pass Once Per Run's payload through unchanged so the downstream nodes on the \"not active\"\n// branch (Read Config Archive / Start) receive the same item shape they did before the guard.\nreturn [{ json: { ...once, run_active: runActive, guard_age_min: ageMin, guard_run_token: runToken } }];\n"
+      },
+      "id": "f10a0011-0000-4000-8000-checksingflt1",
+      "name": "Check Single-Flight",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        14000,
+        5240
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "run-active-check",
+              "leftValue": "={{ $json.run_active }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f10a0012-0000-4000-8000-alreadyrunif1",
+      "name": "Already Running?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        14224,
+        5240
+      ]
     }
   ],
   "pinData": {},
@@ -830,12 +1141,7 @@
       "main": [
         [
           {
-            "node": "Read Config (Archive)",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Read Config (Start)",
+            "node": "Read Config (Guard)",
             "type": "main",
             "index": 0
           }
@@ -963,7 +1269,7 @@
       "main": [
         [
           {
-            "node": "Plan Subfolders",
+            "node": "Plan Settings Carryover",
             "type": "main",
             "index": 0
           }
@@ -1118,6 +1424,144 @@
         [
           {
             "node": "Slack Notify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan Settings Carryover": {
+      "main": [
+        [
+          {
+            "node": "Read Live Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Live Settings": {
+      "main": [
+        [
+          {
+            "node": "Find Carryover",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Carryover": {
+      "main": [
+        [
+          {
+            "node": "Read Carryover Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Carryover Content": {
+      "main": [
+        [
+          {
+            "node": "Build Snapshot Patch + Carryover",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Snapshot Patch + Carryover": {
+      "main": [
+        [
+          {
+            "node": "Patch Snapshot Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Patch Snapshot Settings": {
+      "main": [
+        [
+          {
+            "node": "Delete Old Carryover",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delete Old Carryover": {
+      "main": [
+        [
+          {
+            "node": "Create Carryover File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Carryover File": {
+      "main": [
+        [
+          {
+            "node": "Upload Carryover Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload Carryover Content": {
+      "main": [
+        [
+          {
+            "node": "Plan Subfolders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Config (Guard)": {
+      "main": [
+        [
+          {
+            "node": "Check Single-Flight",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Single-Flight": {
+      "main": [
+        [
+          {
+            "node": "Already Running?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Already Running?": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Read Config (Archive)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Read Config (Start)",
             "type": "main",
             "index": 0
           }

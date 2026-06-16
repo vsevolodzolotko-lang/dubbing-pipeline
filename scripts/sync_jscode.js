@@ -17,6 +17,7 @@ const WORKFLOWS = {
   'W_Master.json': {
     'Prepare Token Rows':         'prepare_run_token.js',
     'Build Started Slack Message':'build_started_slack.js',
+    'Check Single-Flight':        'check_single_flight.js',
   },
   'W3_Dispatch.json': {
     'Check Abort':                'check_abort_w3dispatch.js',
@@ -52,6 +53,7 @@ const WORKFLOWS = {
     'Trim Lead For Sequence':   'trim_lead_for_sequence.js',
     'Build Full Audio Per Lang':'build_full_audio_per_lang.js',
     'Build VTT Per Lang':       'build_vtt_per_lang.js',
+    'Prepare Completion Marker':'prepare_completion_marker.js',
   },
   'W_Regen.json': {
     'Regen Engine':              'regen_synthesize.js',

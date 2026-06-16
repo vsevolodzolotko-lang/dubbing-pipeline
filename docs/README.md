@@ -13,5 +13,6 @@ Deep-dive reference for the pipeline. Casual overview lives in the root [`README
 | `cps_calibration.md` | When `needs_attention` rate is suspiciously high on a single language: how to derive better `cps_estimate_{lang}` values from a recent localizations CSV. |
 | `external_review_briefing.md` | Self-contained brief (~2800 words) for pasting into an external LLM (GPT-5 / Gemini / Opus) to evaluate prompt quality or suggest architecture changes. Snapshot of current state — re-generate manually after big pipeline edits. |
 | `day1_verification_checklist.md` | One-time setup checklist used during initial pipeline bring-up. Useful when onboarding a new clone of the repo. |
+| `archive_carryover_e2e_test.md` | Pending e2e test for the archive snapshot **settings carry-over** fix — 2-run procedure proving `sheet_snapshot_{...}` keeps the archived run's settings. Run when you have time (smoke test already passed). |
 
 Decisions log (why anything was designed the way it is) lives in the root [`DECISIONS.md`](../DECISIONS.md).

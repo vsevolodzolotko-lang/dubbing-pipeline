@@ -8,6 +8,9 @@
   },
   "scripts": {
     "sync": "node scripts/sync_jscode.js",
+    "ui": "npm --prefix ui run start",
+    "ui:dev": "npm --prefix ui run dev",
+    "ui:check": "npm --prefix ui run check",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
