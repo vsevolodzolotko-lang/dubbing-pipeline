@@ -1,6 +1,7 @@
 export type RunStateName =
   | 'SETUP_REQUIRED' | 'UNKNOWN' | 'IDLE' | 'STARTING' | 'ARCHIVING'
-  | 'STT' | 'TRANSLATING' | 'SYNTHESIZING' | 'COMPLETE'
+  | 'STT' | 'TRANSCRIPT_REVIEW' | 'TRANSLATING' | 'TRANSLATION_REVIEW'
+  | 'SYNTHESIZING' | 'AUDIO_REVIEW' | 'COMPLETE'
   | 'STOPPING' | 'STOPPED' | 'REGENERATING' | 'STALLED'
 
 export interface RunState {
@@ -10,6 +11,9 @@ export interface RunState {
   stalled: boolean
   reason?: string
   runTokenPresent: boolean
+  staged?: boolean
+  pipelineStage?: 'STT' | 'TRANSLATE' | 'SYNTH' | 'DONE' | null
+  stageStatus?: 'RUNNING' | 'REVIEW' | 'APPROVED' | null
   progress: {
     segCount: number
     langTotal: number
@@ -86,6 +90,19 @@ export interface Lesson {
   lessonId: string | null
   langs: string[]
   segments: SegmentRow[]
+}
+
+// Raw `segments` tab row (snake_case, as parsed from the sheet). Used by the
+// transcript/translation review gates, which read segments directly.
+export interface RawSegment {
+  segment_id: string
+  en_text: string
+  en_start_sec: string | number
+  en_end_sec: string | number
+  en_duration_sec: string | number
+  segment_type: string
+  movement_keywords: string
+  [key: string]: string | number // {lang}_text, adaptation_attempts, …
 }
 
 export interface SetupCheck {

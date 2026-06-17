@@ -1,0 +1,210 @@
+import { useEffect, useMemo, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { useSegments } from '../api/queries'
+import { useRunState } from '../api/useRunState'
+import { canWriteTranslations } from '../ui'
+import { GateBar } from '../components/GateBar'
+import { saveTranslations, checkTranslations, type CheckResult } from '../api/staged'
+import type { RawSegment } from '../api/types'
+
+const shortId = (id: string) => id.replace(/^.*_seg_/, 'seg ')
+const langsOf = (seg?: RawSegment) =>
+  seg ? Object.keys(seg).filter((k) => /^[a-z]{2}_text$/.test(k)).map((k) => k.slice(0, 2)) : []
+
+// results[lang][segmentId] = verdict
+type Results = Record<string, Record<string, CheckResult>>
+
+export function TranslationReview() {
+  const { state } = useRunState()
+  const { data, isLoading } = useSegments()
+  const qc = useQueryClient()
+  const editable = canWriteTranslations(state)
+  const segs = data?.rows ?? []
+  const langs = useMemo(() => langsOf(segs[0]), [segs])
+  const hasText = segs.some((s) => langs.some((l) => String(s[`${l}_text`] ?? '').trim()))
+  const translating = state?.state === 'TRANSLATING'
+
+  const [lang, setLang] = useState<string>('')
+  // sel === null means "all selected"; otherwise the explicit set of checked ids
+  const [sel, setSel] = useState<Set<string> | null>(null)
+  const [results, setResults] = useState<Results>({})
+  const [checking, setChecking] = useState(false)
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
+  const [msg, setMsg] = useState<string | null>(null)
+
+  useEffect(() => { if (langs.length && !langs.includes(lang)) setLang(langs[0]) }, [langs, lang])
+
+  const isChecked = (id: string) => sel === null || sel.has(id)
+  const allChecked = sel === null || segs.every((s) => sel.has(s.segment_id))
+  const selectedIds = segs.filter((s) => isChecked(s.segment_id)).map((s) => s.segment_id)
+
+  function toggle(id: string) {
+    const base = sel === null ? new Set(segs.map((s) => s.segment_id)) : new Set(sel)
+    if (base.has(id)) base.delete(id); else base.add(id)
+    setSel(base)
+  }
+  function toggleAll() { setSel(allChecked ? new Set() : null) }
+
+  const langResults = results[lang] || {}
+
+  async function check() {
+    if (!selectedIds.length) { setMsg('Не вибрано жодного сегмента'); return }
+    setChecking(true); setMsg(null)
+    try {
+      const r = await checkTranslations(lang, selectedIds)
+      setResults((prev) => ({ ...prev, [lang]: Object.fromEntries(r.results.map((x) => [x.segment_id, x])) }))
+    } catch (e) { setMsg(e instanceof Error ? e.message : 'помилка перевірки') }
+    finally { setChecking(false) }
+  }
+
+  async function commit(seg: RawSegment) {
+    const key = `${seg.segment_id}:${lang}`
+    const draft = drafts[key]
+    if (draft == null || draft === String(seg[`${lang}_text`] ?? '')) return
+    try { await saveTranslations([{ segmentId: seg.segment_id, lang, text: draft }]); qc.invalidateQueries({ queryKey: ['segments'] }) }
+    catch (e) { setMsg(e instanceof Error ? e.message : 'помилка збереження') }
+  }
+
+  async function applyOne(segId: string, text: string) {
+    try {
+      await saveTranslations([{ segmentId: segId, lang, text }])
+      qc.invalidateQueries({ queryKey: ['segments'] })
+      setDrafts((d) => { const n = { ...d }; delete n[`${segId}:${lang}`]; return n })
+      setResults((r) => { const lr = { ...(r[lang] || {}) }; delete lr[segId]; return { ...r, [lang]: lr } })
+    } catch (e) { setMsg(e instanceof Error ? e.message : 'помилка') }
+  }
+
+  async function applyAllSuggested() {
+    const rows = Object.values(langResults)
+      .filter((x) => !x.ok && x.suggestion)
+      .map((x) => ({ segmentId: x.segment_id, lang, text: x.suggestion as string }))
+    if (!rows.length) return
+    try {
+      await saveTranslations(rows)
+      qc.invalidateQueries({ queryKey: ['segments'] })
+      setDrafts({})
+      setResults((r) => ({ ...r, [lang]: {} }))
+    } catch (e) { setMsg(e instanceof Error ? e.message : 'помилка застосування') }
+  }
+
+  // soft-gate warnings: any checked-and-not-ok-and-still-suggested cell, all langs
+  const warnings: string[] = []
+  for (const [l, rs] of Object.entries(results)) {
+    for (const x of Object.values(rs)) if (!x.ok && x.suggestion) warnings.push(`${l} ${shortId(x.segment_id)}: ${x.comment}`)
+  }
+  const suggestedCount = Object.values(langResults).filter((x) => !x.ok && x.suggestion).length
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex-1 overflow-auto">
+        <div className="mx-auto max-w-3xl p-6">
+          <div className="mb-3 flex items-center gap-3">
+            <h1 className="text-lg font-semibold">Перевірка перекладу</h1>
+            <span className="text-sm text-gray-500">{segs.length} сегментів · {langs.length} мов</span>
+            {!editable && <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-500">тільки читання</span>}
+          </div>
+
+          {translating || (!hasText && !isLoading) ? (
+            <div className="rounded-lg border border-blue-200 bg-blue-50 p-6 text-center text-sm text-blue-800">
+              ⏳ Виконується переклад (W2) на {langs.length} мов… Сторінка оновиться сама, коли буде готово.
+            </div>
+          ) : isLoading ? (
+            <div className="text-sm text-gray-400">Завантаження…</div>
+          ) : (
+            <>
+              {/* language selector */}
+              <div className="mb-3 flex flex-wrap gap-1.5">
+                {langs.map((l) => {
+                  const rs = results[l]
+                  const issues = rs ? Object.values(rs).filter((x) => !x.ok).length : null
+                  const active = l === lang
+                  return (
+                    <button key={l} onClick={() => setLang(l)}
+                      className={`rounded-full border px-3 py-1 text-xs font-medium ${
+                        active ? 'border-gray-900 bg-gray-900 text-white' : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-50'}`}>
+                      {l.toUpperCase()}
+                      {issues != null && <span className={`ml-1.5 ${issues ? 'text-red-400' : 'text-green-500'}`}>{issues ? `⚠${issues}` : '✓'}</span>}
+                    </button>
+                  )
+                })}
+              </div>
+
+              {/* batch controls */}
+              <div className="mb-3 flex items-center gap-3 rounded-md border border-gray-200 bg-gray-50 px-3 py-2">
+                <label className="flex items-center gap-1.5 text-sm text-gray-700">
+                  <input type="checkbox" checked={allChecked} onChange={toggleAll} />
+                  Вибрати все
+                </label>
+                <span className="text-xs text-gray-400">{selectedIds.length} з {segs.length} вибрано</span>
+                <button onClick={check} disabled={checking || !selectedIds.length}
+                  className="ml-auto rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-700 disabled:bg-gray-300"
+                  title="Відправити вибрані сегменти цієї мови на AI-перевірку одним батчем">
+                  {checking ? 'Перевіряю…' : `🤖 Перевірити AI (${lang.toUpperCase()}, ${selectedIds.length})`}
+                </button>
+                {suggestedCount > 0 && editable && (
+                  <button onClick={applyAllSuggested}
+                    className="rounded-md bg-green-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-green-800">
+                    Застосувати всі ({suggestedCount})
+                  </button>
+                )}
+              </div>
+
+              {msg && <div className="mb-3 rounded-md bg-red-50 p-2 text-sm text-red-700">{msg}</div>}
+
+              {/* segment list for the active language */}
+              <ol className="space-y-2">
+                {segs.map((seg) => {
+                  const key = `${seg.segment_id}:${lang}`
+                  const orig = String(seg[`${lang}_text`] ?? '')
+                  const draft = drafts[key] ?? orig
+                  const res = langResults[seg.segment_id]
+                  const tone = !res ? 'border-gray-200 bg-white'
+                    : res.ok ? 'border-green-200 bg-green-50' : 'border-amber-300 bg-amber-50'
+                  return (
+                    <li key={seg.segment_id} className={`rounded-lg border p-3 ${tone}`}>
+                      <div className="mb-1 flex items-center gap-2 text-xs text-gray-500">
+                        <input type="checkbox" checked={isChecked(seg.segment_id)} onChange={() => toggle(seg.segment_id)} />
+                        <span className="font-mono">{shortId(seg.segment_id)}</span>
+                        {res && <span className={`ml-auto ${res.ok ? 'text-green-700' : 'text-amber-700'}`}>{res.ok ? '✓ ОК' : '⚠ є зауваги'}</span>}
+                      </div>
+                      <div className="mb-1.5 text-xs text-gray-400">{seg.en_text}</div>
+                      <textarea
+                        value={draft} disabled={!editable} rows={2}
+                        onChange={(e) => setDrafts((d) => ({ ...d, [key]: e.target.value }))}
+                        onBlur={() => commit(seg)}
+                        className="w-full resize-none rounded border border-gray-200 bg-white px-2 py-1 text-sm disabled:bg-gray-50"
+                      />
+                      {res && !res.ok && (
+                        <div className="mt-1.5 rounded-md border border-amber-200 bg-white p-2 text-xs">
+                          <div className="text-amber-800"><b>Коментар AI:</b> {res.comment}</div>
+                          {res.suggestion && (
+                            <>
+                              <div className="mt-1 text-gray-700"><b>Пропозиція:</b> {res.suggestion}</div>
+                              {editable && (
+                                <button onClick={() => applyOne(seg.segment_id, res.suggestion as string)}
+                                  className="mt-1 rounded border border-green-300 bg-green-50 px-2 py-0.5 text-green-800 hover:bg-green-100">застосувати</button>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      )}
+                      {res && res.ok && <div className="mt-1 text-xs text-green-700">✓ {res.comment}</div>}
+                    </li>
+                  )
+                })}
+              </ol>
+            </>
+          )}
+        </div>
+      </div>
+
+      <GateBar
+        gate="translations"
+        title="Етап 2/3 · Переклад"
+        summary={Object.keys(results).length ? `AI перевірено · ${warnings.length} невирішених зауваг` : `${segs.length} сегментів × ${langs.length} мов`}
+        warnings={warnings}
+        primaryLabel="Затвердити та почати синтез →"
+      />
+    </div>
+  )
+}

@@ -80,3 +80,7 @@ function buildConfig() {
 }
 
 export const config = buildConfig()
+
+// Writes are allowed in live only with ENABLE_WRITES, but always in mock (the
+// stateful mock store is safe — no real Sheets/Drive are touched).
+export const writesEnabled = config.enableWrites || config.mode === 'mock'

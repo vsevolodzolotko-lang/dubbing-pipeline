@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useRunState } from '../api/useRunState'
 import { useCart } from '../api/cart'
 import { canWrite } from '../ui'
+import { getTranslationPrompt, saveTranslationPrompt } from '../api/staged'
 
 interface Finding {
   lang: string
@@ -96,9 +97,12 @@ export function Qa() {
         )}
       </div>
       <p className="mt-1 max-w-prose text-sm text-gray-500">
-        Перевіряє переклади Gemini за 4 критеріями: звертання на «ти», консистентність гендеру,
-        false friends / зміст, природність проти оригіналу. Замінює «експорт CSV → вставити в LLM».
+        Глибока LLM-перевірка перекладів (Gemini) за промптом нижче: звертання на «ти», консистентність
+        гендеру, false friends / зміст, природність проти оригіналу. Окрема від швидкого детермінованого
+        gate на сторінці «Переклад» (довжина + формальність).
       </p>
+
+      <div className="mt-4 max-w-prose"><PromptPanel /></div>
 
       {running && progress && (
         <div className="mt-4 rounded-lg bg-gray-50 px-3 py-2 text-sm">
@@ -198,6 +202,69 @@ function Row({ label, v, cls }: { label: string; v: string; cls: string }) {
     <div className="flex gap-2">
       <span className="w-20 shrink-0 text-gray-400">{label}</span>
       <span className={cls}>{v}</span>
+    </div>
+  )
+}
+
+// Operator-editable prompt that drives this LLM check. `{{lang}}` is substituted
+// per language. Saved to the mock store now; prompts tab at Etap P.
+function PromptPanel() {
+  const [open, setOpen] = useState(false)
+  const [value, setValue] = useState('')
+  const [def, setDef] = useState('')
+  const [editable, setEditable] = useState(true)
+  const [status, setStatus] = useState<string | null>(null)
+  const [loaded, setLoaded] = useState(false)
+
+  useEffect(() => {
+    getTranslationPrompt().then((r) => {
+      setValue(r.value); setDef(r.default); setEditable(r.editable); setLoaded(true)
+    }).catch(() => setLoaded(true))
+  }, [])
+
+  async function save() {
+    setStatus('Зберігаю…')
+    try { await saveTranslationPrompt(value); setStatus('✓ Збережено') }
+    catch (e) { setStatus(e instanceof Error ? e.message : 'помилка') }
+  }
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white">
+      <button onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">
+        <span>{open ? '▾' : '▸'}</span>
+        <span className="font-medium">⚙️ Промпт, яким AI перевіряє переклади</span>
+        <span className="ml-auto text-xs text-gray-400">{open ? '' : 'розгорнути'}</span>
+      </button>
+      {open && (
+        <div className="border-t border-gray-100 p-3">
+          {!loaded ? <div className="text-xs text-gray-400">Завантаження…</div> : (
+            <>
+              <textarea
+                value={value} disabled={!editable} rows={10}
+                onChange={(e) => { setValue(e.target.value); setStatus(null) }}
+                className="w-full resize-y rounded border border-gray-200 px-2 py-1.5 font-mono text-xs disabled:bg-gray-50"
+              />
+              <div className="mt-2 flex items-center gap-2">
+                <button onClick={save} disabled={!editable}
+                  className="rounded bg-gray-900 px-3 py-1.5 text-sm text-white hover:bg-gray-700 disabled:bg-gray-300">
+                  Зберегти промпт
+                </button>
+                <button onClick={() => { setValue(def); setStatus(null) }} disabled={!editable}
+                  className="rounded border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 disabled:opacity-50">
+                  Скинути до типового
+                </button>
+                {status && <span className="text-xs text-gray-500">{status}</span>}
+              </div>
+              <p className="mt-2 text-xs text-gray-400">
+                Плейсхолдер <code>{'{{lang}}'}</code> підставляється для кожної мови. Цей промпт використовує
+                кнопка «Запустити аналіз» вище (потрібен живий <code>gemini_api_key</code> — у mock LLM не викликається).
+                {!editable && ' Збереження в live — на Етапі P (prompts-таб).'}
+              </p>
+            </>
+          )}
+        </div>
+      )}
     </div>
   )
 }

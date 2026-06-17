@@ -12,6 +12,7 @@ interface Props {
   peaksUrl: string
   enUrl?: string | null // self-contained EN clip for this segment (stops on `ended`)
   autoPlay?: boolean
+  mainLabel?: string // label for the primary track button (default "дубляж")
 }
 
 /**
@@ -21,7 +22,7 @@ interface Props {
  * (the `ended` event), and clicking again toggles it off. No seeking or timers.
  */
 export const WaveformPlayer = forwardRef<PlayerHandle, Props>(function WaveformPlayer(
-  { audioUrl, peaksUrl, enUrl, autoPlay }, ref,
+  { audioUrl, peaksUrl, enUrl, autoPlay, mainLabel = 'дубляж' }, ref,
 ) {
   const dubRef = useRef<HTMLAudioElement>(null)
   const enRef = useRef<HTMLAudioElement>(null)
@@ -131,7 +132,7 @@ export const WaveformPlayer = forwardRef<PlayerHandle, Props>(function WaveformP
       <canvas ref={canvasRef} onClick={seek} className="h-16 w-full cursor-pointer rounded bg-gray-50" />
       <div className="mt-2 flex items-center gap-2">
         <button onClick={toggle} className="rounded bg-gray-900 px-3 py-1 text-sm text-white hover:bg-gray-700">
-          {playing ? '⏸' : '▶'} <span className="ml-1">дубляж</span>
+          {playing ? '⏸' : '▶'} <span className="ml-1">{mainLabel}</span>
         </button>
         {enUrl && (
           <button onClick={playEn} className="rounded border border-gray-300 px-3 py-1 text-sm hover:bg-gray-100" title="клавіша E">

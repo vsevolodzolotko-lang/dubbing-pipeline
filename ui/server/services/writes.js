@@ -1,4 +1,6 @@
 import { TABS, WRITABLE_LOCALIZATION_COLS, VOICE_WRITABLE_COLS } from '../constants.js'
+import { config } from '../config.js'
+import * as mockStore from './mockStore.js'
 
 // Serialized write queue: one in-flight write chain per process, so concurrent
 // actions can't interleave reads/writes against the same sheet.
@@ -30,6 +32,7 @@ export async function writeLocalizationCells(sheets, targets) {
   for (const t of targets) {
     if (!WRITABLE_LOCALIZATION_COLS.has(t.col)) throw new Error(`колонка не дозволена для запису: ${t.col}`)
   }
+  if (config.mode === 'mock') return mockStore.writeLocalizationCells(targets)
 
   // 1. header → column indexes (resolved at runtime, no hardcoded letters)
   const headerRows = await sheets.getValues(`${TABS.localizations}!1:1`)
@@ -107,4 +110,42 @@ export async function writeVoiceCells(sheets, lang, updates) {
   if (!data.length) throw new Error('немає валідних полів для запису')
   await sheets.batchUpdate(data)
   return { lang, written: data.length }
+}
+
+// ─── staged pipeline (Etap M: mock store; Etap P: live segments/webhooks) ────
+
+const LIVE_TODO = 'доступно лише на Етапі P (live-пайплайн ще не під’єднано)'
+
+/** Write segments cells (en_text or {lang}_text), matched by segment_id. The
+ *  caller passes the gate-scoped allowlist so transcript ≠ translation edits. */
+export async function writeSegmentCells(sheets, targets, allowedCols) {
+  for (const t of targets) {
+    if (!allowedCols.has(t.col)) throw new Error(`колонка не дозволена для запису: ${t.col}`)
+  }
+  if (config.mode === 'mock') return mockStore.writeSegmentCells(targets)
+  throw new Error(`запис у segments ${LIVE_TODO}`)
+}
+
+/** Merge a segment with the next one (transcript stage only). */
+export async function mergeSegments(sheets, segmentId) {
+  if (config.mode === 'mock') return mockStore.mergeSegments(segmentId)
+  throw new Error(`merge сегментів ${LIVE_TODO}`)
+}
+
+/** Split a segment at a word boundary (transcript stage only). */
+export async function splitSegment(sheets, segmentId, wordIndex) {
+  if (config.mode === 'mock') return mockStore.splitSegment(segmentId, wordIndex)
+  throw new Error(`split сегментів ${LIVE_TODO}`)
+}
+
+/** Approve a review gate → advance the pipeline (Etap P fires the webhook). */
+export async function approveStage(sheets, stage, now) {
+  if (config.mode === 'mock') return mockStore.approve(stage, now)
+  throw new Error(`підтвердження етапу через webhook ${LIVE_TODO}`)
+}
+
+/** Start a staged run from the UI drop-in. */
+export async function startStagedRun(sheets, now, lessonId) {
+  if (config.mode === 'mock') return mockStore.startStagedRun(now, lessonId)
+  throw new Error(`staged-старт ${LIVE_TODO}`)
 }

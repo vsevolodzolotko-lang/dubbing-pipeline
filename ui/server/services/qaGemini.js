@@ -5,6 +5,8 @@
 // browser). One call per language over the WHOLE lesson, so cross-segment
 // consistency (formality / gender) is actually visible to the model.
 
+import { getAiPrompt } from './mockStore.js'
+
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
 const MODEL = 'gemini-3.5-flash'
 
@@ -81,17 +83,9 @@ export async function runAnalysis({ snapshot, langs, onProgress }) {
 
 function systemPrompt(lang) {
   const name = LANG_NAMES[lang] || lang
-  return `Ти — рецензент якості локалізації для медитаційних/велнес-уроків. Мова перекладу: ${name} (код ${lang}).
-Тобі дають JSON-масив сегментів: en — англійський оригінал, t — переклад мовою ${name}.
-Перевір УВЕСЬ урок за 4 критеріями:
-1. formality — звертання на «ти» (informal) має бути послідовним у всьому уроці; звертання на «ви» — помилка.
-2. gender — рід звертання до слухача (жіночий чи нейтральний) не має змішуватися в межах уроку.
-3. false_friend — false friends і смислові розбіжності з англійським оригіналом.
-4. naturalness — неприродні, калькові або кострубаті фрази порівняно з EN.
-
-Поверни ЛИШЕ JSON-об'єкт такого вигляду (без коментарів, без markdown):
-{"findings":[{"segment_id":"<id>","type":"formality|gender|false_friend|naturalness","severity":"high|medium|low","issue":"<коротко українською, що не так>","suggestion":"<виправлений переклад мовою ${name}>"}]}
-Не додавай записів для чистих сегментів. Якщо проблем немає — поверни {"findings":[]}. Будь стриманим: лише справжні проблеми, не стилістичні дрібниці.`
+  // Operator-editable prompt (mock store now; prompts tab at Etap P). `{{lang}}`
+  // is substituted with the language name.
+  return getAiPrompt().replace(/\{\{lang\}\}/g, name)
 }
 
 async function callGemini(apiKey, body) {

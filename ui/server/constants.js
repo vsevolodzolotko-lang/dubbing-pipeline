@@ -24,7 +24,20 @@ export const CONFIG_KEYS = {
   fullFolder: 'drive_output_full_folder_id',
   vttFolder: 'drive_output_vtt_folder_id',
   archiveFolder: 'drive_archive_folder_id',
+  // Staged pipeline (gated review). Written ONLY by the staged flow; the legacy
+  // auto-flow (Drive 01_input drop) never sets these, so computeRunState falls
+  // back to pure derivation and shows auto-runs exactly as before.
+  pipelineStage: 'pipeline_stage', // STT | TRANSLATE | SYNTH | DONE
+  stageStatus: 'stage_status', // RUNNING | REVIEW | APPROVED
+  stageRunToken: 'stage_run_token', // mirror of run_token when stage fields were last written
+  stagedInputFolder: 'drive_staged_input_folder_id', // ⏸ Etap P — separate from 01_input
+  w2Url: 'w2_translate_workflow_url', // ⏸ Etap P
+  w3Url: 'w3_dispatch_workflow_url', // ⏸ Etap P
 }
+
+// Stage / status vocabularies for the staged pipeline.
+export const PIPELINE_STAGES = { STT: 'STT', TRANSLATE: 'TRANSLATE', SYNTH: 'SYNTH', DONE: 'DONE' }
+export const STAGE_STATUS = { RUNNING: 'RUNNING', REVIEW: 'REVIEW', APPROVED: 'APPROVED' }
 
 // Config keys that may be revealed to the browser. Anything else — and anything
 // matching the secret pattern below — is masked by default.
@@ -55,6 +68,14 @@ export const CONFIG_ALLOWLIST = new Set([
   'drive_archive_folder_id',
   'slack_channel',
   'sheets_document_id',
+  // staged-pipeline state — readable by the UI (not secrets), but NOT editable
+  // via the generic PUT /api/config/:key (mutated only by dedicated endpoints).
+  'pipeline_stage',
+  'stage_status',
+  'stage_run_token',
+  'drive_staged_input_folder_id',
+  'w2_translate_workflow_url',
+  'w3_dispatch_workflow_url',
 ])
 
 export const SECRET_PATTERN = /key|secret|token|password|api[_-]?key/i
@@ -70,6 +91,8 @@ export const EDITABLE_CONFIG_KEYS = new Set([
   'cps_estimate_de', 'cps_estimate_es', 'cps_estimate_fr', 'cps_estimate_it', 'cps_estimate_pl', 'cps_estimate_pt', 'cps_estimate_tr',
   'drive_input_folder_id', 'drive_output_folder_id', 'drive_output_full_folder_id', 'drive_output_vtt_folder_id', 'drive_archive_folder_id',
   'sheets_document_id', 'slack_channel', 'w_regen_workflow_url',
+  // ⏸ Etap P — operator pastes the n8n production webhook URLs + staged folder id
+  'w2_translate_workflow_url', 'w3_dispatch_workflow_url', 'drive_staged_input_folder_id',
 ])
 
 export function maskConfigValue(key, value) {
@@ -87,6 +110,13 @@ export const WRITABLE_LOCALIZATION_COLS = new Set([
   'regen_comment',
 ])
 
+// segments columns the UI may write, split by GATE so it's impossible to edit
+// translations during transcript review and vice-versa. Merge/split is handled
+// by dedicated endpoints (not cell writes). en_duration_sec is always derived
+// server-side from start/end — never independently writable.
+export const TRANSCRIPT_WRITABLE_COLS = new Set(['en_text'])
+export const TRANSLATION_WRITABLE_COLS = new Set(DEFAULT_LANGS.map((l) => `${l}_text`))
+
 // voices columns the UI may write (never `lang`).
 export const VOICE_WRITABLE_COLS = new Set([
   'voice_id', 'voice_name', 'model', 'stability', 'similarity_boost', 'style', 'speed', 'notes',
@@ -100,8 +130,11 @@ export const RUN_STATES = {
   STARTING: 'STARTING',
   ARCHIVING: 'ARCHIVING',
   STT: 'STT',
+  TRANSCRIPT_REVIEW: 'TRANSCRIPT_REVIEW', // staged gate 1 — awaiting operator approval
   TRANSLATING: 'TRANSLATING',
+  TRANSLATION_REVIEW: 'TRANSLATION_REVIEW', // staged gate 2
   SYNTHESIZING: 'SYNTHESIZING',
+  AUDIO_REVIEW: 'AUDIO_REVIEW', // staged gate 3 (post-synth, before "finish")
   COMPLETE: 'COMPLETE',
   STOPPING: 'STOPPING',
   STOPPED: 'STOPPED',
@@ -110,6 +143,8 @@ export const RUN_STATES = {
 }
 
 // States during which the UI is read-only (mirrors "don't touch Sheets mid-run").
+// Review states are intentionally NOT here — the pipeline is paused at a gate,
+// so editing the relevant Sheet columns is safe (and the whole point).
 export const READONLY_STATES = new Set([
   RUN_STATES.STARTING,
   RUN_STATES.ARCHIVING,
@@ -118,6 +153,20 @@ export const READONLY_STATES = new Set([
   RUN_STATES.SYNTHESIZING,
   RUN_STATES.STOPPING,
   RUN_STATES.REGENERATING,
+])
+
+// Per-gate write scopes (used by the stage-aware guard + client capability checks).
+export const LOCALIZATION_WRITE_STATES = new Set([
+  RUN_STATES.IDLE, RUN_STATES.COMPLETE, RUN_STATES.STOPPED, RUN_STATES.AUDIO_REVIEW,
+])
+export const TRANSCRIPT_WRITE_STATES = new Set([RUN_STATES.TRANSCRIPT_REVIEW])
+export const TRANSLATION_WRITE_STATES = new Set([RUN_STATES.TRANSLATION_REVIEW])
+
+// Running states that should NOT be eligible for the staged review gates — used
+// to gate the STALLED overlay so review states (intentionally idle) never stall.
+export const RUNNING_STATES = new Set([
+  RUN_STATES.STARTING, RUN_STATES.ARCHIVING, RUN_STATES.STT,
+  RUN_STATES.TRANSLATING, RUN_STATES.SYNTHESIZING, RUN_STATES.REGENERATING,
 ])
 
 export const STALL_THRESHOLD_MS = 12 * 60 * 1000

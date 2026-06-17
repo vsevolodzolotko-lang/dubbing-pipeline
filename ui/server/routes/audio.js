@@ -39,6 +39,19 @@ export function registerAudioRoutes(fastify, { snapshot, drive }) {
     return serveEnRegion(req, reply, drive, r)
   })
 
+  // EN region resolved by segment_id (no localizations needed) — used by the
+  // transcript-review gate, before any synthesis exists.
+  fastify.get('/api/audio/en/seg/:segmentId', async (req, reply) => {
+    const r = resolveEnRegionBySegment(snapshot, req.params.segmentId)
+    if (!r) return reply.code(404).send({ error: 'EN region not found' })
+    return serveEnRegion(req, reply, drive, r)
+  })
+  fastify.get('/api/peaks/en/seg/:segmentId', async (req, reply) => {
+    const r = resolveEnRegionBySegment(snapshot, req.params.segmentId)
+    if (!r) return reply.code(404).send({ error: 'EN region not found' })
+    return servePeaks(reply, drive, { kind: 'enseg', fileId: `en_${r.rowKey}`, duration: r.dur })
+  })
+
   // ── peaks (JSON) ────────────────────────────────────────────────────────
   fastify.get('/api/peaks/segment/:rowKey', async (req, reply) => {
     const r = resolveSegment(snapshot, req.params.rowKey)
@@ -92,6 +105,17 @@ function resolveEnRegion(snapshot, rowKey) {
   const dur = num(seg.en_duration_sec) ?? 3
   const src = m.drive.input?.[0]
   return { rowKey, start, dur, fileId: src?.id, md5: src?.md5Checksum, mp3: /\.mp3$/i.test(src?.name || '') }
+}
+
+function resolveEnRegionBySegment(snapshot, segmentId) {
+  const m = snapshot.get()
+  const seg = m.segments.find((s) => s.segment_id === segmentId)
+  if (!seg) return null
+  const start = num(seg.en_start_sec) ?? 0
+  const end = num(seg.en_end_sec) ?? (start + 3)
+  const dur = Math.max(0.1, (num(seg.en_duration_sec) ?? (end - start)))
+  const src = m.drive.input?.[0]
+  return { rowKey: segmentId, start, dur, fileId: src?.id, md5: src?.md5Checksum, mp3: /\.mp3$/i.test(src?.name || '') }
 }
 
 function totalDuration(m) {

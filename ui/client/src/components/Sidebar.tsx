@@ -1,8 +1,12 @@
 import { NavLink } from 'react-router-dom'
+import { useRunState } from '../api/useRunState'
+import { currentStage, STAGES } from '../ui'
 
 const DAILY = [
   { to: '/lesson', label: 'Урок', icon: '🎬' },
-  { to: '/review', label: 'Перевірка', icon: '🔍' },
+  { to: '/transcript', label: 'Транскрипт', icon: '✍️' },
+  { to: '/translation', label: 'Переклад', icon: '🌐' },
+  { to: '/review', label: 'Аудіо', icon: '🔊' },
   { to: '/qa', label: 'AI-аналіз', icon: '🤖' },
 ]
 
@@ -15,10 +19,15 @@ const SETTINGS = [
 ]
 
 export function Sidebar() {
+  const { state } = useRunState()
+  // Route of the gate currently awaiting the operator (amber dot).
+  const cur = state?.staged ? currentStage(state.state) : null
+  const gateRoute = cur?.phase === 'gate' ? STAGES[cur.index]?.route : null
+
   return (
     <nav className="w-56 shrink-0 border-r border-gray-200 bg-white flex flex-col">
       <div className="px-4 py-4 text-lg font-semibold tracking-tight">Dubbing Studio</div>
-      <Section title="Щоденна робота" items={DAILY} />
+      <Section title="Щоденна робота" items={DAILY} gateRoute={gateRoute} />
       <Section title="Налаштування" items={SETTINGS} warn />
       <div className="mt-auto px-4 py-3 text-xs">
         <NavLink to="/setup" className="text-gray-400 hover:text-gray-700">Доступи / діагностика</NavLink>
@@ -27,7 +36,7 @@ export function Sidebar() {
   )
 }
 
-function Section({ title, items, warn }: { title: string; items: typeof DAILY; warn?: boolean }) {
+function Section({ title, items, warn, gateRoute }: { title: string; items: typeof DAILY; warn?: boolean; gateRoute?: string | null }) {
   return (
     <div className="px-2 py-2">
       <div className={`px-2 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-wide ${warn ? 'text-amber-600' : 'text-gray-400'}`}>
@@ -44,6 +53,9 @@ function Section({ title, items, warn }: { title: string; items: typeof DAILY; w
         >
           <span>{it.icon}</span>
           <span>{it.label}</span>
+          {gateRoute === it.to && (
+            <span className="ml-auto h-2 w-2 animate-pulse rounded-full bg-amber-400" title="чекає на твоє підтвердження" />
+          )}
         </NavLink>
       ))}
     </div>

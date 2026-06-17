@@ -1,9 +1,25 @@
 import { useRunState } from '../api/useRunState'
 
+const REVIEW_GATE: Record<string, { label: string; route: string }> = {
+  TRANSCRIPT_REVIEW: { label: 'транскрипцію', route: '/transcript' },
+  TRANSLATION_REVIEW: { label: 'переклади', route: '/translation' },
+  AUDIO_REVIEW: { label: 'аудіо', route: '/review' },
+}
+
 /** Read-only lockdown + stall warnings — mirrors the operator manual rules. */
 export function RunBanner() {
   const { state } = useRunState()
   if (!state) return null
+
+  const gate = REVIEW_GATE[state.state]
+  if (gate) {
+    return (
+      <Banner tone="amber">
+        ✋ Пайплайн чекає на тебе — перевір {gate.label} і натисни «Затвердити та продовжити».{' '}
+        <a href={gate.route} className="font-medium underline">→ перейти до перевірки</a>
+      </Banner>
+    )
+  }
 
   if (state.stalled) {
     return (

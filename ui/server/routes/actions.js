@@ -1,10 +1,29 @@
-import { config } from '../config.js'
-import { RUN_STATES, EDITABLE_CONFIG_KEYS } from '../constants.js'
-import { withWriteLock, writeLocalizationCells, writeConfigCell, writeVoiceCells } from '../services/writes.js'
+import { config, writesEnabled } from '../config.js'
+import {
+  RUN_STATES, EDITABLE_CONFIG_KEYS, PIPELINE_STAGES,
+  LOCALIZATION_WRITE_STATES, TRANSCRIPT_WRITE_STATES, TRANSLATION_WRITE_STATES,
+  TRANSCRIPT_WRITABLE_COLS, TRANSLATION_WRITABLE_COLS,
+} from '../constants.js'
+import {
+  withWriteLock, writeLocalizationCells, writeConfigCell, writeVoiceCells,
+  writeSegmentCells, mergeSegments, splitSegment, approveStage, startStagedRun,
+} from '../services/writes.js'
 import { wrapWav } from '../services/mockAudio.js'
 import { regenTracker } from '../services/regenTracker.js'
+import * as mockStore from '../services/mockStore.js'
 
 const numOr = (v, d) => (v === '' || v == null || isNaN(Number(v)) ? d : Number(v))
+
+// Map an approval gate path → the pipeline_stage it approves + the run state it
+// must be in to be approvable.
+const APPROVE_GATES = {
+  transcript: { stage: PIPELINE_STAGES.STT, states: TRANSCRIPT_WRITE_STATES },
+  translations: { stage: PIPELINE_STAGES.TRANSLATE, states: TRANSLATION_WRITE_STATES },
+  audio: { stage: PIPELINE_STAGES.SYNTH, states: LOCALIZATION_WRITE_STATES },
+}
+
+// States from which a new staged run may be started (nothing in flight).
+const START_STATES = new Set([RUN_STATES.IDLE, RUN_STATES.COMPLETE, RUN_STATES.STOPPED])
 
 // API keys we can cheaply validate with a GET. Value read server-side only.
 const KEY_CHECKS = {
@@ -15,25 +34,24 @@ const KEY_CHECKS = {
   openai_api_key: (k) => ({ url: 'https://api.openai.com/v1/models', headers: { Authorization: `Bearer ${k}` } }),
 }
 
-// Writes are allowed only when the pipeline is idle-ish (never mid-run/regen),
-// mirroring the integration contract. UNKNOWN is treated as unsafe.
-const IDLE_OK = new Set([RUN_STATES.IDLE, RUN_STATES.COMPLETE, RUN_STATES.STOPPED])
-
 let regenInFlight = false
 let regenCooldownUntil = 0
 
 export function registerActionRoutes(fastify, { snapshot, sheets }) {
-  function guard(reply) {
-    if (!config.enableWrites) { reply.code(403).send({ error: 'Записи вимкнені (ENABLE_WRITES=false)' }); return false }
-    if (config.mode !== 'live' || !sheets) { reply.code(409).send({ error: 'Записи доступні лише в live-режимі' }); return false }
+  // Stage-aware write guard: each route passes the set of run states in which it
+  // is allowed (transcript edits only in TRANSCRIPT_REVIEW, etc). Mock mode is a
+  // valid write target (the stateful mock store); live needs Sheets.
+  function guard(reply, allowed) {
+    if (!writesEnabled) { reply.code(403).send({ error: 'Записи вимкнені (ENABLE_WRITES=false)' }); return false }
+    if (config.mode === 'live' && !sheets) { reply.code(409).send({ error: 'Live-режим без доступу до Sheets' }); return false }
     const st = snapshot.get().state.state
-    if (!IDLE_OK.has(st)) { reply.code(409).send({ error: `Заблоковано: зараз ${st} (запис лише коли ран завершено)` }); return false }
+    if (!allowed.has(st)) { reply.code(409).send({ error: `Заблоковано: зараз ${st} (запис недоступний на цьому етапі)` }); return false }
     return true
   }
 
   // Accept/Reject a cell verdict: needs_attention = TRUE | FALSE
   fastify.post('/api/attention', async (req, reply) => {
-    if (!guard(reply)) return
+    if (!guard(reply, LOCALIZATION_WRITE_STATES)) return
     const rows = Array.isArray(req.body?.rows) ? req.body.rows : []
     const targets = rows
       .filter((r) => r.rowKey && (r.value === 'TRUE' || r.value === 'FALSE'))
@@ -41,13 +59,14 @@ export function registerActionRoutes(fastify, { snapshot, sheets }) {
     if (!targets.length) return reply.code(400).send({ error: 'немає рядків' })
     try {
       const res = await withWriteLock(() => writeLocalizationCells(sheets, targets))
+      snapshot.refresh()
       return { ok: true, ...res }
     } catch (e) { return reply.code(502).send({ error: e.message }) }
   })
 
   // Edit text / comment WITHOUT triggering regen (record-keeping, operator §5)
   fastify.post('/api/text', async (req, reply) => {
-    if (!guard(reply)) return
+    if (!guard(reply, LOCALIZATION_WRITE_STATES)) return
     const rows = Array.isArray(req.body?.rows) ? req.body.rows : []
     const targets = []
     for (const r of rows) {
@@ -58,6 +77,7 @@ export function registerActionRoutes(fastify, { snapshot, sheets }) {
     if (!targets.length) return reply.code(400).send({ error: 'немає правок' })
     try {
       const res = await withWriteLock(() => writeLocalizationCells(sheets, targets))
+      snapshot.refresh()
       return { ok: true, ...res }
     } catch (e) { return reply.code(502).send({ error: e.message }) }
   })
@@ -65,7 +85,7 @@ export function registerActionRoutes(fastify, { snapshot, sheets }) {
   // The cart: write text edits + needs_retts=TRUE for ALL rows FIRST, then (only
   // after Sheets confirms) GET the W_Regen webhook. Single-flight + cooldown.
   fastify.post('/api/regen', async (req, reply) => {
-    if (!guard(reply)) return
+    if (!guard(reply, LOCALIZATION_WRITE_STATES)) return
     if (regenInFlight || Date.now() < regenCooldownUntil) {
       return reply.code(409).send({ error: 'Перегенерація вже виконується' })
     }
@@ -110,7 +130,7 @@ export function registerActionRoutes(fastify, { snapshot, sheets }) {
 
   // Edit a config value (yellow zone). Update-only, compare-and-set, allowlist.
   fastify.put('/api/config/:key', async (req, reply) => {
-    if (!guard(reply)) return
+    if (!guard(reply, LOCALIZATION_WRITE_STATES)) return
     const key = req.params.key
     if (!EDITABLE_CONFIG_KEYS.has(key)) return reply.code(403).send({ error: `ключ "${key}" не редагується через UI` })
     const value = req.body?.value
@@ -142,7 +162,7 @@ export function registerActionRoutes(fastify, { snapshot, sheets }) {
 
   // Edit voice fields for one lang.
   fastify.put('/api/voices/:lang', async (req, reply) => {
-    if (!guard(reply)) return
+    if (!guard(reply, LOCALIZATION_WRITE_STATES)) return
     const lang = req.params.lang
     const fields = req.body?.fields
     if (!fields || typeof fields !== 'object') return reply.code(400).send({ error: 'немає полів' })
@@ -189,7 +209,7 @@ export function registerActionRoutes(fastify, { snapshot, sheets }) {
 
   // Apply a saved voice SET to the voices tab in one batch (each lang's fields).
   fastify.post('/api/voices/apply-set', async (req, reply) => {
-    if (!guard(reply)) return
+    if (!guard(reply, LOCALIZATION_WRITE_STATES)) return
     const voices = Array.isArray(req.body?.voices) ? req.body.voices : []
     if (!voices.length) return reply.code(400).send({ error: 'порожній набір' })
     try {
@@ -210,7 +230,7 @@ export function registerActionRoutes(fastify, { snapshot, sheets }) {
 
   // Re-fire ONLY the webhook (flags already written) — recovery path.
   fastify.post('/api/regen/retrigger', async (req, reply) => {
-    if (!guard(reply)) return
+    if (!guard(reply, LOCALIZATION_WRITE_STATES)) return
     const url = (snapshot.get().configMap.get('w_regen_workflow_url') || '').toString().trim()
     if (!url) return reply.code(400).send({ error: 'w_regen_workflow_url відсутній' })
     try {
@@ -218,5 +238,104 @@ export function registerActionRoutes(fastify, { snapshot, sheets }) {
       regenCooldownUntil = Date.now() + 8000
       return { ok: true, fired: true, status: wres.status }
     } catch (e) { return reply.code(502).send({ error: e.message }) }
+  })
+
+  // ─── staged pipeline (gated review) ────────────────────────────────────────
+
+  // Start a staged run from the UI drop-in. (Etap M: mock; Etap P: upload to
+  // drive_staged_input_folder_id + fire W1 webhook.) Refused if a run is active.
+  fastify.post('/api/staged/start', async (req, reply) => {
+    if (!guard(reply, START_STATES)) return
+    const lessonId = String(req.body?.lessonId || '').trim() || null
+    try {
+      const res = await withWriteLock(() => startStagedRun(sheets, Date.now(), lessonId))
+      if (!res.ok) return reply.code(409).send(res)
+      snapshot.refresh()
+      return res
+    } catch (e) { return reply.code(502).send({ error: e.message }) }
+  })
+
+  // Run-lock probe — would a new drop be refused right now? (mock demo)
+  fastify.post('/api/staged/second-drop', async (req, reply) => {
+    if (config.mode !== 'mock') return reply.code(409).send({ error: 'демо доступне лише в mock' })
+    return mockStore.secondDropProbe()
+  })
+
+  // Edit EN transcript (segments.en_text) — only during transcript review.
+  fastify.post('/api/transcript', async (req, reply) => {
+    if (!guard(reply, TRANSCRIPT_WRITE_STATES)) return
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : []
+    const targets = rows
+      .filter((r) => r.segmentId && typeof r.enText === 'string')
+      .map((r) => ({ segmentId: r.segmentId, col: 'en_text', value: r.enText }))
+    if (!targets.length) return reply.code(400).send({ error: 'немає правок' })
+    try {
+      const res = await withWriteLock(() => writeSegmentCells(sheets, targets, TRANSCRIPT_WRITABLE_COLS))
+      snapshot.refresh()
+      return { ok: true, ...res }
+    } catch (e) { return reply.code(502).send({ error: e.message }) }
+  })
+
+  // Edit translations (segments.{lang}_text) — only during translation review.
+  fastify.post('/api/translations', async (req, reply) => {
+    if (!guard(reply, TRANSLATION_WRITE_STATES)) return
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : []
+    const targets = []
+    for (const r of rows) {
+      if (!r.segmentId || !r.lang || typeof r.text !== 'string') continue
+      targets.push({ segmentId: r.segmentId, col: `${r.lang}_text`, value: r.text })
+    }
+    if (!targets.length) return reply.code(400).send({ error: 'немає правок' })
+    try {
+      const res = await withWriteLock(() => writeSegmentCells(sheets, targets, TRANSLATION_WRITABLE_COLS))
+      snapshot.refresh()
+      return { ok: true, ...res }
+    } catch (e) { return reply.code(502).send({ error: e.message }) }
+  })
+
+  // Merge a segment with the next one (transcript review only).
+  fastify.post('/api/segments/merge', async (req, reply) => {
+    if (!guard(reply, TRANSCRIPT_WRITE_STATES)) return
+    const segmentId = String(req.body?.segmentId || '').trim()
+    if (!segmentId) return reply.code(400).send({ error: 'немає segmentId' })
+    try {
+      const res = await withWriteLock(() => mergeSegments(sheets, segmentId))
+      snapshot.refresh()
+      return { ok: true, ...res }
+    } catch (e) { return reply.code(400).send({ error: e.message }) }
+  })
+
+  // Split a segment at a word boundary (transcript review only).
+  fastify.post('/api/segments/split', async (req, reply) => {
+    if (!guard(reply, TRANSCRIPT_WRITE_STATES)) return
+    const segmentId = String(req.body?.segmentId || '').trim()
+    const wordIndex = req.body?.wordIndex
+    if (!segmentId) return reply.code(400).send({ error: 'немає segmentId' })
+    try {
+      const res = await withWriteLock(() => splitSegment(sheets, segmentId, wordIndex))
+      snapshot.refresh()
+      return { ok: true, ...res }
+    } catch (e) { return reply.code(400).send({ error: e.message }) }
+  })
+
+  // Approve a review gate → advance the pipeline. Idempotent (409 if not in REVIEW).
+  fastify.post('/api/approve/:gate', async (req, reply) => {
+    const gate = APPROVE_GATES[req.params.gate]
+    if (!gate) return reply.code(404).send({ error: 'невідомі ворота' })
+    if (!guard(reply, gate.states)) return
+    try {
+      const res = await withWriteLock(() => approveStage(sheets, gate.stage, Date.now()))
+      if (!res.ok) return reply.code(409).send(res)
+      snapshot.refresh()
+      return res
+    } catch (e) { return reply.code(502).send({ error: e.message }) }
+  })
+
+  // Word-level timing for the split UI (Etap M: mock fixture; Etap P: Drive JSON).
+  fastify.get('/api/segments/:segmentId/words', async (req, reply) => {
+    if (config.mode !== 'mock') return reply.code(409).send({ error: 'words-фікстура лише в mock (Етап P: Drive JSON)' })
+    const w = mockStore.words(req.params.segmentId)
+    if (!w) return reply.code(404).send({ error: 'сегмент не знайдено' })
+    return { segmentId: req.params.segmentId, words: w }
   })
 }

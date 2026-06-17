@@ -1,9 +1,16 @@
 import { useQuery } from '@tanstack/react-query'
 import { fetchJson } from './client'
-import type { Lesson, SetupStatus } from './types'
+import type { Lesson, RawSegment, SetupStatus } from './types'
 
 export function useLesson() {
   return useQuery({ queryKey: ['lesson'], queryFn: () => fetchJson<Lesson>('/api/lesson') })
+}
+
+export function useSegments() {
+  return useQuery({
+    queryKey: ['segments'],
+    queryFn: () => fetchJson<{ rows: RawSegment[] }>('/api/segments'),
+  })
 }
 
 export function useSetupStatus() {

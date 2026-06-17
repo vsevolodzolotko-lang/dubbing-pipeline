@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useRunState } from '../api/useRunState'
 import { STATE_COPY, TONE_CLASSES } from '../ui'
+import { StagedDropzone } from '../components/StagedDropzone'
 import type { RunState } from '../api/types'
 
 const RUNNING = new Set(['STARTING', 'ARCHIVING', 'STT', 'TRANSLATING', 'SYNTHESIZING', 'STOPPING', 'REGENERATING'])
@@ -28,43 +29,47 @@ export function Dashboard() {
       </section>
 
       <section className="rounded-xl border border-gray-200 bg-white p-5">
-        <h2 className="mb-3 text-sm font-semibold text-gray-700">Новий урок</h2>
-        <div className="rounded-lg border-2 border-dashed border-gray-300 p-6 text-center text-sm text-gray-400">
-          {state.readOnly
-            ? 'Вимкнено, поки триває ран'
-            : state.enableWrites
-            ? '⬇ Перетягни EN-аудіо сюди (з’явиться у фазі завантаження)'
-            : 'Завантаження увімкнеться, коли активуєш записи (ENABLE_WRITES)'}
-        </div>
-        <p className="mt-3 text-xs text-gray-400">
-          Поки що файл кладеться у Drive теку <code>01_input</code> вручну — pipeline стартує сам.
-        </p>
+        <h2 className="mb-3 text-sm font-semibold text-gray-700">Новий урок (поетапний)</h2>
+        <StagedDropzone />
       </section>
     </div>
   )
 }
 
-const STAGES = [
-  { key: 'archive', label: 'Архівація попереднього уроку' },
-  { key: 'stt', label: 'Розпізнавання мовлення' },
-  { key: 'translate', label: 'Переклад' },
-  { key: 'synth', label: 'Синтез аудіо (мова за мовою)' },
-  { key: 'done', label: 'Готово' },
+const STAGES_AUTO = [
+  { key: 'archive', label: 'Архівація попереднього уроку', gate: false },
+  { key: 'stt', label: 'Розпізнавання мовлення', gate: false },
+  { key: 'translate', label: 'Переклад', gate: false },
+  { key: 'synth', label: 'Синтез аудіо (мова за мовою)', gate: false },
+  { key: 'done', label: 'Готово', gate: false },
+] as const
+
+// Staged flow inserts the three review gates between the work stages.
+const STAGES_STAGED = [
+  { key: 'stt', label: 'Розпізнавання мовлення', gate: false },
+  { key: 'transcript_gate', label: '✋ Перевірка транскрипту', gate: true },
+  { key: 'translate', label: 'Переклад', gate: false },
+  { key: 'translation_gate', label: '✋ Перевірка перекладу', gate: true },
+  { key: 'synth', label: 'Синтез аудіо (мова за мовою)', gate: false },
+  { key: 'audio_gate', label: '✋ Перевірка аудіо', gate: true },
+  { key: 'done', label: 'Готово', gate: false },
 ] as const
 
 function Stepper({ state }: { state: RunState }) {
-  const reached = stageProgress(state)
+  const staged = Boolean(state.staged)
+  const stages = staged ? STAGES_STAGED : STAGES_AUTO
+  const reached = staged ? stagedProgress(state.state) : stageProgress(state)
   return (
     <ol className="space-y-2">
-      {STAGES.map((s, i) => {
+      {stages.map((s, i) => {
         const status = reached > i ? 'done' : reached === i ? 'active' : 'todo'
         return (
           <li key={s.key} className="flex items-start gap-3">
             <span className={`mt-0.5 flex h-5 w-5 items-center justify-center rounded-full text-[11px] ${
               status === 'done' ? 'bg-green-500 text-white'
-              : status === 'active' ? 'bg-blue-500 text-white'
+              : status === 'active' ? (s.gate ? 'bg-amber-500 text-white' : 'bg-blue-500 text-white')
               : 'bg-gray-200 text-gray-500'}`}>
-              {status === 'done' ? '✓' : status === 'active' ? '▶' : '·'}
+              {status === 'done' ? '✓' : status === 'active' ? (s.gate ? '✋' : '▶') : '·'}
             </span>
             <div className="flex-1">
               <div className={`text-sm ${status === 'todo' ? 'text-gray-400' : 'text-gray-800'}`}>{s.label}</div>
@@ -75,6 +80,20 @@ function Stepper({ state }: { state: RunState }) {
       })}
     </ol>
   )
+}
+
+// Index into STAGES_STAGED for the current state.
+function stagedProgress(stateName: string): number {
+  switch (stateName) {
+    case 'STT': return 0
+    case 'TRANSCRIPT_REVIEW': return 1
+    case 'TRANSLATING': return 2
+    case 'TRANSLATION_REVIEW': return 3
+    case 'SYNTHESIZING': return 4
+    case 'AUDIO_REVIEW': return 5
+    case 'COMPLETE': return 7
+    default: return 0
+  }
 }
 
 function LangProgress({ state }: { state: RunState }) {

@@ -4,6 +4,7 @@ import { cellClass, canWrite, writeBlockReason } from '../ui'
 import { useRunState } from '../api/useRunState'
 import { useCart } from '../api/cart'
 import { WaveformPlayer, type PlayerHandle } from '../components/WaveformPlayer'
+import { GateBar } from '../components/GateBar'
 import { getRegenOld } from '../api/regenHistory'
 import type { Cause, Cell, SegmentRow } from '../api/types'
 
@@ -83,7 +84,8 @@ export function Workbench() {
   if (!data || data.segments.length === 0) return <div className="p-8 text-sm text-gray-400">Немає даних уроку.</div>
 
   return (
-    <div className="flex h-full min-h-0">
+    <div className="flex h-full flex-col">
+      <div className="flex min-h-0 flex-1">
       <div className="min-w-0 flex-1 overflow-auto p-4">
         <div className="mb-3 flex items-center gap-2">
           <h1 className="text-lg font-semibold">Перевірка · {data.lessonId}</h1>
@@ -150,6 +152,16 @@ export function Workbench() {
           onVerdict={verdict}
           onAddCart={addToCart}
           onClose={() => setSelected(null)}
+        />
+      )}
+      </div>
+
+      {state?.staged && state.state === 'AUDIO_REVIEW' && (
+        <GateBar
+          gate="audio"
+          title="Етап 3/3 · Аудіо"
+          summary={`${data.segments.length} сегментів · ${state.needsAttention.count} потребують уваги`}
+          primaryLabel="Завершити урок"
         />
       )}
     </div>

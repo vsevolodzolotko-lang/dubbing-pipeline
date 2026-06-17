@@ -45,7 +45,13 @@ export function RunStateProvider({ children }: { children: ReactNode }) {
       esRef.current = es
       es.addEventListener('open', () => setConnected(true))
       es.addEventListener('state', (e) => {
-        try { setState(JSON.parse((e as MessageEvent).data)) } catch { /* ignore */ }
+        try {
+          setState(JSON.parse((e as MessageEvent).data))
+          // staged transitions reveal segments/translations without a row_key
+          // change, so refresh those gate data sources on every state push.
+          qc.invalidateQueries({ queryKey: ['segments'] })
+          qc.invalidateQueries({ queryKey: ['translations'] })
+        } catch { /* ignore */ }
       })
       es.addEventListener('regen', (e) => {
         try { setRegen(JSON.parse((e as MessageEvent).data)) } catch { /* ignore */ }

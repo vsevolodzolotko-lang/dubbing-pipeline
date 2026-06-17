@@ -1,8 +1,8 @@
-import { config } from '../config.js'
+import { config, writesEnabled } from '../config.js'
 import { TABS, DEFAULT_LANGS, CONFIG_KEYS, RUN_STATES } from '../constants.js'
 import { computeRunState } from './runState.js'
 import { regenTracker } from './regenTracker.js'
-import { mockTabs, mockDrive } from './mockData.js'
+import * as mockStore from './mockStore.js'
 
 const ACTIVE_INTERVAL_MS = 5_000
 const IDLE_INTERVAL_MS = 30_000
@@ -28,7 +28,7 @@ export function makeSnapshotService({ auth, sheets, drive, broadcast, getClientC
 
   async function fetchTabs() {
     if (config.mode === 'mock') {
-      const t = mockTabs()
+      const t = mockStore.tabs()
       const includePrompts = tick % PROMPTS_EVERY === 0
       return { ...t, prompts: includePrompts ? t.prompts : model.raw?.prompts ?? t.prompts }
     }
@@ -52,7 +52,7 @@ export function makeSnapshotService({ auth, sheets, drive, broadcast, getClientC
   }
 
   async function fetchDrive(configMap) {
-    if (config.mode === 'mock') return mockDrive()
+    if (config.mode === 'mock') return mockStore.drive()
     const inputId = configMap.get(CONFIG_KEYS.inputFolder)
     const fullId = configMap.get(CONFIG_KEYS.fullFolder)
     const vttId = configMap.get(CONFIG_KEYS.vttFolder)
@@ -66,6 +66,7 @@ export function makeSnapshotService({ auth, sheets, drive, broadcast, getClientC
 
   async function poll() {
     try {
+      if (config.mode === 'mock') mockStore.tick(Date.now())
       const tabs = await fetchTabs()
       const configMap = parseKeyValue(tabs.config)
       const drv = await fetchDrive(configMap)
@@ -164,6 +165,14 @@ export function makeSnapshotService({ auth, sheets, drive, broadcast, getClientC
     if (changed.length) broadcast('rows_changed', { rowKeys: changed, version: after.version })
   }
 
+  // Force an immediate re-poll (used after a write so the UI reflects it now,
+  // not on the next 5s tick). Safe: poll() reschedules its own timer.
+  function pokeNow() {
+    if (stopped) return
+    if (timer) clearTimeout(timer)
+    poll()
+  }
+
   return {
     start() {
       stopped = false
@@ -174,6 +183,7 @@ export function makeSnapshotService({ auth, sheets, drive, broadcast, getClientC
       if (timer) clearTimeout(timer)
     },
     get() { return model },
+    refresh: pokeNow,
     statePayload: () => statePayload(model),
     auth, sheets, drive,
   }
@@ -232,7 +242,7 @@ function statePayload(m) {
     mode: m.mode,
     version: m.version,
     lastPollAt: m.lastPollAt,
-    enableWrites: config.enableWrites,
+    enableWrites: writesEnabled,
   }
 }
 

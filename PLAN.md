@@ -4,6 +4,35 @@
 
 ---
 
+## 0. Поточна ініціатива: поетапний UI з воротами рев'ю (staged review)
+
+Перебудова операторського UI (`ui/`) з монолітного автозапуску на **поетапний пайплайн із воротами**: транскрипт → (ворота) → переклад + AI-перевірка → (ворота) → синтез → (ворота аудіо) → готово. Мета — ловити помилки до витрат TTS на 7 мов.
+
+**Два паралельні потоки (авто недоторканий):**
+- **Авто-потік** (drop у Drive `01_input/` → `W_Master` → W1→W2→W3) — **без змін**.
+- **Staged-потік** — окремий шлях, стартує з UI (drop файлу в UI). Пише `pipeline_stage`/`stage_status`/`stage_run_token` у config; авто-ран їх не пише → `computeRunState` показує його по-старому (legacy-деривація).
+
+### Етап M — на mock — ✅ DONE (ще не на live)
+Увесь staged-досвід реалізовано й перевірено **тільки в `ui/`** проти stateful mock-симулятора; живий n8n не торкнуто.
+- [x] Стан-машина: 3 review-стани + явні stage-поля з legacy-fallback (`ui/server/services/runState.js`), stage-aware write-gating (`constants.js`, `routes/actions.js`).
+- [x] Stateful mock-симулятор `ui/server/services/mockStore.js`: таймовані переходи STT/translate/synth, merge/split із word-фікстурою (пропорційний переклад), run-lock, mock-aware записи, редагований AI-промпт.
+- [x] **Фаза 1 — транскрипт:** редагування `en_text` + merge/split сегментів + EN-плеєр (`screens/TranscriptReview.tsx`, `StagedDropzone`, `StageRail`, `GateBar`).
+- [x] **Фаза 2 — переклад:** вибір мови (чіпи) + вертикальний список; **кнопка «Перевірити AI» = LLM-батч однієї мови** (чекбокси сегментів + «вибрати все») → JSON-вердикт `{ok, comment, suggestion}` на сегмент → застосувати поодинці/батчем (`screens/TranslationReview.tsx`, `server/services/qaCheck.js`). М'які ворота.
+- [x] **Фаза 3 — аудіо:** наявний Workbench як 3-тя ворота + «Завершити урок».
+- [x] Редагований промпт AI-перевірки (`mockStore` → `prompts`-таб на Етапі P), вкладка «AI-аналіз» (`/qa`) використовує його через `qaGemini`.
+- [x] Перевірено: vite build зелений, повний флоу e2e через API (3 ворота, run-lock, stage-gating, батч-чек). Запуск: `cd ui && npm run dev` (mock за замовчуванням).
+
+### Етап P — підключення live n8n — ⏳ TODO (additive, авто-ланцюг не ріжемо)
+- [ ] Окремий staged-старт: аплоад у `drive_staged_input_folder_id` + новий webhook на W1; stage-writes лише на staged-шляху.
+- [ ] Webhook-тригери на W2 / W3_Dispatch + stage-writes (RUNNING/REVIEW); approve-ендпоінти фаєрять їх замість mock-переходу.
+- [ ] Run-lock guard у `W_Master` (`Once Per Run`) — відмова архівувати/чистити при активному staged-рані.
+- [ ] Word-level таймінги W1 → Drive JSON (для split); реальний батч-LLM на воротах перекладу + у `/qa` з `prompts`-таб промптом.
+- [ ] Активувати W2/W3_Dispatch у n8n, вставити webhook-URL у config (`w2_translate_workflow_url`, `w3_dispatch_workflow_url`).
+
+> Деталі дизайну/ризиків — у плані сесії `~/.claude/plans/shiny-rolling-axolotl.md`.
+
+---
+
 ## 1. 2-week MVP — DONE
 
 ### Week 1 — Strict-Timing Pipeline ✅

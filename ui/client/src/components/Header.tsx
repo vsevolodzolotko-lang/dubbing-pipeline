@@ -1,9 +1,10 @@
 import { useRunState } from '../api/useRunState'
-import { STATE_COPY, TONE_CLASSES } from '../ui'
+import { STATE_COPY, TONE_CLASSES, currentStage, STAGES } from '../ui'
 
 export function Header() {
   const { state, connected } = useRunState()
   const copy = state ? STATE_COPY[state.state] : null
+  const stage = state?.staged ? currentStage(state.state) : null
 
   return (
     <header className="flex items-center gap-4 border-b border-gray-200 bg-white px-5 py-3">
@@ -14,6 +15,12 @@ export function Header() {
           <span className="ml-2 rounded bg-purple-100 px-1.5 py-0.5 text-[11px] font-medium text-purple-700">MOCK</span>
         )}
       </div>
+
+      {stage && (
+        <span className="rounded-full border border-gray-300 bg-gray-50 px-2 py-1 text-[11px] font-medium text-gray-600">
+          Етап {stage.index + 1}/{STAGES.length} · {STAGES[stage.index].label}
+        </span>
+      )}
 
       {copy && (
         <span className={`rounded-full border px-3 py-1 text-xs font-medium ${TONE_CLASSES[copy.tone]}`}>

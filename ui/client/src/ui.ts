@@ -8,8 +8,11 @@ export const STATE_COPY: Record<RunStateName, { label: string; tone: Tone }> = {
   STARTING: { label: 'Запуск…', tone: 'blue' },
   ARCHIVING: { label: 'Архівую попередній урок…', tone: 'blue' },
   STT: { label: 'Розпізнаю мовлення…', tone: 'blue' },
+  TRANSCRIPT_REVIEW: { label: 'Перевір транскрипцію → підтверди', tone: 'amber' },
   TRANSLATING: { label: 'Перекладаю…', tone: 'blue' },
+  TRANSLATION_REVIEW: { label: 'Перевір переклади → підтверди', tone: 'amber' },
   SYNTHESIZING: { label: 'Синтезую аудіо…', tone: 'blue' },
+  AUDIO_REVIEW: { label: 'Перевір аудіо → заверши', tone: 'amber' },
   COMPLETE: { label: 'Дубляж готовий', tone: 'green' },
   STOPPING: { label: 'Зупинку прийнято — чекаю межі мови…', tone: 'amber' },
   STOPPED: { label: 'Зупинено — можна класти новий файл', tone: 'green' },
@@ -41,16 +44,58 @@ export function cellClass(status: string, queued?: boolean): string {
   return CELL_CLASSES[status] ?? CELL_CLASSES.MISSING
 }
 
-const WRITE_OK_STATES = ['IDLE', 'COMPLETE', 'STOPPED']
+type StateLike = { enableWrites?: boolean; readOnly?: boolean; state?: string } | null
 
-/** Writes allowed only with the flag on, not read-only, and pipeline idle. */
-export function canWrite(state: { enableWrites?: boolean; readOnly?: boolean; state?: string } | null): boolean {
-  return Boolean(state?.enableWrites) && !state?.readOnly && WRITE_OK_STATES.includes(state?.state ?? '')
+// Per-gate write scopes (mirror the server's *_WRITE_STATES sets).
+const LOCALIZATION_WRITE_STATES = ['IDLE', 'COMPLETE', 'STOPPED', 'AUDIO_REVIEW']
+const TRANSCRIPT_WRITE_STATES = ['TRANSCRIPT_REVIEW']
+const TRANSLATION_WRITE_STATES = ['TRANSLATION_REVIEW']
+
+function can(state: StateLike, ok: string[]): boolean {
+  return Boolean(state?.enableWrites) && ok.includes(state?.state ?? '')
 }
 
-export function writeBlockReason(state: { enableWrites?: boolean; readOnly?: boolean; state?: string } | null): string {
+/** Localization edits/regen (audio review + settled states). Also the legacy
+ *  `canWrite` used by Workbench/Voices/Config. */
+export function canWriteLocalizations(state: StateLike): boolean {
+  return can(state, LOCALIZATION_WRITE_STATES)
+}
+export const canWrite = canWriteLocalizations
+export function canWriteTranscript(state: StateLike): boolean {
+  return can(state, TRANSCRIPT_WRITE_STATES)
+}
+export function canWriteTranslations(state: StateLike): boolean {
+  return can(state, TRANSLATION_WRITE_STATES)
+}
+
+export function writeBlockReason(state: StateLike): string {
   if (!state) return 'немає стану'
   if (!state.enableWrites) return 'записи вимкнені (ENABLE_WRITES + повторний вхід з правом запису)'
-  if (state.readOnly || !WRITE_OK_STATES.includes(state.state ?? '')) return 'заблоковано, поки триває ран'
-  return ''
+  return 'заблоковано на цьому етапі'
 }
+
+// ── staged pipeline: 3 review gates ─────────────────────────────────────────
+export type StageKey = 'transcript' | 'translation' | 'audio'
+export interface StageInfo { key: StageKey; index: number; phase: 'running' | 'gate' }
+
+export const STAGES: { key: StageKey; label: string; route: string }[] = [
+  { key: 'transcript', label: 'Транскрипт', route: '/transcript' },
+  { key: 'translation', label: 'Переклад', route: '/translation' },
+  { key: 'audio', label: 'Аудіо', route: '/review' },
+]
+
+/** Map a run state to its staged gate + whether the pipeline is mid-run
+ *  (`running`) or paused awaiting approval (`gate`). null for non-staged states. */
+export function currentStage(stateName?: string | null): StageInfo | null {
+  switch (stateName) {
+    case 'STT': return { key: 'transcript', index: 0, phase: 'running' }
+    case 'TRANSCRIPT_REVIEW': return { key: 'transcript', index: 0, phase: 'gate' }
+    case 'TRANSLATING': return { key: 'translation', index: 1, phase: 'running' }
+    case 'TRANSLATION_REVIEW': return { key: 'translation', index: 1, phase: 'gate' }
+    case 'SYNTHESIZING': return { key: 'audio', index: 2, phase: 'running' }
+    case 'AUDIO_REVIEW':
+    case 'COMPLETE': return { key: 'audio', index: 2, phase: 'gate' }
+    default: return null
+  }
+}
+
