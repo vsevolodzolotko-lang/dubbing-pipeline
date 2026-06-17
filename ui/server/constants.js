@@ -64,7 +64,7 @@ export const SECRET_PATTERN = /key|secret|token|password|api[_-]?key/i
 export const EDITABLE_CONFIG_KEYS = new Set([
   'active_langs',
   'max_adaptation_attempts', 'expansion_threshold', 'w2_adapt_concurrency', 'w2_llm_chunk',
-  'max_segment_duration_sec', 'min_intra_sentence_pause_sec', 'min_segment_piece_duration_sec',
+  'max_segment_duration_sec', 'min_intra_sentence_pause_sec', 'min_segment_piece_duration_sec', 'min_hard_pause_piece_sec',
   'min_inter_segment_gap_sec', 'max_borrow_per_segment_sec', 'movement_borrow_max_sec',
   'silence_lead_ratio', 'silence_lead_max_sec', 'max_speed_up_delta', 'max_slow_down_delta', 'slowdown_min_gap_sec',
   'cps_estimate_de', 'cps_estimate_es', 'cps_estimate_fr', 'cps_estimate_it', 'cps_estimate_pl', 'cps_estimate_pt', 'cps_estimate_tr',
