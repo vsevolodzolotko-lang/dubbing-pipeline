@@ -72,7 +72,7 @@ function main() {
       prompt: 'consent',
       scope: SCOPES,
     })
-    console.log('\n— Dubbing Studio · вхід Google (read-only) —')
+    console.log('\n— Localization Studio · вхід Google (read-only) —')
     console.log(`Проєкт: ${config.sheetId ? 'SHEET ' + config.sheetId.slice(0, 8) + '…' : ''}`)
     console.log('\nВідкриваю браузер для входу. Якщо не відкрилось — встав цей URL вручну:\n')
     console.log(url + '\n')
@@ -87,7 +87,7 @@ function main() {
 function respond(res, msg) {
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
   res.end(`<!doctype html><meta charset="utf-8"><body style="font-family:system-ui;padding:3rem;text-align:center">
-    <h2>Dubbing Studio</h2><p>${msg}</p></body>`)
+    <h2>Localization Studio</h2><p>${msg}</p></body>`)
 }
 
 main()

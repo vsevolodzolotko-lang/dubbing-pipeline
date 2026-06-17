@@ -85,7 +85,7 @@ export function TranscriptReview() {
                   return (
                     <li key={seg.segment_id}
                       onClick={() => setSelected(seg.segment_id)}
-                      className={`rounded-lg border p-3 ${isSel ? 'border-gray-900 bg-white' : 'border-gray-200 bg-white hover:border-gray-300'}`}>
+                      className={`rounded-lg border p-3 ${isSel ? 'border-gray-900 dark:border-gray-100 bg-white dark:bg-[#1c1814]' : 'border-gray-200 dark:border-[#332b22] bg-white dark:bg-[#1c1814] hover:border-gray-300 dark:border-[#473d31]'}`}>
                       <div className="mb-1.5 flex items-center gap-2 text-xs text-gray-500">
                         <span className="font-mono">{shortId(seg.segment_id)}</span>
                         <span>{fmt(n(seg.en_start_sec))}→{fmt(n(seg.en_end_sec))}с ({fmt(n(seg.en_duration_sec))}с)</span>
@@ -98,15 +98,15 @@ export function TranscriptReview() {
                         onChange={(e) => setDrafts((d) => ({ ...d, [seg.segment_id]: e.target.value }))}
                         onBlur={() => commitEdit(seg)}
                         rows={2}
-                        className="w-full resize-none rounded border border-gray-200 px-2 py-1 text-sm disabled:bg-gray-50 disabled:text-gray-500"
+                        className="w-full resize-none rounded border border-gray-200 dark:border-[#332b22] px-2 py-1 text-sm disabled:bg-gray-50 dark:bg-[#1c1814] dark:disabled:bg-[#262019] disabled:text-gray-500"
                       />
                       {editable && (
                         <div className="mt-1.5 flex gap-2 text-xs">
                           <button onClick={(e) => { e.stopPropagation(); openSplit(seg.segment_id) }}
-                            className="rounded border border-gray-300 px-2 py-0.5 hover:bg-gray-50">🔪 розділити</button>
+                            className="rounded border border-gray-300 dark:border-[#473d31] px-2 py-0.5 hover:bg-gray-50">🔪 розділити</button>
                           {i < segs.length - 1 && (
                             <button onClick={(e) => { e.stopPropagation(); doMerge(seg.segment_id) }}
-                              className="rounded border border-gray-300 px-2 py-0.5 hover:bg-gray-50">⤵ злити з наступним</button>
+                              className="rounded border border-gray-300 dark:border-[#473d31] px-2 py-0.5 hover:bg-gray-50">⤵ злити з наступним</button>
                           )}
                         </div>
                       )}
@@ -122,7 +122,7 @@ export function TranscriptReview() {
 
           {/* ── EN audio for the selected segment ── */}
           <aside className="lg:sticky lg:top-4 self-start">
-            <h2 className="mb-2 text-sm font-semibold text-gray-700">Оригінал (EN)</h2>
+            <h2 className="mb-2 text-sm font-semibold text-gray-700 dark:text-gray-300">Оригінал (EN)</h2>
             {sel ? (
               <>
                 <div className="mb-2 text-xs text-gray-500">{shortId(sel.segment_id)} · {fmt(n(sel.en_duration_sec))}с</div>
@@ -153,8 +153,8 @@ export function TranscriptReview() {
 
 function SplitPicker({ words, onPick }: { words: Word[]; onPick: (k: number) => void }) {
   return (
-    <div className="mt-2 rounded-md border border-blue-200 bg-blue-50 p-2">
-      <div className="mb-1 text-xs text-blue-800">Клікни між словами, щоб розділити сегмент:</div>
+    <div className="mt-2 rounded-md border border-blue-200 bg-blue-50 p-2 dark:border-blue-900 dark:bg-blue-950/40">
+      <div className="mb-1 text-xs text-blue-800 dark:text-blue-300">Клікни між словами, щоб розділити сегмент:</div>
       <div className="flex flex-wrap items-center gap-0.5 text-sm">
         {words.map((w, i) => (
           <span key={i} className="flex items-center">

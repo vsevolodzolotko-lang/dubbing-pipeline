@@ -26,8 +26,9 @@ export function registerQaRoutes(fastify, { snapshot }) {
     const write = (o) => { try { res.write(JSON.stringify(o) + '\n') } catch { /* client gone */ } }
     try {
       const langs = Array.isArray(req.body?.langs) ? req.body.langs : null
+      const model = typeof req.body?.model === 'string' ? req.body.model : undefined
       const report = await runAnalysis({
-        snapshot, langs,
+        snapshot, langs, model,
         onProgress: (p) => write({ type: 'progress', ...p }),
       })
       lastReport = report

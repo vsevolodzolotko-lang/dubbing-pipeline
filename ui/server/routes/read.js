@@ -1,5 +1,6 @@
 import { buildLessonMatrix, filterLocalizations } from '../services/derive.js'
 import { maskConfigValue } from '../constants.js'
+import { archive } from '../services/archive.js'
 
 /** Read endpoints — all served instantly from the in-memory snapshot. */
 export function registerReadRoutes(fastify, { snapshot }) {
@@ -43,8 +44,12 @@ export function registerReadRoutes(fastify, { snapshot }) {
     return { key: p.key, description: p.description ?? '', value: p.value ?? '' }
   })
 
-  fastify.get('/api/archive', async () => {
-    // browse-only stub for the foundation; archive folder listing comes in v3
-    return { rows: [] }
+  // Run archive — history of completed staged lessons + settings snapshots.
+  fastify.get('/api/archive', async () => ({ rows: archive.list() }))
+
+  fastify.get('/api/archive/:id', async (req, reply) => {
+    const r = archive.get(req.params.id)
+    if (!r) return reply.code(404).send({ error: 'запис не знайдено' })
+    return r
   })
 }

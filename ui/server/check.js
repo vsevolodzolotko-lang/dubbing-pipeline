@@ -14,7 +14,7 @@ function line(status, label, detail) {
 }
 
 async function run() {
-  console.log(`\nDubbing Studio — setup check (mode=${config.mode})\n`)
+  console.log(`\nLocalization Studio — setup check (mode=${config.mode})\n`)
 
   if (config.mode === 'mock') {
     line('pass', 'Режим MOCK', 'тестові дані, Google API не потрібен')

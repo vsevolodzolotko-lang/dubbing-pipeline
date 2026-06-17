@@ -66,7 +66,7 @@ async function main() {
   snapshot.start()
 
   await fastify.listen({ port: config.port, host: config.host })
-  fastify.log.info(`Dubbing Studio — mode=${config.mode}, writes=${config.enableWrites ? 'ON' : 'OFF'}`)
+  fastify.log.info(`Localization Studio — mode=${config.mode}, writes=${config.enableWrites ? 'ON' : 'OFF'}`)
   if (config.mode === 'mock') {
     fastify.log.info('MOCK mode: serving fixtures. Add SHEET_ID + service account to .env for live (read-only) data.')
   }
@@ -74,7 +74,7 @@ async function main() {
 
 function devHint() {
   return `<!doctype html><meta charset="utf-8"><body style="font-family:system-ui;padding:2rem;max-width:40rem">
-  <h2>Dubbing Studio — server is up</h2>
+  <h2>Localization Studio — server is up</h2>
   <p>The client isn't built yet. For development run <code>npm run dev</code> and open
   <a href="http://localhost:5173">http://localhost:5173</a>.</p>
   <p>For production run <code>npm run build</code> then <code>npm start</code>.</p>

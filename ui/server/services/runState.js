@@ -104,6 +104,7 @@ export function computeRunState(ctx) {
     staged,
     pipelineStage: staged ? pipelineStage : null,
     stageStatus: staged ? stageStatus : null,
+    activeLangs: langs,
     progress: {
       segCount,
       langTotal: langs.length,
@@ -136,6 +137,8 @@ function stageToState({ pipelineStage, stageStatus, langs, fullDoneLangs, synthB
         || langs.find((l) => !fullDoneLangs.includes(l)) || null
       return { state: RUN_STATES.SYNTHESIZING, currentLang }
     }
+    case PIPELINE_STAGES.RENDER:
+      return { state: RUN_STATES.RENDERING } // building the full file from segments
     case PIPELINE_STAGES.DONE:
       return { state: RUN_STATES.COMPLETE }
     default:

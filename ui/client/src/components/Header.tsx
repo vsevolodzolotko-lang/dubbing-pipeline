@@ -1,5 +1,6 @@
 import { useRunState } from '../api/useRunState'
 import { STATE_COPY, TONE_CLASSES, currentStage, STAGES } from '../ui'
+import { ThemeToggle } from './ThemeToggle'
 
 export function Header() {
   const { state, connected } = useRunState()
@@ -7,17 +8,17 @@ export function Header() {
   const stage = state?.staged ? currentStage(state.state) : null
 
   return (
-    <header className="flex items-center gap-4 border-b border-gray-200 bg-white px-5 py-3">
-      <div className="text-sm text-gray-500">
+    <header className="flex items-center gap-4 border-b border-gray-200 bg-white px-5 py-3 dark:border-[#332b22] dark:bg-[#1c1814]">
+      <div className="text-sm text-gray-500 dark:text-gray-400">
         Урок:{' '}
-        <span className="font-medium text-gray-900">{state?.lessonId ?? '—'}</span>
+        <span className="font-medium text-gray-900 dark:text-gray-100">{state?.lessonId ?? '—'}</span>
         {state?.mode === 'mock' && (
-          <span className="ml-2 rounded bg-purple-100 px-1.5 py-0.5 text-[11px] font-medium text-purple-700">MOCK</span>
+          <span className="ml-2 rounded bg-purple-100 px-1.5 py-0.5 text-[11px] font-medium text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">MOCK</span>
         )}
       </div>
 
       {stage && (
-        <span className="rounded-full border border-gray-300 bg-gray-50 px-2 py-1 text-[11px] font-medium text-gray-600">
+        <span className="rounded-full border border-gray-300 bg-gray-50 px-2 py-1 text-[11px] font-medium text-gray-600 dark:border-[#473d31] dark:bg-[#262019] dark:text-gray-300">
           Етап {stage.index + 1}/{STAGES.length} · {STAGES[stage.index].label}
         </span>
       )}
@@ -29,19 +30,20 @@ export function Header() {
       )}
 
       {state && state.needsAttention.total > 0 && (
-        <span className="text-sm text-gray-600">
+        <span className="text-sm text-gray-600 dark:text-gray-400">
           Потребують уваги:{' '}
-          <span className="font-semibold text-gray-900">
+          <span className="font-semibold text-gray-900 dark:text-gray-100">
             {state.needsAttention.count} ({state.needsAttention.pct}%)
           </span>
         </span>
       )}
 
-      <div className="ml-auto flex items-center gap-3 text-xs text-gray-400">
+      <div className="ml-auto flex items-center gap-2 text-xs text-gray-400">
         {!state?.enableWrites && (
-          <span className="rounded bg-gray-100 px-2 py-0.5">записи вимкнено</span>
+          <span className="rounded bg-gray-100 px-2 py-0.5 dark:bg-[#262019]">записи вимкнено</span>
         )}
-        <span className={`h-2 w-2 rounded-full ${connected ? 'bg-green-500' : 'bg-gray-300'}`} title={connected ? 'live' : 'offline'} />
+        <ThemeToggle />
+        <span className={`h-2 w-2 rounded-full ${connected ? 'bg-green-500' : 'bg-gray-300 dark:bg-gray-600'}`} title={connected ? 'live' : 'offline'} />
       </div>
     </header>
   )

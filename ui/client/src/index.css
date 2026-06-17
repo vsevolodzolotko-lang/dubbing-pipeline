@@ -1,7 +1,60 @@
 @import 'tailwindcss';
 
+/* Class-based dark mode: `dark:` utilities apply when <html> has .dark
+   (set before paint by the inline script in index.html). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ── Spirio wellness design tokens (Tailwind v4 CSS-first) ───────────────────
+   Warm "paper + ink" base, serif display headings, calm sage/ochre/rust status
+   palette instead of bright Tailwind primaries. `--color-*` tokens auto-generate
+   `bg-*`/`text-*`/`border-*` utilities; `--font-*` drive `font-serif`/`font-mono`.
+   NOTE: --color-accent is a placeholder warm clay — swap for the real Spirio
+   brand hex when available. */
+@theme {
+  --font-serif: 'Lora', Georgia, 'Times New Roman', serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* surfaces */
+  --color-paper: #faf7f2;
+  --color-paper-raised: #fffdfa;
+  --color-ink: #2b2724;
+
+  /* sage — success / ok */
+  --color-sage-100: #e6ede5;
+  --color-sage-200: #cdddc9;
+  --color-sage-600: #6f8f6c;
+  --color-sage-700: #587056;
+  --color-sage-900: #2c3a2b;
+
+  /* ochre — warn / review */
+  --color-ochre-100: #f4ebd6;
+  --color-ochre-200: #e7d6a8;
+  --color-ochre-700: #8a6d2f;
+  --color-ochre-900: #423417;
+
+  /* info — in-progress / running (dusty teal, calmer than primary blue) */
+  --color-info-100: #e0ebe9;
+  --color-info-200: #c2d8d4;
+  --color-info-700: #4d706b;
+  --color-info-900: #233734;
+
+  /* rust — danger / attention */
+  --color-rust-100: #f2ded7;
+  --color-rust-200: #e3bdaf;
+  --color-rust-600: #c77b6b;
+  --color-rust-700: #a85a49;
+  --color-rust-900: #532922;
+
+  /* accent — primary CTA (placeholder warm clay) */
+  --color-accent: #b06a4f;
+  --color-accent-hover: #97583f;
+}
+
 :root {
   color-scheme: light;
+}
+html.dark {
+  color-scheme: dark;
 }
 
 html, body, #root {
@@ -11,6 +64,31 @@ html, body, #root {
 
 body {
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  background: #f6f7f9;
-  color: #1c2024;
+  background: #faf7f2;
+  color: #2b2724;
 }
+
+html.dark body {
+  background: #14110d;
+  color: #ece6dd;
+}
+
+/* Serif display for all screen headings — applies app-wide without touching each
+   file. Lora ships Cyrillic, so Ukrainian headings render in the brand serif. */
+h1, h2, h3 {
+  font-family: var(--font-serif);
+  letter-spacing: -0.01em;
+}
+
+/* Calm appear: 150ms fade for newly-mounted cards/banners (opt-in via .appear). */
+@keyframes appear-fade {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: none; }
+}
+.appear {
+  animation: appear-fade 150ms ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .appear { animation: none; }
+}
+</content>

@@ -52,20 +52,20 @@ export function CartBar() {
 
   return (
     <>
-      <div className="flex items-center gap-3 border-t border-gray-200 bg-white px-5 py-2 shadow-[0_-1px_3px_rgba(0,0,0,0.04)]">
+      <div className="flex items-center gap-3 border-t border-gray-200 bg-white px-5 py-2 shadow-[0_-1px_3px_rgba(0,0,0,0.04)] dark:border-[#332b22] dark:bg-[#1c1814]">
         {items.length > 0 ? (
           <>
-            <span className="text-sm">🧺 Кошик перегенерації: <b>{items.length}</b></span>
+            <span className="text-sm dark:text-gray-200">🧺 Кошик перегенерації: <b>{items.length}</b></span>
             <button
               onClick={() => setOpen(true)}
               disabled={!writable}
               title={writable ? '' : reason}
-              className="rounded-md bg-gray-900 px-3 py-1.5 text-sm text-white hover:bg-gray-700 disabled:opacity-40"
+              className="rounded-md bg-gray-900 px-3 py-1.5 text-sm text-white hover:bg-gray-700 disabled:opacity-40 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
             >
               Перегенерувати
             </button>
-            <button onClick={clear} className="text-sm text-gray-500 hover:text-gray-800">Очистити</button>
-            {!writable && <span className="text-xs text-amber-600">{reason}</span>}
+            <button onClick={clear} className="text-sm text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200">Очистити</button>
+            {!writable && <span className="text-xs text-amber-600 dark:text-amber-400">{reason}</span>}
           </>
         ) : null}
         {msg && (
@@ -80,16 +80,16 @@ export function CartBar() {
       </div>
 
       {open && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30" onClick={() => !busy && setOpen(false)}>
-          <div className="max-h-[80vh] w-[40rem] overflow-auto rounded-xl bg-white p-5" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 dark:bg-black/60" onClick={() => !busy && setOpen(false)}>
+          <div className="max-h-[80vh] w-[40rem] overflow-auto rounded-xl bg-white p-5 dark:bg-[#1c1814] dark:text-gray-100" onClick={(e) => e.stopPropagation()}>
             <h2 className="text-lg font-semibold">Перегенерувати {items.length} сегментів?</h2>
-            <p className="mt-1 text-sm text-gray-500">
+            <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
               Будуть виставлені <code>needs_retts=TRUE</code> і записані правки тексту, потім запуститься W_Regen.
               Рядки стануть <b>REVIEW</b> для прослуху.
             </p>
             <ul className="mt-3 space-y-2">
               {items.map((i) => (
-                <li key={i.rowKey} className="rounded-md border border-gray-200 p-2 text-sm">
+                <li key={i.rowKey} className="rounded-md border border-gray-200 p-2 text-sm dark:border-[#332b22]">
                   <div className="font-mono text-xs text-gray-400">{shortId(i.segmentId)} · {i.lang}{i.comment ? ` · ${i.comment}` : ''}</div>
                   {i.newText !== i.oldText ? (
                     <>

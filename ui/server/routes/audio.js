@@ -38,6 +38,13 @@ export function registerAudioRoutes(fastify, { snapshot, drive }) {
     if (!r) return reply.code(404).send({ error: 'EN region not found' })
     return serveEnRegion(req, reply, drive, r)
   })
+  // EN-region waveform peaks by rowKey — for the dual (original + dub) view at the
+  // audio gate. Same seed/duration as the EN clip above so the waveforms match.
+  fastify.get('/api/peaks/en/segment/:rowKey', async (req, reply) => {
+    const r = resolveEnRegion(snapshot, req.params.rowKey)
+    if (!r) return reply.code(404).send({ error: 'EN region not found' })
+    return servePeaks(reply, drive, { kind: 'enseg', fileId: `en_${r.rowKey}`, duration: r.dur })
+  })
 
   // EN region resolved by segment_id (no localizations needed) — used by the
   // transcript-review gate, before any synthesis exists.

@@ -2,19 +2,32 @@ import { useEffect, useState } from 'react'
 import { useRunState } from '../api/useRunState'
 import { STATE_COPY, TONE_CLASSES } from '../ui'
 import { StagedDropzone } from '../components/StagedDropzone'
+import { PreflightSetup } from '../components/PreflightSetup'
 import type { RunState } from '../api/types'
 
 const RUNNING = new Set(['STARTING', 'ARCHIVING', 'STT', 'TRANSLATING', 'SYNTHESIZING', 'STOPPING', 'REGENERATING'])
 
 export function Dashboard() {
   const { state } = useRunState()
+  const [pendingFile, setPendingFile] = useState<string | null>(null)
   if (!state) return <Loading />
 
   const copy = STATE_COPY[state.state]
 
+  // Pre-flight takes over the tab (full width) once a file is dropped.
+  if (pendingFile) {
+    return (
+      <div className="p-6">
+        <div className="mx-auto max-w-2xl rounded-xl border border-gray-200 bg-white p-5 dark:border-[#332b22] dark:bg-[#1c1814]">
+          <PreflightSetup fileName={pendingFile} onCancel={() => setPendingFile(null)} />
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="grid grid-cols-1 gap-6 p-6 lg:grid-cols-[1fr_18rem]">
-      <section className="rounded-xl border border-gray-200 bg-white p-5">
+      <section className="rounded-xl border border-gray-200 bg-white p-5 dark:border-[#332b22] dark:bg-[#1c1814]">
         <div className="mb-4 flex items-center gap-3">
           <h1 className="text-lg font-semibold">Прогрес рану</h1>
           <span className={`rounded-full border px-3 py-1 text-xs font-medium ${TONE_CLASSES[copy.tone]}`}>
@@ -28,9 +41,9 @@ export function Dashboard() {
         )}
       </section>
 
-      <section className="rounded-xl border border-gray-200 bg-white p-5">
-        <h2 className="mb-3 text-sm font-semibold text-gray-700">Новий урок (поетапний)</h2>
-        <StagedDropzone />
+      <section className="rounded-xl border border-gray-200 bg-white p-5 dark:border-[#332b22] dark:bg-[#1c1814]">
+        <h2 className="mb-3 text-sm font-semibold text-gray-700 dark:text-gray-300">Новий урок (поетапний)</h2>
+        <StagedDropzone onFile={setPendingFile} />
       </section>
     </div>
   )
@@ -51,7 +64,8 @@ const STAGES_STAGED = [
   { key: 'translate', label: 'Переклад', gate: false },
   { key: 'translation_gate', label: '✋ Перевірка перекладу', gate: true },
   { key: 'synth', label: 'Синтез аудіо (мова за мовою)', gate: false },
-  { key: 'audio_gate', label: '✋ Перевірка аудіо', gate: true },
+  { key: 'audio_gate', label: '✋ Перевірка аудіо (сегменти)', gate: true },
+  { key: 'render', label: 'Збірка повного файлу', gate: false },
   { key: 'done', label: 'Готово', gate: false },
 ] as const
 
@@ -72,7 +86,7 @@ function Stepper({ state }: { state: RunState }) {
               {status === 'done' ? '✓' : status === 'active' ? (s.gate ? '✋' : '▶') : '·'}
             </span>
             <div className="flex-1">
-              <div className={`text-sm ${status === 'todo' ? 'text-gray-400' : 'text-gray-800'}`}>{s.label}</div>
+              <div className={`text-sm ${status === 'todo' ? 'text-gray-400' : 'text-gray-800 dark:text-gray-200'}`}>{s.label}</div>
               {s.key === 'synth' && status !== 'todo' && <LangProgress state={state} />}
             </div>
           </li>
@@ -91,7 +105,8 @@ function stagedProgress(stateName: string): number {
     case 'TRANSLATION_REVIEW': return 3
     case 'SYNTHESIZING': return 4
     case 'AUDIO_REVIEW': return 5
-    case 'COMPLETE': return 7
+    case 'RENDERING': return 6
+    case 'COMPLETE': return 8
     default: return 0
   }
 }
@@ -122,8 +137,8 @@ function LangProgress({ state }: { state: RunState }) {
 
 function CompletionCard({ state }: { state: RunState }) {
   return (
-    <div className="mt-5 rounded-lg border border-green-200 bg-green-50 p-4">
-      <div className="text-sm font-medium text-green-900">
+    <div className="mt-5 rounded-lg border border-green-200 bg-green-50 p-4 dark:border-green-900 dark:bg-green-950/50">
+      <div className="text-sm font-medium text-green-900 dark:text-green-200">
         ✅ {state.state === 'STOPPED' ? 'Зупинено' : 'Дубляж готовий'}
         {state.needsAttention.total > 0 && (
           <> · Потребують уваги: {state.needsAttention.pct}% ({state.needsAttention.count}/{state.needsAttention.total})</>
@@ -174,7 +189,7 @@ function Timers({ state }: { state: RunState }) {
   }
 
   return (
-    <div className="mb-4 flex flex-wrap items-center gap-x-6 gap-y-1 rounded-lg bg-gray-50 px-3 py-2 text-sm">
+    <div className="mb-4 flex flex-wrap items-center gap-x-6 gap-y-1 rounded-lg bg-gray-50 px-3 py-2 text-sm dark:bg-[#262019]">
       {elapsedMs != null && (
         <span>⏱ {frozen ? 'Тривало:' : 'Іде:'} <b className="tabular-nums">{fmtHMS(elapsedMs)}</b></span>
       )}

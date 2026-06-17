@@ -12,6 +12,7 @@ import { Workbench } from './screens/Workbench'
 import { Qa } from './screens/Qa'
 import { Voices } from './screens/Voices'
 import { Config } from './screens/Config'
+import { Archive } from './screens/Archive'
 import { Placeholder } from './screens/Placeholder'
 import { SetupErrorScreen } from './screens/SetupError'
 
@@ -36,7 +37,7 @@ export default function App() {
             <Route path="/prompts" element={<Placeholder title="Промпти" phase="v3" />} />
             <Route path="/cps" element={<Placeholder title="Калібрування CPS" phase="v3" />} />
             <Route path="/config" element={<Config />} />
-            <Route path="/archive" element={<Placeholder title="Архів" phase="v3" />} />
+            <Route path="/archive" element={<Archive />} />
             <Route path="/setup" element={<SetupErrorScreen />} />
             <Route path="*" element={<Navigate to="/lesson" replace />} />
           </Routes>

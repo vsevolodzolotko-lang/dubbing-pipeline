@@ -25,12 +25,12 @@ export function Sidebar() {
   const gateRoute = cur?.phase === 'gate' ? STAGES[cur.index]?.route : null
 
   return (
-    <nav className="w-56 shrink-0 border-r border-gray-200 bg-white flex flex-col">
-      <div className="px-4 py-4 text-lg font-semibold tracking-tight">Dubbing Studio</div>
+    <nav className="w-56 shrink-0 border-r border-gray-200 bg-white flex flex-col dark:border-[#332b22] dark:bg-[#1c1814]">
+      <div className="px-4 py-4 text-lg font-semibold tracking-tight text-gray-900 dark:text-gray-100">Localization Studio</div>
       <Section title="Щоденна робота" items={DAILY} gateRoute={gateRoute} />
       <Section title="Налаштування" items={SETTINGS} warn />
       <div className="mt-auto px-4 py-3 text-xs">
-        <NavLink to="/setup" className="text-gray-400 hover:text-gray-700">Доступи / діагностика</NavLink>
+        <NavLink to="/setup" className="text-gray-400 hover:text-gray-700 dark:hover:text-gray-200">Доступи / діагностика</NavLink>
       </div>
     </nav>
   )
@@ -39,7 +39,7 @@ export function Sidebar() {
 function Section({ title, items, warn, gateRoute }: { title: string; items: typeof DAILY; warn?: boolean; gateRoute?: string | null }) {
   return (
     <div className="px-2 py-2">
-      <div className={`px-2 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-wide ${warn ? 'text-amber-600' : 'text-gray-400'}`}>
+      <div className={`px-2 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-wide ${warn ? 'text-amber-600 dark:text-amber-500' : 'text-gray-400'}`}>
         {title}
       </div>
       {items.map((it) => (
@@ -48,7 +48,7 @@ function Section({ title, items, warn, gateRoute }: { title: string; items: type
           to={it.to}
           className={({ isActive }) =>
             `flex items-center gap-2 rounded-md px-3 py-2 text-sm ${
-              isActive ? 'bg-gray-900 text-white' : 'text-gray-700 hover:bg-gray-100'
+              isActive ? 'bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900' : 'text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-[#262019]'
             }`}
         >
           <span>{it.icon}</span>

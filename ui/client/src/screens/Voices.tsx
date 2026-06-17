@@ -103,10 +103,10 @@ function LibraryPanel({ lib, rows, langs, writable, onChanged, onApplyToLang }: 
   }
 
   return (
-    <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4">
+    <div className="mt-4 rounded-xl border border-gray-200 dark:border-[#332b22] bg-gray-50 dark:bg-[#262019] p-4">
       <div className="flex items-center gap-3">
-        <h2 className="text-sm font-semibold text-gray-800">🎚️ Бібліотека голосів</h2>
-        <button onClick={saveCurrentSet} className="rounded border border-gray-300 bg-white px-2 py-1 text-xs hover:bg-gray-100">Зберегти поточний набір…</button>
+        <h2 className="text-sm font-semibold text-gray-800 dark:text-gray-200">🎚️ Бібліотека голосів</h2>
+        <button onClick={saveCurrentSet} className="rounded border border-gray-300 dark:border-[#473d31] bg-white dark:bg-[#1c1814] px-2 py-1 text-xs hover:bg-gray-100">Зберегти поточний набір…</button>
         {msg && <span className="text-xs text-gray-500">{msg}</span>}
       </div>
 
@@ -116,7 +116,7 @@ function LibraryPanel({ lib, rows, langs, writable, onChanged, onApplyToLang }: 
           {voices.length === 0 ? <div className="text-xs text-gray-400">порожньо — збережи голос із картки нижче</div> : (
             <ul className="space-y-1">
               {voices.map((p) => (
-                <li key={p.id} className="flex items-center gap-2 rounded border border-gray-200 bg-white px-2 py-1 text-sm">
+                <li key={p.id} className="flex items-center gap-2 rounded border border-gray-200 dark:border-[#332b22] bg-white dark:bg-[#1c1814] px-2 py-1 text-sm">
                   <span className="flex-1 truncate" title={`${p.voice_name || ''} ${p.voice_id || ''}`}>{p.name}</span>
                   <LangApply langs={langs} onApply={(lang) => onApplyToLang(lang, pick(p as Record<string, unknown>))} />
                   <button onClick={() => del('voice', p.id)} className="text-xs text-gray-400 hover:text-red-600">✕</button>
@@ -130,10 +130,10 @@ function LibraryPanel({ lib, rows, langs, writable, onChanged, onApplyToLang }: 
           {sets.length === 0 ? <div className="text-xs text-gray-400">порожньо — «Зберегти поточний набір»</div> : (
             <ul className="space-y-1">
               {sets.map((s) => (
-                <li key={s.id} className="flex items-center gap-2 rounded border border-gray-200 bg-white px-2 py-1 text-sm">
+                <li key={s.id} className="flex items-center gap-2 rounded border border-gray-200 dark:border-[#332b22] bg-white dark:bg-[#1c1814] px-2 py-1 text-sm">
                   <span className="flex-1 truncate">{s.name} <span className="text-xs text-gray-400">({s.voices.length} мов)</span></span>
                   <button onClick={() => applySet(s)} disabled={!writable} title={writable ? '' : 'запис заблоковано'}
-                    className="rounded border border-gray-300 px-2 py-0.5 text-xs hover:bg-gray-100 disabled:opacity-40">Застосувати</button>
+                    className="rounded border border-gray-300 dark:border-[#473d31] px-2 py-0.5 text-xs hover:bg-gray-100 disabled:opacity-40">Застосувати</button>
                   <button onClick={() => del('set', s.id)} className="text-xs text-gray-400 hover:text-red-600">✕</button>
                 </li>
               ))}
@@ -149,10 +149,10 @@ function LangApply({ langs, onApply }: { langs: string[]; onApply: (lang: string
   const [lang, setLang] = useState(langs[0] || '')
   return (
     <span className="flex items-center gap-1">
-      <select value={lang} onChange={(e) => setLang(e.target.value)} className="rounded border border-gray-300 px-1 py-0.5 text-xs">
+      <select value={lang} onChange={(e) => setLang(e.target.value)} className="rounded border border-gray-300 dark:border-[#473d31] px-1 py-0.5 text-xs">
         {langs.map((l) => <option key={l} value={l}>{l}</option>)}
       </select>
-      <button onClick={() => lang && onApply(lang)} className="rounded border border-gray-300 px-2 py-0.5 text-xs hover:bg-gray-100">→</button>
+      <button onClick={() => lang && onApply(lang)} className="rounded border border-gray-300 dark:border-[#473d31] px-2 py-0.5 text-xs hover:bg-gray-100">→</button>
     </span>
   )
 }
@@ -167,6 +167,7 @@ function VoiceCard({ voice, writable, live, sample, apply, onSaved, onLibraryCha
   const [saveMsg, setSaveMsg] = useState<string | null>(null)
   const [testMsg, setTestMsg] = useState<string | null>(null)
   const [tests, setTests] = useState(0)
+  const [showListen, setShowListen] = useState(false)
   const audioRef = useRef<HTMLAudioElement>(null)
   const urlRef = useRef<string | null>(null)
 
@@ -216,50 +217,59 @@ function VoiceCard({ voice, writable, live, sample, apply, onSaved, onLibraryCha
   }
 
   return (
-    <div className="rounded-xl border border-gray-200 bg-white p-4">
+    <div className="rounded-xl border border-gray-200 dark:border-[#332b22] bg-paper-raised dark:bg-[#1c1814] p-3">
       <div className="mb-2 flex items-center gap-2">
         <span className="font-mono text-sm font-semibold">{voice.lang}</span>
-        {changed && writable && <button onClick={save} disabled={busy} className="rounded bg-gray-900 px-2 py-1 text-xs text-white hover:bg-gray-700 disabled:opacity-50">Зберегти</button>}
-        <button onClick={saveToLibrary} className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-100" title="Зберегти ці параметри у бібліотеку">💾 У бібліотеку</button>
-        {saveMsg && <span className={`text-xs ${saveMsg.startsWith('✗') ? 'text-red-700' : 'text-gray-500'}`}>{saveMsg}</span>}
+        {changed && writable && <button onClick={save} disabled={busy} className="rounded bg-accent px-2 py-1 text-xs text-white hover:bg-accent-hover disabled:opacity-50">Зберегти</button>}
+        <button onClick={saveToLibrary} className="rounded border border-gray-300 dark:border-[#473d31] px-2 py-1 text-xs hover:bg-gray-100 dark:hover:bg-[#262019]" title="Зберегти ці параметри у бібліотеку">💾 У бібліотеку</button>
+        {saveMsg && <span className={`text-xs ${saveMsg.startsWith('✗') ? 'text-rust-700' : 'text-gray-500'}`}>{saveMsg}</span>}
       </div>
 
-      <div className="grid grid-cols-2 gap-2 text-sm">
-        <label className="col-span-2 flex flex-col gap-0.5">
-          <span className="text-xs text-gray-400">voice_id</span>
-          <input value={form.voice_id ?? ''} onChange={(e) => set('voice_id', e.target.value)} disabled={!writable} className="rounded border border-gray-300 px-2 py-1 font-mono text-xs disabled:bg-gray-100" />
+      {/* row 1: identity — id (flex) · name · model */}
+      <div className="flex flex-wrap items-end gap-2 text-sm">
+        <label className="flex min-w-[10rem] flex-1 flex-col gap-0.5">
+          <span className="text-[11px] text-gray-400">voice_id</span>
+          <input value={form.voice_id ?? ''} onChange={(e) => set('voice_id', e.target.value)} disabled={!writable} className="rounded border border-gray-300 dark:border-[#473d31] px-2 py-1 font-mono text-xs disabled:bg-gray-100 dark:disabled:bg-[#262019]" />
         </label>
-        <label className="flex flex-col gap-0.5">
-          <span className="text-xs text-gray-400">voice_name</span>
-          <input value={form.voice_name ?? ''} onChange={(e) => set('voice_name', e.target.value)} disabled={!writable} className="rounded border border-gray-300 px-2 py-1 disabled:bg-gray-100" />
+        <label className="flex w-28 flex-col gap-0.5">
+          <span className="text-[11px] text-gray-400">voice_name</span>
+          <input value={form.voice_name ?? ''} onChange={(e) => set('voice_name', e.target.value)} disabled={!writable} className="rounded border border-gray-300 dark:border-[#473d31] px-2 py-1 text-xs disabled:bg-gray-100 dark:disabled:bg-[#262019]" />
         </label>
-        <label className="flex flex-col gap-0.5">
-          <span className="text-xs text-gray-400">model</span>
-          <input value={form.model ?? ''} onChange={(e) => set('model', e.target.value)} disabled={!writable} className="rounded border border-gray-300 px-2 py-1 text-xs disabled:bg-gray-100" />
+        <label className="flex w-28 flex-col gap-0.5">
+          <span className="text-[11px] text-gray-400">model</span>
+          <input value={form.model ?? ''} onChange={(e) => set('model', e.target.value)} disabled={!writable} className="rounded border border-gray-300 dark:border-[#473d31] px-2 py-1 text-xs disabled:bg-gray-100 dark:disabled:bg-[#262019]" />
         </label>
+      </div>
+
+      {/* row 2: the four tuning numbers, one compact row */}
+      <div className="mt-2 grid grid-cols-4 gap-2 text-sm">
         {NUM_FIELDS.map((f) => (
           <label key={f.key} className="flex flex-col gap-0.5">
-            <span className="text-xs text-gray-400">{f.label}</span>
-            <input type="number" min={f.min} max={f.max} step={f.step} value={form[f.key] ?? ''} onChange={(e) => set(f.key, e.target.value)} disabled={!writable} className="rounded border border-gray-300 px-2 py-1 disabled:bg-gray-100" />
+            <span className="text-[11px] text-gray-400">{f.label}</span>
+            <input type="number" min={f.min} max={f.max} step={f.step} value={form[f.key] ?? ''} onChange={(e) => set(f.key, e.target.value)} disabled={!writable} className="rounded border border-gray-300 dark:border-[#473d31] px-2 py-1 text-xs disabled:bg-gray-100 dark:disabled:bg-[#262019]" />
           </label>
         ))}
       </div>
 
-      {voiceIdChanged && <div className="mt-2 rounded bg-amber-50 px-2 py-1 text-[11px] text-amber-700">⚠ Змінив голос → після наступного уроку перекалібруй CPS ({voice.lang}).</div>}
+      {voiceIdChanged && <div className="mt-2 rounded bg-ochre-100 px-2 py-1 text-[11px] text-ochre-700 dark:bg-ochre-900/40 dark:text-ochre-200">⚠ Змінив голос → після наступного уроку перекалібруй CPS ({voice.lang}).</div>}
 
-      <div className="mt-3 rounded-lg bg-gray-50 p-2">
-        <div className="mb-1 flex items-center justify-between">
-          <span className="text-xs font-medium text-gray-500">Прослухати голос</span>
-          {sample && <button onClick={() => setText(sample)} className="text-[11px] text-blue-700 underline">приклад з уроку</button>}
+      {/* listen panel — collapsed by default to keep the card short */}
+      <button onClick={() => setShowListen((s) => !s)}
+        className="mt-2 flex w-full items-center gap-1 text-[11px] font-medium text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
+        <span>{showListen ? '▾' : '▸'}</span> Прослухати голос
+      </button>
+      {showListen && (
+        <div className="mt-1.5 rounded-lg bg-gray-50 dark:bg-[#262019] p-2">
+          {sample && <button onClick={() => setText(sample)} className="mb-1 text-[11px] text-accent underline">приклад з уроку</button>}
+          <textarea value={text} onChange={(e) => setText(e.target.value)} rows={2} placeholder={`Встав текст мовою ${voice.lang}…`} className="w-full resize-y rounded border border-gray-300 dark:border-[#473d31] px-2 py-1 text-sm" />
+          <div className="mt-1 flex items-center gap-2">
+            <button onClick={play} disabled={busy || !live} title={live ? '' : 'лише live-режим'} className="rounded-md bg-accent px-3 py-1 text-sm text-white hover:bg-accent-hover disabled:opacity-40">▶ Прослухати</button>
+            <span className="text-[11px] text-gray-400">{tests > 0 ? `тестів: ${tests}` : 'PCM 44.1k, як у пайплайні'}</span>
+            {testMsg && <span className="text-xs text-rust-700">{testMsg}</span>}
+          </div>
+          <audio ref={audioRef} className="mt-2 w-full" controls />
         </div>
-        <textarea value={text} onChange={(e) => setText(e.target.value)} rows={2} placeholder={`Встав текст мовою ${voice.lang}…`} className="w-full resize-y rounded border border-gray-300 px-2 py-1 text-sm" />
-        <div className="mt-1 flex items-center gap-2">
-          <button onClick={play} disabled={busy || !live} title={live ? '' : 'лише live-режим'} className="rounded-md bg-gray-900 px-3 py-1 text-sm text-white hover:bg-gray-700 disabled:opacity-40">▶ Прослухати</button>
-          <span className="text-[11px] text-gray-400">{tests > 0 ? `тестів: ${tests}` : 'PCM 44.1k, як у пайплайні'}</span>
-          {testMsg && <span className="text-xs text-red-700">{testMsg}</span>}
-        </div>
-        <audio ref={audioRef} className="mt-2 w-full" controls />
-      </div>
+      )}
     </div>
   )
 }

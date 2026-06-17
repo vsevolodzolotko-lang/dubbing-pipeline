@@ -49,7 +49,7 @@ export function RunBanner() {
 
 function Banner({ tone, children }: { tone: 'red' | 'amber'; children: React.ReactNode }) {
   const cls = tone === 'red'
-    ? 'bg-red-50 text-red-800 border-red-200'
-    : 'bg-amber-50 text-amber-900 border-amber-200'
+    ? 'bg-red-50 text-red-800 border-red-200 dark:bg-red-950/50 dark:text-red-300 dark:border-red-900'
+    : 'bg-amber-50 text-amber-900 border-amber-200 dark:bg-amber-950/50 dark:text-amber-200 dark:border-amber-900'
   return <div className={`border-b px-5 py-2 text-sm ${cls}`}>{children}</div>
 }

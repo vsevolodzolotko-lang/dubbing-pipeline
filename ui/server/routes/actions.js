@@ -6,11 +6,12 @@ import {
 } from '../constants.js'
 import {
   withWriteLock, writeLocalizationCells, writeConfigCell, writeVoiceCells,
-  writeSegmentCells, mergeSegments, splitSegment, approveStage, startStagedRun,
+  writeSegmentCells, mergeSegments, splitSegment, approveStage, startStagedRun, applyArchiveSettings,
 } from '../services/writes.js'
 import { wrapWav } from '../services/mockAudio.js'
 import { regenTracker } from '../services/regenTracker.js'
 import * as mockStore from '../services/mockStore.js'
+import { archive } from '../services/archive.js'
 
 const numOr = (v, d) => (v === '' || v == null || isNaN(Number(v)) ? d : Number(v))
 
@@ -138,6 +139,7 @@ export function registerActionRoutes(fastify, { snapshot, sheets }) {
     if (typeof value !== 'string') return reply.code(400).send({ error: 'value має бути рядком' })
     try {
       const res = await withWriteLock(() => writeConfigCell(sheets, key, value, expected))
+      snapshot.refresh()
       return { ok: true, ...res }
     } catch (e) {
       if (e.code === 'CONFLICT') return reply.code(409).send({ error: e.message })
@@ -168,6 +170,7 @@ export function registerActionRoutes(fastify, { snapshot, sheets }) {
     if (!fields || typeof fields !== 'object') return reply.code(400).send({ error: 'немає полів' })
     try {
       const res = await withWriteLock(() => writeVoiceCells(sheets, lang, fields))
+      snapshot.refresh()
       return { ok: true, ...res }
     } catch (e) { return reply.code(502).send({ error: e.message }) }
   })
@@ -221,6 +224,7 @@ export function registerActionRoutes(fastify, { snapshot, sheets }) {
         }
         return res
       })
+      snapshot.refresh()
       return { ok: true, applied: out.length }
     } catch (e) { return reply.code(502).send({ error: e.message }) }
   })
@@ -247,9 +251,23 @@ export function registerActionRoutes(fastify, { snapshot, sheets }) {
   fastify.post('/api/staged/start', async (req, reply) => {
     if (!guard(reply, START_STATES)) return
     const lessonId = String(req.body?.lessonId || '').trim() || null
+    const langs = Array.isArray(req.body?.langs) ? req.body.langs.map(String) : null
     try {
-      const res = await withWriteLock(() => startStagedRun(sheets, Date.now(), lessonId))
+      const res = await withWriteLock(() => startStagedRun(sheets, Date.now(), lessonId, langs))
       if (!res.ok) return reply.code(409).send(res)
+      snapshot.refresh()
+      return res
+    } catch (e) { return reply.code(502).send({ error: e.message }) }
+  })
+
+  // Apply a past run's settings snapshot to live config/voices/prompt (start-from-archive).
+  fastify.post('/api/archive/:id/apply', async (req, reply) => {
+    if (!guard(reply, START_STATES)) return
+    const rec = archive.get(req.params.id)
+    if (!rec) return reply.code(404).send({ error: 'запис архіву не знайдено' })
+    try {
+      const res = await withWriteLock(() => applyArchiveSettings(sheets, rec.settings))
+      if (!res.ok) return reply.code(400).send(res)
       snapshot.refresh()
       return res
     } catch (e) { return reply.code(502).send({ error: e.message }) }
@@ -326,6 +344,10 @@ export function registerActionRoutes(fastify, { snapshot, sheets }) {
     try {
       const res = await withWriteLock(() => approveStage(sheets, gate.stage, Date.now()))
       if (!res.ok) return reply.code(409).send(res)
+      // Completing the audio gate finishes the lesson → snapshot it to the archive.
+      if (req.params.gate === 'audio') {
+        try { archive.capture(snapshot.get(), new Date().toISOString()) } catch (e) { req.log?.warn?.(e) }
+      }
       snapshot.refresh()
       return res
     } catch (e) { return reply.code(502).send({ error: e.message }) }

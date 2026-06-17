@@ -89,7 +89,7 @@ export function Workbench() {
       <div className="min-w-0 flex-1 overflow-auto p-4">
         <div className="mb-3 flex items-center gap-2">
           <h1 className="text-lg font-semibold">Перевірка · {data.lessonId}</h1>
-          <div className="ml-3 flex rounded-md border border-gray-300 text-sm">
+          <div className="ml-3 flex rounded-md border border-gray-300 dark:border-[#473d31] text-sm">
             <FilterBtn active={filter === 'all'} onClick={() => setFilter('all')}>Усі</FilterBtn>
             <FilterBtn active={filter === 'qa'} onClick={() => setFilter('qa')}>Проблемні</FilterBtn>
             <FilterBtn active={filter === 'review'} onClick={() => setFilter('review')}>Після регену</FilterBtn>
@@ -100,7 +100,7 @@ export function Workbench() {
         <table className="border-separate border-spacing-1 text-sm">
           <thead>
             <tr>
-              <th className="sticky left-0 z-10 bg-[#f6f7f9] px-2 py-1 text-left text-xs font-medium text-gray-500">Сегмент</th>
+              <th className="sticky left-0 z-10 bg-[#f6f7f9] dark:bg-[#262019] px-2 py-1 text-left text-xs font-medium text-gray-500">Сегмент</th>
               {data.langs.map((l) => (
                 <th key={l} className="px-2 py-1 text-xs font-mono font-medium text-gray-500">{l}</th>
               ))}
@@ -109,7 +109,7 @@ export function Workbench() {
           <tbody>
             {segments.map(({ s, i }) => (
               <tr key={s.segmentId}>
-                <td className="sticky left-0 z-10 max-w-[18rem] truncate bg-[#f6f7f9] px-2 py-1 text-xs text-gray-600" title={s.enText}>
+                <td className="sticky left-0 z-10 max-w-[18rem] truncate bg-[#f6f7f9] dark:bg-[#262019] px-2 py-1 text-xs text-gray-600" title={s.enText}>
                   <span className="font-mono text-gray-400">{shortId(s.segmentId)}</span>{' '}
                   {s.movementLocked && <span title="сегмент із рухом">🏃</span>} {s.enText}
                 </td>
@@ -159,9 +159,9 @@ export function Workbench() {
       {state?.staged && state.state === 'AUDIO_REVIEW' && (
         <GateBar
           gate="audio"
-          title="Етап 3/3 · Аудіо"
-          summary={`${data.segments.length} сегментів · ${state.needsAttention.count} потребують уваги`}
-          primaryLabel="Завершити урок"
+          title="Етап 3/3 · Аудіо (сегменти)"
+          summary={`${data.segments.length} сегментів · ${state.needsAttention.count} потребують уваги · далі — збірка повного файлу`}
+          primaryLabel="Зібрати повний файл →"
         />
       )}
     </div>
@@ -178,15 +178,15 @@ function DetailPanel({ cell, seg, lang, playerRef, editedText, setEditedText, wr
   const edited = editedText !== (cell.textTranslated ?? '')
   const regenOld = cell.status === 'REVIEW' && cell.rowKey ? getRegenOld(cell.rowKey) : null
   return (
-    <aside className="flex w-96 shrink-0 flex-col overflow-auto border-l border-gray-200 bg-white p-4">
+    <aside className="flex w-96 shrink-0 flex-col overflow-auto border-l border-gray-200 dark:border-[#332b22] bg-white dark:bg-[#1c1814] p-4">
       <div className="mb-2 flex items-center justify-between">
         <div className="font-mono text-xs text-gray-400">{shortId(seg.segmentId)} · {lang}</div>
-        <button onClick={onClose} className="text-gray-400 hover:text-gray-700">✕</button>
+        <button onClick={onClose} className="text-gray-400 hover:text-gray-700 dark:text-gray-300">✕</button>
       </div>
 
-      <div className="mb-3 rounded-md bg-gray-50 p-3 text-sm">
+      <div className="mb-3 rounded-md bg-gray-50 p-3 dark:bg-[#262019] text-sm">
         <div className="text-xs font-medium text-gray-400">EN-оригінал</div>
-        <div className="text-gray-700">{seg.enText}</div>
+        <div className="text-gray-700 dark:text-gray-300">{seg.enText}</div>
         <div className="mt-2 flex items-center justify-between">
           <span className="text-xs font-medium text-gray-400">Переклад ({lang})</span>
           {edited && <span className="text-[10px] text-amber-600">змінено — додай у кошик</span>}
@@ -196,12 +196,12 @@ function DetailPanel({ cell, seg, lang, playerRef, editedText, setEditedText, wr
           onChange={(e) => setEditedText(e.target.value)}
           disabled={!writable}
           rows={3}
-          className="mt-1 w-full resize-y rounded border border-gray-300 px-2 py-1 text-sm text-gray-900 disabled:bg-gray-100"
+          className="mt-1 w-full resize-y rounded border border-gray-300 dark:border-[#473d31] px-2 py-1 text-sm text-gray-900 dark:text-gray-100 disabled:bg-gray-100 dark:disabled:bg-[#262019]"
         />
       </div>
 
       {inFlight && (
-        <div className="mb-3 animate-pulse rounded-md bg-blue-50 px-2 py-1.5 text-sm text-blue-800">↻ Перегенерується… зачекай завершення.</div>
+        <div className="mb-3 animate-pulse rounded-md bg-blue-50 dark:bg-blue-950/40 dark:text-blue-200 px-2 py-1.5 text-sm text-blue-800">↻ Перегенерується… зачекай завершення.</div>
       )}
 
       {regenOld && (
@@ -223,7 +223,7 @@ function DetailPanel({ cell, seg, lang, playerRef, editedText, setEditedText, wr
             className="rounded-md border border-red-300 bg-red-50 px-3 py-1.5 text-sm text-red-800 hover:bg-red-100 disabled:opacity-40">🔴 Погано</button>
           <button onClick={onAddCart} disabled={!writable}
             title={writable ? 'клавіша R' : blockReason}
-            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-100 disabled:opacity-40">🧺 {inCart ? 'Оновити в кошику' : 'У кошик'}</button>
+            className="rounded-md border border-gray-300 dark:border-[#473d31] px-3 py-1.5 text-sm hover:bg-gray-100 disabled:opacity-40">🧺 {inCart ? 'Оновити в кошику' : 'У кошик'}</button>
         </div>
         {!writable && <div className="mt-1 text-[11px] text-amber-600">{blockReason}</div>}
         {verdictMsg && <div className="mt-1 text-xs text-gray-500">{verdictMsg}</div>}
@@ -232,7 +232,7 @@ function DetailPanel({ cell, seg, lang, playerRef, editedText, setEditedText, wr
       {d && (
         <div className="mb-3">
           <SeverityChip severity={d.severity} />
-          <div className="mt-2 text-sm font-medium text-gray-900">{d.primary}</div>
+          <div className="mt-2 text-sm font-medium text-gray-900 dark:text-gray-100">{d.primary}</div>
           {d.causes.length > 0 && (
             <div className="mt-3">
               <div className="mb-1 text-xs font-medium text-gray-500">Можливі причини</div>
@@ -242,7 +242,7 @@ function DetailPanel({ cell, seg, lang, playerRef, editedText, setEditedText, wr
             </div>
           )}
           {d.advice && (
-            <div className="mt-3 rounded-md bg-blue-50 px-2 py-1.5 text-sm text-blue-900">💡 {d.advice}</div>
+            <div className="mt-3 rounded-md bg-blue-50 dark:bg-blue-950/40 dark:text-blue-200 px-2 py-1.5 text-sm text-blue-900">💡 {d.advice}</div>
           )}
           {d.fill && (
             <div className="mt-3">
@@ -270,6 +270,8 @@ function DetailPanel({ cell, seg, lang, playerRef, editedText, setEditedText, wr
           audioUrl={`/api/audio/segment/${cell.rowKey}`}
           peaksUrl={`/api/peaks/segment/${cell.rowKey}`}
           enUrl={`/api/audio/en/segment/${cell.rowKey}`}
+          enPeaksUrl={`/api/peaks/en/segment/${cell.rowKey}`}
+          mainLabel="локалізація"
         />
       )}
       <div className="mt-1 text-[11px] text-gray-400">Space — грати · E — оригінал · F — ок · T — погано · R — у кошик</div>
@@ -295,7 +297,7 @@ function Tech({ k, v }: { k: string; v: unknown }) {
   return (
     <>
       <dt className="font-mono text-gray-400">{k}</dt>
-      <dd className="truncate text-gray-700" title={String(v ?? '')}>{v === '' || v == null ? '—' : String(v)}</dd>
+      <dd className="truncate text-gray-700 dark:text-gray-300" title={String(v ?? '')}>{v === '' || v == null ? '—' : String(v)}</dd>
     </>
   )
 }
@@ -310,7 +312,7 @@ function CauseRow({ cause }: { cause: Cause }) {
   return (
     <li className="flex items-start gap-2 text-sm">
       <span className="mt-0.5 shrink-0">{CAUSE_ICON[cause.kind] ?? '•'}</span>
-      <span className="flex-1 text-gray-700">{cause.text}</span>
+      <span className="flex-1 text-gray-700 dark:text-gray-300">{cause.text}</span>
       <span
         className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${
           certain ? 'bg-gray-200 text-gray-600' : 'bg-amber-100 text-amber-700'}`}
@@ -333,7 +335,7 @@ function SeverityChip({ severity }: { severity: string }) {
 
 function FilterBtn({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
-    <button onClick={onClick} className={`px-3 py-1 first:rounded-l-md last:rounded-r-md ${active ? 'bg-gray-900 text-white' : 'bg-white text-gray-600'}`}>
+    <button onClick={onClick} className={`px-3 py-1 first:rounded-l-md last:rounded-r-md ${active ? 'bg-gray-900 text-white' : 'bg-white dark:bg-[#1c1814] text-gray-600'}`}>
       {children}
     </button>
   )

@@ -36,7 +36,7 @@ export const CONFIG_KEYS = {
 }
 
 // Stage / status vocabularies for the staged pipeline.
-export const PIPELINE_STAGES = { STT: 'STT', TRANSLATE: 'TRANSLATE', SYNTH: 'SYNTH', DONE: 'DONE' }
+export const PIPELINE_STAGES = { STT: 'STT', TRANSLATE: 'TRANSLATE', SYNTH: 'SYNTH', RENDER: 'RENDER', DONE: 'DONE' }
 export const STAGE_STATUS = { RUNNING: 'RUNNING', REVIEW: 'REVIEW', APPROVED: 'APPROVED' }
 
 // Config keys that may be revealed to the browser. Anything else — and anything
@@ -134,7 +134,8 @@ export const RUN_STATES = {
   TRANSLATING: 'TRANSLATING',
   TRANSLATION_REVIEW: 'TRANSLATION_REVIEW', // staged gate 2
   SYNTHESIZING: 'SYNTHESIZING',
-  AUDIO_REVIEW: 'AUDIO_REVIEW', // staged gate 3 (post-synth, before "finish")
+  AUDIO_REVIEW: 'AUDIO_REVIEW', // staged gate 3 (per-segment audio review)
+  RENDERING: 'RENDERING', // building the full per-lang file from segments (post-review)
   COMPLETE: 'COMPLETE',
   STOPPING: 'STOPPING',
   STOPPED: 'STOPPED',
@@ -151,6 +152,7 @@ export const READONLY_STATES = new Set([
   RUN_STATES.STT,
   RUN_STATES.TRANSLATING,
   RUN_STATES.SYNTHESIZING,
+  RUN_STATES.RENDERING,
   RUN_STATES.STOPPING,
   RUN_STATES.REGENERATING,
 ])
@@ -166,7 +168,7 @@ export const TRANSLATION_WRITE_STATES = new Set([RUN_STATES.TRANSLATION_REVIEW])
 // to gate the STALLED overlay so review states (intentionally idle) never stall.
 export const RUNNING_STATES = new Set([
   RUN_STATES.STARTING, RUN_STATES.ARCHIVING, RUN_STATES.STT,
-  RUN_STATES.TRANSLATING, RUN_STATES.SYNTHESIZING, RUN_STATES.REGENERATING,
+  RUN_STATES.TRANSLATING, RUN_STATES.SYNTHESIZING, RUN_STATES.RENDERING, RUN_STATES.REGENERATING,
 ])
 
 export const STALL_THRESHOLD_MS = 12 * 60 * 1000

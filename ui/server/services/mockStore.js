@@ -24,6 +24,18 @@ const SEED = [
 ]
 const AUDIO_DURATION = 37.1
 
+// Realistic-looking voice config per lang (so pre-flight readiness is green by
+// default; clearing a voice_id in /voices makes that lang flag as not-ready).
+const VOICE_SEED = {
+  de: { voice_id: 'pNInz6obpgDQGcFmaJgB', voice_name: 'Hanna', model: 'eleven_multilingual_v2', stability: 0.5, similarity_boost: 0.75, style: 0, speed: 1.0, notes: '' },
+  es: { voice_id: 'EXAVITQu4vr4xnSDxMaL', voice_name: 'Lucía', model: 'eleven_multilingual_v2', stability: 0.5, similarity_boost: 0.75, style: 0, speed: 1.0, notes: '' },
+  fr: { voice_id: 'XB0fDUnXU5powFXDhCwa', voice_name: 'Charlotte', model: 'eleven_multilingual_v2', stability: 0.55, similarity_boost: 0.75, style: 0, speed: 0.86, notes: 'повільніший голос' },
+  it: { voice_id: 'XrExE9yKIg1WjnnlVkGX', voice_name: 'Matilda', model: 'eleven_multilingual_v2', stability: 0.5, similarity_boost: 0.75, style: 0, speed: 1.0, notes: '' },
+  pl: { voice_id: 'AZnzlk1XvdvUeBnXmlld', voice_name: 'Zofia', model: 'eleven_multilingual_v2', stability: 0.5, similarity_boost: 0.75, style: 0, speed: 1.0, notes: '' },
+  pt: { voice_id: 'TxGEqnHWrfWFTfGW9XjX', voice_name: 'Beatriz', model: 'eleven_multilingual_v2', stability: 0.5, similarity_boost: 0.75, style: 0, speed: 1.0, notes: '' },
+  tr: { voice_id: 'jsCqWAovK2LkecY7zXl4', voice_name: 'Elif', model: 'eleven_multilingual_v2', stability: 0.5, similarity_boost: 0.75, style: 0, speed: 1.0, notes: '' },
+}
+
 // Canonical translations (index-aligned to SEED). A couple carry deliberate
 // defects so the AI/deterministic scoring at the translation gate has something
 // to flag: de[0] uses formal "Sie", fr[4] is overlong for its slot.
@@ -48,8 +60,9 @@ const LOC_OVERRIDES = {
 const STT_MS = 4000
 const TRANSLATE_MS = 5000
 const SYNTH_STEP_MS = 2500 // reveal one more language every ~step
+const RENDER_MS = 4000 // stitching per-segment audio → full per-lang file
 
-const { STT, TRANSLATE, SYNTH, DONE } = PIPELINE_STAGES
+const { STT, TRANSLATE, SYNTH, RENDER, DONE } = PIPELINE_STAGES
 const { RUNNING, REVIEW, APPROVED } = STAGE_STATUS
 
 function pad(n) { return String(n + 1).padStart(3, '0') }
@@ -68,8 +81,9 @@ function makeWords(text, start, end) {
 }
 
 function freshSegments() {
+  const lid = S.lessonId || LESSON
   return SEED.map((s, i) => ({
-    segment_id: `${LESSON}_seg_${pad(i)}`,
+    segment_id: `${lid}_seg_${pad(i)}`,
     en_text: s.en,
     en_start_sec: s.start,
     en_end_sec: s.end,
@@ -90,8 +104,10 @@ function idle() {
     lessonId: null,
     runningSince: 0,
     segments: [],
+    activeLangs: [...DEFAULT_LANGS], // languages this run localizes (from pre-flight)
     revealedTranslations: false,
-    revealedLangs: 0, // count of langs whose synth/full output is revealed
+    revealedLangs: 0, // count of (active) langs whose per-segment synth output is revealed
+    revealedFull: false, // full per-lang files exist only after the RENDER step
     locEdits: {}, // rowKey → { col: value } operator edits at audio review
     busy: false,
   }
@@ -99,26 +115,37 @@ function idle() {
 
 let S = idle()
 
+// Live config/voice overrides applied via "start from archive" (persist across
+// runs, like editing the real config/voices tables). Stage/run keys are excluded.
+let configOverrides = {}
+let voiceOverrides = {} // lang → { field: value }
+const APPLY_DENY = new Set(['pipeline_stage', 'stage_status', 'stage_run_token', 'localization_run_token', 'localization_abort_token', 'active_langs'])
+
 function renumber() {
-  S.segments.forEach((seg, i) => { seg.segment_id = `${LESSON}_seg_${pad(i)}` })
+  const lid = S.lessonId || LESSON
+  S.segments.forEach((seg, i) => { seg.segment_id = `${lid}_seg_${pad(i)}` })
 }
 
 // ── public: lifecycle / transitions ────────────────────────────────────────
 
 /** Start a staged run from the UI drop-in. Refused if a run is already active. */
-export function startStagedRun(now, lessonId) {
+export function startStagedRun(now, lessonId, langs) {
   if (S.busy) return { ok: false, error: 'Зайнято — staged-ран уже активний. Заверши поточний урок.' }
   const token = new Date(now).toISOString()
+  const picked = Array.isArray(langs) && langs.length
+    ? DEFAULT_LANGS.filter((l) => langs.includes(l)) // keep canonical order, drop unknowns
+    : [...DEFAULT_LANGS]
   S = idle()
   S.busy = true
   S.runToken = token
   S.stageRunToken = token
   S.lessonId = lessonId || LESSON
+  S.activeLangs = picked.length ? picked : [...DEFAULT_LANGS]
   S.pipeline_stage = STT
   S.stage_status = RUNNING
   S.runningSince = now
   S.segments = freshSegments() // STT "streams" segments immediately; gate is stage_status
-  return { ok: true, lessonId: S.lessonId, runToken: token }
+  return { ok: true, lessonId: S.lessonId, langs: S.activeLangs, runToken: token }
 }
 
 /** Advance RUNNING phases on the wall clock. Called every poll with `now`. */
@@ -131,8 +158,14 @@ export function tick(now) {
     S.revealedTranslations = true
     S.stage_status = REVIEW
   } else if (S.pipeline_stage === SYNTH) {
-    S.revealedLangs = Math.min(DEFAULT_LANGS.length, Math.floor(elapsed / SYNTH_STEP_MS))
-    if (S.revealedLangs >= DEFAULT_LANGS.length) S.stage_status = REVIEW
+    S.revealedLangs = Math.min(S.activeLangs.length, Math.floor(elapsed / SYNTH_STEP_MS))
+    if (S.revealedLangs >= S.activeLangs.length) S.stage_status = REVIEW
+  } else if (S.pipeline_stage === RENDER && elapsed >= RENDER_MS) {
+    // full per-lang files are stitched from the (reviewed) segments → lesson done
+    S.revealedFull = true
+    S.pipeline_stage = DONE
+    S.stage_status = REVIEW
+    S.busy = false
   }
 }
 
@@ -147,7 +180,8 @@ export function approve(stage, now) {
   } else if (stage === TRANSLATE) {
     S.pipeline_stage = SYNTH; S.stage_status = RUNNING; S.runningSince = now; S.revealedLangs = 0
   } else if (stage === SYNTH) {
-    S.pipeline_stage = DONE; S.stage_status = REVIEW; S.busy = false
+    // approving the segment review starts the separate "render full file" step
+    S.pipeline_stage = RENDER; S.stage_status = RUNNING; S.runningSince = now
   } else {
     return { ok: false, error: `невідомий етап ${stage}` }
   }
@@ -160,7 +194,43 @@ export function secondDropProbe() {
   return { ok: true, busy: false }
 }
 
+/** Apply a past run's settings snapshot to the live config/voices/prompt
+ *  ("start from archive"). Stage/run keys are never applied. Returns the
+ *  snapshot's activeLangs so the pre-flight can pre-select them. */
+export function applySettings(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return { ok: false, error: 'порожній знімок' }
+  for (const [k, v] of Object.entries(snapshot.config || {})) {
+    if (APPLY_DENY.has(k)) continue
+    configOverrides[k] = String(v)
+  }
+  for (const v of snapshot.voices || []) {
+    if (!v || !v.lang) continue
+    const { lang, ...fields } = v
+    voiceOverrides[lang] = { ...(voiceOverrides[lang] || {}), ...fields }
+  }
+  if (typeof snapshot.aiPrompt === 'string' && snapshot.aiPrompt.trim()) setAiPrompt(snapshot.aiPrompt)
+  return { ok: true, activeLangs: Array.isArray(snapshot.activeLangs) ? snapshot.activeLangs : [] }
+}
+
 // ── public: operator writes ─────────────────────────────────────────────────
+
+// Voice tab edits (single card save + "apply voice set/template"). Mirrors the
+// override that `applySettings` uses, so `tabs()` surfaces the change.
+export function writeVoiceCells(lang, updates) {
+  if (!lang) throw new Error('не вказано мову')
+  const fields = {}
+  for (const [k, v] of Object.entries(updates || {})) if (v != null) fields[k] = String(v)
+  if (!Object.keys(fields).length) throw new Error('немає валідних полів для запису')
+  voiceOverrides[lang] = { ...(voiceOverrides[lang] || {}), ...fields }
+  return { lang, written: Object.keys(fields).length }
+}
+
+// Config tab edits (cps_estimate_*, etc.). expected/conflict is a live-only guard.
+export function writeConfigCell(key, value) {
+  if (!key) throw new Error('не вказано ключ')
+  configOverrides[key] = String(value)
+  return { key, value: String(value) }
+}
 
 export function writeSegmentCells(targets) {
   let written = 0
@@ -242,31 +312,35 @@ export function writeLocalizationCells(targets) {
 // ── public: snapshot projections (shaped like Sheets batchGet / Drive list) ──
 
 export function tabs() {
-  const config = [
-    ['key', 'value'],
-    ['localization_run_token', S.runToken],
-    ['localization_abort_token', ''],
-    ['pipeline_stage', S.pipeline_stage],
-    ['stage_status', S.stage_status],
-    ['stage_run_token', S.stageRunToken],
-    ['active_langs', DEFAULT_LANGS.join(',')],
-    ['w_regen_workflow_url', 'https://n8n.example/webhook/w-regen'],
-    ['w2_translate_workflow_url', ''],
-    ['w3_dispatch_workflow_url', ''],
-    ['drive_staged_input_folder_id', ''],
-    ['drive_input_folder_id', 'mock_input_folder'],
-    ['drive_output_folder_id', 'mock_output_folder'],
-    ['drive_output_full_folder_id', 'mock_full_folder'],
-    ['drive_output_vtt_folder_id', 'mock_vtt_folder'],
-    ['drive_archive_folder_id', 'mock_archive_folder'],
-    ['slack_channel', '#dubbing'],
-    ['min_inter_segment_gap_sec', 0.4],
-    ['max_borrow_per_segment_sec', 2.0],
-    ['expansion_threshold', 0.85],
-    ['cps_estimate_fr', 13.5],
-    ['elevenlabs_api_key', 'sk_live_THIS_SHOULD_BE_MASKED'],
-    ['anthropic_api_key', 'sk-ant-THIS_SHOULD_BE_MASKED'],
-  ]
+  const baseConfig = {
+    localization_run_token: S.runToken,
+    localization_abort_token: '',
+    pipeline_stage: S.pipeline_stage,
+    stage_status: S.stage_status,
+    stage_run_token: S.stageRunToken,
+    active_langs: S.activeLangs.join(','),
+    w_regen_workflow_url: 'https://n8n.example/webhook/w-regen',
+    w2_translate_workflow_url: '',
+    w3_dispatch_workflow_url: '',
+    drive_staged_input_folder_id: '',
+    drive_input_folder_id: 'mock_input_folder',
+    drive_output_folder_id: 'mock_output_folder',
+    drive_output_full_folder_id: 'mock_full_folder',
+    drive_output_vtt_folder_id: 'mock_vtt_folder',
+    drive_archive_folder_id: 'mock_archive_folder',
+    slack_channel: '#dubbing',
+    min_inter_segment_gap_sec: 0.4,
+    max_borrow_per_segment_sec: 2.0,
+    movement_borrow_max_sec: 2.0,
+    expansion_threshold: 0.85,
+    cps_estimate_de: 14, cps_estimate_es: 15, cps_estimate_fr: 13.5, cps_estimate_it: 14,
+    cps_estimate_pl: 13, cps_estimate_pt: 14, cps_estimate_tr: 13,
+    gemini_api_key: '', // empty in mock → LLM lane stays canned
+    elevenlabs_api_key: 'sk_live_THIS_SHOULD_BE_MASKED',
+    anthropic_api_key: 'sk-ant-THIS_SHOULD_BE_MASKED',
+  }
+  Object.assign(baseConfig, configOverrides) // "start from archive" tuning
+  const config = [['key', 'value'], ...Object.entries(baseConfig)]
 
   const segHeader = [
     'segment_id', 'en_text', 'en_start_sec', 'en_end_sec', 'en_duration_sec', 'audio_duration_sec',
@@ -291,7 +365,7 @@ export function tabs() {
     'shorten_retries_in_synthesize', 'final_speed', 'needs_attention', 'audio_drive_file_id',
     'phase2_outcome', 'needs_retts', 'last_regen_at', 'regen_comment',
   ]
-  const revealed = DEFAULT_LANGS.slice(0, S.revealedLangs)
+  const revealed = S.activeLangs.slice(0, S.revealedLangs)
   const locRows = []
   S.segments.forEach((seg) => {
     const dur = +(seg.en_end_sec - seg.en_start_sec).toFixed(3)
@@ -318,10 +392,10 @@ export function tabs() {
   })
 
   const voiceHeader = ['lang', 'voice_id', 'voice_name', 'model', 'stability', 'similarity_boost', 'style', 'speed', 'notes']
-  const voiceRows = DEFAULT_LANGS.map((l) => [
-    l, `voice_${l}_id`, `${l.toUpperCase()} narrator`, 'eleven_multilingual_v2', 0.5, 0.75, 0,
-    l === 'fr' ? 0.86 : 1.0, '',
-  ])
+  const voiceRows = DEFAULT_LANGS.map((l) => {
+    const v = { ...VOICE_SEED[l], ...(voiceOverrides[l] || {}) }
+    return voiceHeader.map((h) => (h === 'lang' ? l : v[h] ?? ''))
+  })
 
   const promptHeader = ['key', 'description', 'value']
   const promptRows = [
@@ -339,13 +413,15 @@ export function tabs() {
 }
 
 export function drive() {
-  const revealed = DEFAULT_LANGS.slice(0, S.revealedLangs)
-  const full = revealed.map((l) => ({
-    id: `mock_full_${l}`, name: `${LESSON}_full_${l}.wav`, size: '58000044',
+  // Full per-lang files appear only after the RENDER step (stitched from segments).
+  const lid = S.lessonId || LESSON
+  const fullLangs = S.revealedFull ? S.activeLangs : []
+  const full = fullLangs.map((l) => ({
+    id: `mock_full_${l}`, name: `${lid}_full_${l}.wav`, size: '58000044',
     md5Checksum: `mockmd5full${l}_${S.runToken}`, modifiedTime: S.runToken, mimeType: 'audio/wav',
   }))
-  const vtt = revealed.map((l) => ({
-    id: `mock_vtt_${l}`, name: `${LESSON}_full_${l}.vtt`, size: '2200',
+  const vtt = fullLangs.map((l) => ({
+    id: `mock_vtt_${l}`, name: `${lid}_full_${l}.vtt`, size: '2200',
     md5Checksum: `mockmd5vtt${l}_${S.runToken}`, modifiedTime: S.runToken, mimeType: 'text/vtt',
   }))
   const input = S.runToken

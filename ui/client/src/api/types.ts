@@ -1,7 +1,7 @@
 export type RunStateName =
   | 'SETUP_REQUIRED' | 'UNKNOWN' | 'IDLE' | 'STARTING' | 'ARCHIVING'
   | 'STT' | 'TRANSCRIPT_REVIEW' | 'TRANSLATING' | 'TRANSLATION_REVIEW'
-  | 'SYNTHESIZING' | 'AUDIO_REVIEW' | 'COMPLETE'
+  | 'SYNTHESIZING' | 'AUDIO_REVIEW' | 'RENDERING' | 'COMPLETE'
   | 'STOPPING' | 'STOPPED' | 'REGENERATING' | 'STALLED'
 
 export interface RunState {
@@ -103,6 +103,25 @@ export interface RawSegment {
   segment_type: string
   movement_keywords: string
   [key: string]: string | number // {lang}_text, adaptation_attempts, …
+}
+
+export interface ArchiveRunSummary {
+  id: string
+  lessonId: string | null
+  finishedAt: string
+  segCount: number
+  langCount: number
+  langs: string[]
+  needsAttention: { count: number; total: number; pct: number }
+}
+
+export interface ArchiveRun extends ArchiveRunSummary {
+  settings: {
+    config: Record<string, string>
+    voices: Array<Record<string, string>>
+    activeLangs: string[]
+    aiPrompt: string
+  }
 }
 
 export interface SetupCheck {

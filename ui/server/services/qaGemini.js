@@ -17,10 +17,12 @@ const LANG_NAMES = {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-export async function runAnalysis({ snapshot, langs, onProgress }) {
+export async function runAnalysis({ snapshot, langs, onProgress, model }) {
   const m = snapshot.get()
+  const useModel = (typeof model === 'string' && model.trim()) ? model.trim() : MODEL
   const apiKey = (m.configMap.get('gemini_api_key') || '').toString().trim()
-  if (!apiKey) throw new Error('gemini_api_key відсутній у config-табі')
+  // Etap P: route non-gemini models (claude-*, gpt-*) to Anthropic/OpenAI here.
+  if (!apiKey) throw new Error('gemini_api_key відсутній у config-табі (модель: ' + useModel + ')')
 
   const allLangs = (langs && langs.length ? langs : m.activeLangs).filter((l) => LANG_NAMES[l])
   const segs = m.segments
@@ -38,7 +40,7 @@ export async function runAnalysis({ snapshot, langs, onProgress }) {
     let raw = []
     if (payload.length) {
       const body = {
-        model: MODEL,
+        model: useModel,
         messages: [
           { role: 'system', content: systemPrompt(lang) },
           { role: 'user', content: JSON.stringify(payload) },
@@ -75,6 +77,7 @@ export async function runAnalysis({ snapshot, langs, onProgress }) {
   return {
     generatedAt: new Date().toISOString(),
     lessonId,
+    model: useModel,
     langs: allLangs,
     findings,
     total: findings.length,

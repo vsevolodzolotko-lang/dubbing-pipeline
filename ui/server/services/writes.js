@@ -70,6 +70,7 @@ export async function writeLocalizationCells(sheets, targets) {
  * `expected` (someone edited the sheet meanwhile).
  */
 export async function writeConfigCell(sheets, key, value, expected) {
+  if (config.mode === 'mock') return mockStore.writeConfigCell(key, value)
   const rows = await sheets.getValues(`${TABS.config}!A:B`)
   let rowNum = -1
   let current = ''
@@ -88,6 +89,7 @@ export async function writeConfigCell(sheets, key, value, expected) {
 
 /** Update voice fields for one lang (matched by the `lang` column). */
 export async function writeVoiceCells(sheets, lang, updates) {
+  if (config.mode === 'mock') return mockStore.writeVoiceCells(lang, updates)
   const headerRows = await sheets.getValues(`${TABS.voices}!1:1`)
   const header = (headerRows[0] || []).map((h) => String(h ?? '').trim())
   const colIndex = Object.fromEntries(header.map((h, i) => [h, i]))
@@ -144,8 +146,14 @@ export async function approveStage(sheets, stage, now) {
   throw new Error(`підтвердження етапу через webhook ${LIVE_TODO}`)
 }
 
-/** Start a staged run from the UI drop-in. */
-export async function startStagedRun(sheets, now, lessonId) {
-  if (config.mode === 'mock') return mockStore.startStagedRun(now, lessonId)
+/** Start a staged run from the UI drop-in (with selected target languages). */
+export async function startStagedRun(sheets, now, lessonId, langs) {
+  if (config.mode === 'mock') return mockStore.startStagedRun(now, lessonId, langs)
   throw new Error(`staged-старт ${LIVE_TODO}`)
+}
+
+/** Apply a past run's settings snapshot to live config/voices/prompt. */
+export async function applyArchiveSettings(sheets, snapshot) {
+  if (config.mode === 'mock') return mockStore.applySettings(snapshot)
+  throw new Error(`застосування налаштувань з архіву ${LIVE_TODO}`)
 }

@@ -50,7 +50,7 @@ export function Config() {
           }
           return (
             <section key={g}>
-              <h2 className={`mb-2 text-sm font-semibold ${g.startsWith('Секрети') || g.startsWith('Системне') || g === 'Мертві ключі' ? 'text-gray-500' : 'text-gray-800'}`}>{g}</h2>
+              <h2 className={`mb-2 text-sm font-semibold ${g.startsWith('Секрети') || g.startsWith('Системне') || g === 'Мертві ключі' ? 'text-gray-500' : 'text-gray-800 dark:text-gray-200'}`}>{g}</h2>
               <div className="space-y-2">
                 {groups[g].sort((a, b) => a.meta.label.localeCompare(b.meta.label)).map(({ row, meta }) => (
                   <Field key={row.key} k={row.key} meta={meta} value={row.value} masked={row.masked} writable={writable} reason={reason} onSaved={() => qc.invalidateQueries({ queryKey: ['config'] })} />
@@ -97,11 +97,11 @@ function Field({ k, meta, value, masked, writable, reason, onSaved }: {
   }
 
   return (
-    <div className="rounded-lg border border-gray-200 bg-white px-3 py-2">
+    <div className="rounded-lg border border-gray-200 dark:border-[#332b22] bg-white dark:bg-[#1c1814] px-3 py-2">
       <div className="flex flex-wrap items-center gap-2">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-gray-800">{meta.label}</span>
+            <span className="text-sm font-medium text-gray-800 dark:text-gray-200">{meta.label}</span>
             <span className="font-mono text-[11px] text-gray-400">{k}</span>
           </div>
           {meta.tooltip && <div className="mt-0.5 text-xs text-gray-500">{meta.tooltip}</div>}
@@ -113,10 +113,10 @@ function Field({ k, meta, value, masked, writable, reason, onSaved }: {
             {meta.type === 'number' || meta.type === 'ratio' ? (
               <input type="number" value={val} min={meta.min} max={meta.max} step={meta.step}
                 onChange={(e) => setVal(e.target.value)} disabled={!writable}
-                className="w-28 rounded border border-gray-300 px-2 py-1 text-sm disabled:bg-gray-100" />
+                className="w-28 rounded border border-gray-300 dark:border-[#473d31] px-2 py-1 text-sm disabled:bg-gray-100 dark:disabled:bg-[#262019]" />
             ) : (
               <input type="text" value={val} onChange={(e) => setVal(e.target.value)} disabled={!writable}
-                className="w-56 rounded border border-gray-300 px-2 py-1 text-sm disabled:bg-gray-100" />
+                className="w-56 rounded border border-gray-300 dark:border-[#473d31] px-2 py-1 text-sm disabled:bg-gray-100 dark:disabled:bg-[#262019]" />
             )}
             {changed && writable && (
               <button onClick={save} disabled={busy} className="rounded bg-gray-900 px-2 py-1 text-xs text-white hover:bg-gray-700 disabled:opacity-50">
@@ -127,7 +127,7 @@ function Field({ k, meta, value, masked, writable, reason, onSaved }: {
         ) : meta.type === 'secret' ? (
           <div className="flex items-center gap-2">
             <span className="font-mono text-sm text-gray-400">{masked ? '••••••••' : value || '—'}</span>
-            {meta.testable && <button onClick={runCheck} className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-100">Перевірити</button>}
+            {meta.testable && <button onClick={runCheck} className="rounded border border-gray-300 dark:border-[#473d31] px-2 py-1 text-xs hover:bg-gray-100">Перевірити</button>}
           </div>
         ) : (
           <span className="max-w-[16rem] truncate font-mono text-sm text-gray-500" title={value}>{value || '—'}</span>
