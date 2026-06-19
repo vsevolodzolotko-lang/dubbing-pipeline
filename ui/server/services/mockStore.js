@@ -108,6 +108,7 @@ function idle() {
     revealedTranslations: false,
     revealedLangs: 0, // count of (active) langs whose per-segment synth output is revealed
     revealedFull: false, // full per-lang files exist only after the RENDER step
+    renderDest: '', // where the assembled full file is saved (chosen at the render gate)
     locEdits: {}, // rowKey → { col: value } operator edits at audio review
     busy: false,
   }
@@ -180,12 +181,40 @@ export function approve(stage, now) {
   } else if (stage === TRANSLATE) {
     S.pipeline_stage = SYNTH; S.stage_status = RUNNING; S.runningSince = now; S.revealedLangs = 0
   } else if (stage === SYNTH) {
-    // approving the segment review starts the separate "render full file" step
-    S.pipeline_stage = RENDER; S.stage_status = RUNNING; S.runningSince = now
+    // approving the segment review opens the separate "assemble full file" gate
+    // (operator picks the save destination there, then builds)
+    S.pipeline_stage = RENDER; S.stage_status = REVIEW
   } else {
     return { ok: false, error: `невідомий етап ${stage}` }
   }
   return { ok: true, fired: false, stage: S.pipeline_stage, status: S.stage_status }
+}
+
+// Destination presets for the assemble-file step (where the full file is saved).
+function renderDestPresets(lid) {
+  return [`Drive · 04_output/${lid}`, `Drive · 04_output (спільна тека готових)`, `Drive · staged_output/${lid}`]
+}
+
+/** Plan for the assemble-file step: files to build, save destination, presets. */
+export function renderPlan() {
+  const lid = S.lessonId || LESSON
+  const langs = S.activeLangs || []
+  const files = langs.flatMap((l) => [`${lid}_full_${l}.wav`, `${lid}_full_${l}.vtt`])
+  const presets = renderDestPresets(lid)
+  return { lessonId: lid, langs, files, destination: S.renderDest || presets[0], presets, built: !!S.revealedFull }
+}
+
+/** Start the separate "assemble full file" step after the render gate: record the
+ *  chosen destination, then the per-lang full files stitch on the wall clock (tick). */
+export function startRender(now, destination) {
+  if (S.pipeline_stage !== RENDER || S.stage_status !== REVIEW) {
+    return { ok: false, conflict: true, error: `склейка не на воротах (${S.pipeline_stage}/${S.stage_status})` }
+  }
+  const dest = String(destination || '').trim() || renderDestPresets(S.lessonId || LESSON)[0]
+  S.renderDest = dest
+  S.stage_status = RUNNING
+  S.runningSince = now
+  return { ok: true, destination: dest }
 }
 
 /** Run-lock demo: report whether a new drop would be refused right now. */
@@ -230,6 +259,41 @@ export function writeConfigCell(key, value) {
   if (!key) throw new Error('не вказано ключ')
   configOverrides[key] = String(value)
   return { key, value: String(value) }
+}
+
+// Retime one segment's EN slot (drag the timeline edges under the video). Clamps
+// to neighbours so segments stay monotonic & non-overlapping; en_duration_sec is
+// derived from start/end in tabs(), so we only store start/end. Transcript stage
+// only (timing feeds length budgets + the synth slot).
+export function retimeSegment(segmentId, enStart, enEnd) {
+  const i = S.segments.findIndex((s) => s.segment_id === segmentId)
+  if (i < 0) throw new Error(`сегмент ${segmentId} не знайдено`)
+  const prevEnd = i > 0 ? Number(S.segments[i - 1].en_end_sec) : 0
+  const nextStart = i < S.segments.length - 1 ? Number(S.segments[i + 1].en_start_sec) : AUDIO_DURATION
+  const s = Math.max(prevEnd, Number(enStart))
+  const e = Math.min(nextStart, Number(enEnd))
+  if (!(e - s >= 0.2)) {
+    return { ok: false, conflict: true, error: 'край перекриває сусіда або сегмент закороткий (мін. 0.2с)' }
+  }
+  const seg = S.segments[i]
+  seg.en_start_sec = +s.toFixed(3)
+  seg.en_end_sec = +e.toFixed(3)
+  return { ok: true, segmentId, enStart: seg.en_start_sec, enEnd: seg.en_end_sec, durationSec: +(e - s).toFixed(3) }
+}
+
+// Loudness-normalize the given dub segments to `targetLufs`. Mock: just records
+// the target on each row (a badge); real R128 gain happens server-side on live.
+export function normalizeSegments(rowKeys, targetLufs) {
+  const lufs = Number(targetLufs)
+  const t = Number.isFinite(lufs) ? lufs : -23
+  let n = 0
+  for (const rk of rowKeys || []) {
+    if (!rk) continue
+    if (!S.locEdits[rk]) S.locEdits[rk] = {}
+    S.locEdits[rk].normalized_lufs = t
+    n++
+  }
+  return { ok: true, normalized: n, targetLufs: t }
 }
 
 export function writeSegmentCells(targets) {
@@ -363,7 +427,7 @@ export function tabs() {
     'real_duration_sec', 'lead_silence_sec', 'slot_start_sec', 'slot_end_sec', 'tts_budget_sec',
     'tail_silence_sec', 'final_duration_sec', 'borrowed_sec', 'expansion_attempts',
     'shorten_retries_in_synthesize', 'final_speed', 'needs_attention', 'audio_drive_file_id',
-    'phase2_outcome', 'needs_retts', 'last_regen_at', 'regen_comment',
+    'phase2_outcome', 'needs_retts', 'last_regen_at', 'regen_comment', 'normalized_lufs',
   ]
   const revealed = S.activeLangs.slice(0, S.revealedLangs)
   const locRows = []
@@ -385,6 +449,7 @@ export function tabs() {
         final_speed: o.final_speed ?? 1.0, needs_attention: o.needs_attention ?? 'FALSE',
         audio_drive_file_id: `mock_file_${seg.segment_id}_${l}`, phase2_outcome: 'accepted',
         needs_retts: 'FALSE', last_regen_at: o.last_regen_at ?? '', regen_comment: o.regen_comment ?? '',
+        normalized_lufs: o.normalized_lufs ?? '',
       }
       Object.assign(base, edit) // operator verdicts/edits win
       locRows.push(locHeader.map((h) => base[h] ?? ''))

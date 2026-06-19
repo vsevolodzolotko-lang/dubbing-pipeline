@@ -20,7 +20,8 @@
     "@fontsource/lora": "^5.2.8",
     "dotenv": "^17.4.2",
     "fastify": "^5.2.1",
-    "google-auth-library": "^9.15.1"
+    "google-auth-library": "^9.15.1",
+    "lucide-react": "^1.20.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.0",

@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { AlertTriangle, Check } from 'lucide-react'
 import { useRunState } from '../api/useRunState'
 import { approveGate, type Gate } from '../api/staged'
 import { writeBlockReason } from '../ui'
@@ -14,7 +15,7 @@ const GATE_STATE: Record<Gate, string> = {
 const NEXT_ROUTE: Record<Gate, string> = {
   transcript: '/translation',
   translations: '/review',
-  audio: '/lesson',
+  audio: '/render', // audio review → separate assemble-file step
 }
 
 interface Props {
@@ -57,7 +58,7 @@ export function GateBar({ gate, title, summary, warnings = [], primaryLabel }: P
   }
 
   return (
-    <div className="sticky bottom-0 z-10 border-t border-gray-200 bg-white px-5 py-3 dark:border-[#332b22] dark:bg-[#1c1814]">
+    <div className="sticky bottom-0 z-10 border-t border-gray-200 bg-white px-5 py-3 dark:border-[#29292c] dark:bg-[#161617]">
       <div className="flex items-center gap-4">
         <div className="min-w-0">
           <div className="text-sm font-medium text-gray-900 dark:text-gray-100">{title}</div>
@@ -65,15 +66,17 @@ export function GateBar({ gate, title, summary, warnings = [], primaryLabel }: P
         </div>
         <div className="ml-auto flex items-center gap-3">
           {warnings.length > 0 && (
-            <span className="text-xs text-amber-700 dark:text-amber-400">⚠ {warnings.length} невирішених зауваг</span>
+            <span className="text-xs text-amber-700 dark:text-amber-400"><AlertTriangle className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> {warnings.length} невирішених зауваг</span>
           )}
           <button
             onClick={() => { setErr(null); setOpen(true) }}
             disabled={!enabled}
-            className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:cursor-not-allowed disabled:bg-gray-300 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white dark:disabled:bg-[#473d31] dark:disabled:text-gray-400"
+            className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:cursor-not-allowed disabled:bg-gray-300 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white dark:disabled:bg-[#3a3a3d] dark:disabled:text-gray-400"
             title={enabled ? '' : (writeBlockReason(state) || 'недоступно на цьому етапі')}
           >
-            {warnings.length > 0 ? '⚠ ' : '✅ '}{primaryLabel}
+            {warnings.length > 0
+              ? <AlertTriangle className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} />
+              : <Check className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} />} {primaryLabel}
           </button>
         </div>
       </div>
@@ -83,7 +86,7 @@ export function GateBar({ gate, title, summary, warnings = [], primaryLabel }: P
 
       {open && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4 dark:bg-black/60" onClick={() => !busy && setOpen(false)}>
-          <div className="w-full max-w-md rounded-xl bg-white p-5 shadow-xl dark:bg-[#1c1814] dark:text-gray-100" onClick={(e) => e.stopPropagation()}>
+          <div className="w-full max-w-md rounded-xl bg-white p-5 shadow-xl dark:bg-[#161617] dark:text-gray-100" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-base font-semibold">{primaryLabel}?</h3>
             {summary && <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">{summary}</p>}
             {warnings.length > 0 && (
@@ -98,7 +101,7 @@ export function GateBar({ gate, title, summary, warnings = [], primaryLabel }: P
             )}
             {err && <div className="mt-3 rounded-md bg-red-50 p-2 text-sm text-red-700 dark:bg-red-950/50 dark:text-red-300">{err}</div>}
             <div className="mt-4 flex justify-end gap-2">
-              <button onClick={() => setOpen(false)} disabled={busy} className="rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 dark:border-[#473d31] dark:hover:bg-[#262019]">
+              <button onClick={() => setOpen(false)} disabled={busy} className="rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 dark:border-[#3a3a3d] dark:hover:bg-[#202023]">
                 Скасувати
               </button>
               <button onClick={confirm} disabled={busy} className="rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-700 disabled:bg-gray-300 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white">

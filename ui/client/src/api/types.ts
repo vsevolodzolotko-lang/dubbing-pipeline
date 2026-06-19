@@ -1,7 +1,7 @@
 export type RunStateName =
   | 'SETUP_REQUIRED' | 'UNKNOWN' | 'IDLE' | 'STARTING' | 'ARCHIVING'
   | 'STT' | 'TRANSCRIPT_REVIEW' | 'TRANSLATING' | 'TRANSLATION_REVIEW'
-  | 'SYNTHESIZING' | 'AUDIO_REVIEW' | 'RENDERING' | 'COMPLETE'
+  | 'SYNTHESIZING' | 'AUDIO_REVIEW' | 'RENDER_REVIEW' | 'RENDERING' | 'COMPLETE'
   | 'STOPPING' | 'STOPPED' | 'REGENERATING' | 'STALLED'
 
 export interface RunState {
@@ -71,6 +71,7 @@ export interface Cell {
   lastRegenAt?: string
   regenComment?: string
   audioFileId?: string
+  normalizedLufs?: number | null
   diagnosis?: Diagnosis
 }
 

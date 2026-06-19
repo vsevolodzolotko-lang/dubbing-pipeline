@@ -134,6 +134,18 @@ export async function mergeSegments(sheets, segmentId) {
   throw new Error(`merge сегментів ${LIVE_TODO}`)
 }
 
+/** Retime a segment's EN slot — drag timeline edges (transcript stage only). */
+export async function retimeSegment(sheets, segmentId, enStart, enEnd) {
+  if (config.mode === 'mock') return mockStore.retimeSegment(segmentId, enStart, enEnd)
+  throw new Error(`ретайм сегмента ${LIVE_TODO}`)
+}
+
+/** Loudness-normalize dub segments to a target LUFS (audio stage). */
+export async function normalizeSegments(sheets, rowKeys, targetLufs) {
+  if (config.mode === 'mock') return mockStore.normalizeSegments(rowKeys, targetLufs)
+  throw new Error(`нормалізація гучності ${LIVE_TODO}`)
+}
+
 /** Split a segment at a word boundary (transcript stage only). */
 export async function splitSegment(sheets, segmentId, wordIndex) {
   if (config.mode === 'mock') return mockStore.splitSegment(segmentId, wordIndex)
@@ -156,4 +168,10 @@ export async function startStagedRun(sheets, now, lessonId, langs) {
 export async function applyArchiveSettings(sheets, snapshot) {
   if (config.mode === 'mock') return mockStore.applySettings(snapshot)
   throw new Error(`застосування налаштувань з архіву ${LIVE_TODO}`)
+}
+
+/** Start the separate assemble-file step (with the chosen save destination). */
+export async function startRender(sheets, now, destination) {
+  if (config.mode === 'mock') return mockStore.startRender(now, destination)
+  throw new Error(`склейка повного файлу ${LIVE_TODO}`)
 }

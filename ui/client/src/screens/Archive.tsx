@@ -29,7 +29,7 @@ export function Archive() {
         </p>
         {isLoading ? <div className="text-sm text-gray-400">Завантаження…</div>
           : runs.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-gray-300 p-8 text-center text-sm text-gray-400 dark:border-[#473d31] dark:text-gray-500">
+            <div className="rounded-lg border border-dashed border-gray-300 p-8 text-center text-sm text-gray-400 dark:border-[#3a3a3d] dark:text-gray-500">
               Ще немає завершених уроків. Проведи staged-урок до кінця («Завершити урок») — і він зʼявиться тут.
             </div>
           ) : (
@@ -40,8 +40,8 @@ export function Archive() {
                   <li key={r.id}>
                     <button onClick={() => open(r.id)}
                       className={`w-full rounded-lg border p-3 text-left ${
-                        sel ? 'border-gray-900 bg-white dark:border-gray-100 dark:bg-[#1c1814]'
-                        : 'border-gray-200 bg-white hover:border-gray-300 dark:border-[#332b22] dark:bg-[#1c1814] dark:hover:border-gray-600'}`}>
+                        sel ? 'border-gray-900 bg-white dark:border-gray-100 dark:bg-[#161617]'
+                        : 'border-gray-200 bg-white hover:border-gray-300 dark:border-[#29292c] dark:bg-[#161617] dark:hover:border-gray-600'}`}>
                       <div className="flex items-center gap-2">
                         <span className="font-medium text-gray-900 dark:text-gray-100">{r.lessonId ?? '—'}</span>
                         <span className="ml-auto text-xs text-gray-400">{fmtDate(r.finishedAt)}</span>
@@ -76,7 +76,7 @@ function Snapshot({ run }: { run: ArchiveRun }) {
   const cfg = Object.entries(settings.config || {})
   return (
     <div className="space-y-3 text-sm">
-      <div className="rounded-lg border border-gray-200 bg-white p-3 dark:border-[#332b22] dark:bg-[#1c1814]">
+      <div className="rounded-lg border border-gray-200 bg-white p-3 dark:border-[#29292c] dark:bg-[#161617]">
         <div className="text-xs font-medium text-gray-400">Урок</div>
         <div className="text-gray-900 dark:text-gray-100">{run.lessonId} · {fmtDate(run.finishedAt)}</div>
         <div className="mt-1 flex flex-wrap gap-1.5 text-[11px]">
@@ -84,11 +84,11 @@ function Snapshot({ run }: { run: ArchiveRun }) {
         </div>
       </div>
 
-      <details open className="rounded-lg border border-gray-200 bg-white dark:border-[#332b22] dark:bg-[#1c1814]">
+      <details open className="rounded-lg border border-gray-200 bg-white dark:border-[#29292c] dark:bg-[#161617]">
         <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-gray-600 dark:text-gray-300">Голоси ({settings.voices.length})</summary>
-        <div className="space-y-2 border-t border-gray-100 p-2 dark:border-[#332b22]">
+        <div className="space-y-2 border-t border-gray-100 p-2 dark:border-[#29292c]">
           {settings.voices.map((v, i) => (
-            <div key={i} className="rounded border border-gray-100 p-2 dark:border-[#332b22]">
+            <div key={i} className="rounded border border-gray-100 p-2 dark:border-[#29292c]">
               <div className="mb-1 font-mono text-xs font-semibold text-gray-700 dark:text-gray-200">{v.lang}</div>
               <dl className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
                 {VOICE_FIELDS.filter((f) => v[f] != null && v[f] !== '').map((f) => (
@@ -103,13 +103,13 @@ function Snapshot({ run }: { run: ArchiveRun }) {
         </div>
       </details>
 
-      <details className="rounded-lg border border-gray-200 bg-white dark:border-[#332b22] dark:bg-[#1c1814]">
+      <details className="rounded-lg border border-gray-200 bg-white dark:border-[#29292c] dark:bg-[#161617]">
         <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-gray-600 dark:text-gray-300">Параметри ({cfg.length})</summary>
-        <div className="overflow-auto border-t border-gray-100 dark:border-[#332b22]">
+        <div className="overflow-auto border-t border-gray-100 dark:border-[#29292c]">
           <table className="w-full text-xs">
             <tbody>
               {cfg.map(([k, v]) => (
-                <tr key={k} className="border-t border-gray-50 first:border-0 dark:border-[#332b22]">
+                <tr key={k} className="border-t border-gray-50 first:border-0 dark:border-[#29292c]">
                   <td className="px-2 py-1 font-mono text-gray-400">{k}</td>
                   <td className="px-2 py-1 text-gray-800 dark:text-gray-200">{v}</td>
                 </tr>
@@ -119,9 +119,9 @@ function Snapshot({ run }: { run: ArchiveRun }) {
         </div>
       </details>
 
-      <details className="rounded-lg border border-gray-200 bg-white dark:border-[#332b22] dark:bg-[#1c1814]">
+      <details className="rounded-lg border border-gray-200 bg-white dark:border-[#29292c] dark:bg-[#161617]">
         <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-gray-600 dark:text-gray-300">AI-промпт перевірки</summary>
-        <pre className="max-h-64 overflow-auto whitespace-pre-wrap border-t border-gray-100 p-3 font-mono text-[11px] text-gray-700 dark:border-[#332b22] dark:text-gray-300">{settings.aiPrompt}</pre>
+        <pre className="max-h-64 overflow-auto whitespace-pre-wrap border-t border-gray-100 p-3 font-mono text-[11px] text-gray-700 dark:border-[#29292c] dark:text-gray-300">{settings.aiPrompt}</pre>
       </details>
     </div>
   )
@@ -130,6 +130,6 @@ function Snapshot({ run }: { run: ArchiveRun }) {
 function Badge({ children, tone = 'gray' }: { children: React.ReactNode; tone?: 'gray' | 'green' | 'amber' }) {
   const cls = tone === 'green' ? 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300'
     : tone === 'amber' ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'
-    : 'bg-gray-100 text-gray-600 dark:bg-[#262019] dark:text-gray-300'
+    : 'bg-gray-100 text-gray-600 dark:bg-[#202023] dark:text-gray-300'
   return <span className={`rounded px-1.5 py-0.5 ${cls}`}>{children}</span>
 }

@@ -16,7 +16,7 @@
           "value": "1pucg6dxUB2h_gSyTc655uahPRWidkbA0",
           "mode": "id"
         },
-        "event": "fileCreated",
+        "event": "fileUpdated",
         "options": {}
       },
       "id": "48854dab-921d-4e17-ae97-3ac2616e4e77",
@@ -33,6 +33,89 @@
           "name": "Google Drive account"
         }
       }
+    },
+    {
+      "parameters": {},
+      "id": "execwf-trig-wmaster-000000001",
+      "name": "Batch Feeder Entry",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        13664,
+        4928
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "manualtrig-input-00000000000001",
+      "name": "Manual Trigger (input/)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        13664,
+        5248
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.googleapis.com/drive/v3/files",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "'1pucg6dxUB2h_gSyTc655uahPRWidkbA0' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'"
+            },
+            {
+              "name": "fields",
+              "value": "files(id,name,mimeType)"
+            },
+            {
+              "name": "pageSize",
+              "value": "1000"
+            },
+            {
+              "name": "supportsAllDrives",
+              "value": "true"
+            },
+            {
+              "name": "includeItemsFromAllDrives",
+              "value": "true"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "listinput-0000-0000-0000-000001",
+      "name": "List Input Files",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        13888,
+        5248
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "MoWG4XRaoJGU18eu",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Manual entry: expand the Drive files.list response into one item per file,\n// matching the shape Parse Filename expects from the Drive trigger ({ id, name, mimeType }).\nconst files = ($input.first().json.files) || [];\nif (files.length === 0) {\n  throw new Error('У папці 01_input/ немає файлів — закинь файл і запусти ще раз.');\n}\nreturn files.map(f => ({ json: { id: f.id, name: f.name, mimeType: f.mimeType } }));"
+      },
+      "id": "splitinput-000-0000-0000-000001",
+      "name": "Split Input Files",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        14112,
+        5248
+      ]
     },
     {
       "parameters": {
@@ -804,6 +887,50 @@
   ],
   "pinData": {},
   "connections": {
+    "Batch Feeder Entry": {
+      "main": [
+        [
+          {
+            "node": "Parse Filename",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger (input/)": {
+      "main": [
+        [
+          {
+            "node": "List Input Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Input Files": {
+      "main": [
+        [
+          {
+            "node": "Split Input Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Input Files": {
+      "main": [
+        [
+          {
+            "node": "Parse Filename",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "Drive Trigger (input/)": {
       "main": [
         [

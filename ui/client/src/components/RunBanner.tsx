@@ -1,3 +1,4 @@
+import { AlertTriangle, ArrowRight, Hand, Play } from 'lucide-react'
 import { useRunState } from '../api/useRunState'
 
 const REVIEW_GATE: Record<string, { label: string; route: string }> = {
@@ -15,8 +16,8 @@ export function RunBanner() {
   if (gate) {
     return (
       <Banner tone="amber">
-        ✋ Пайплайн чекає на тебе — перевір {gate.label} і натисни «Затвердити та продовжити».{' '}
-        <a href={gate.route} className="font-medium underline">→ перейти до перевірки</a>
+        <Hand className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> Пайплайн чекає на тебе — перевір {gate.label} і натисни «Затвердити та продовжити».{' '}
+        <a href={gate.route} className="font-medium underline"><ArrowRight className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> перейти до перевірки</a>
       </Banner>
     )
   }
@@ -24,7 +25,7 @@ export function RunBanner() {
   if (state.stalled) {
     return (
       <Banner tone="red">
-        ⚠ Немає прогресу понад 12 хв — можливо, ран зупинився
+        <AlertTriangle className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> Немає прогресу понад 12 хв — можливо, ран зупинився
         {state.progress.currentLang ? ` на мові ${state.progress.currentLang}` : ''}. Готові мови НЕ пересинтезуються —
         поклич automation tech, він відновить з місця зупинки. Не запускай новий урок наосліп.
       </Banner>
@@ -38,7 +39,7 @@ export function RunBanner() {
   if (state.readOnly) {
     return (
       <Banner tone="amber">
-        ▶ Триває локалізація{state.lessonId ? ` ${state.lessonId}` : ''} — редагування вимкнено до завершення
+        <Play className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> Триває локалізація{state.lessonId ? ` ${state.lessonId}` : ''} — редагування вимкнено до завершення
         (це захищає дані, як у правилі «не чіпай Sheets під час рану»).
       </Banner>
     )

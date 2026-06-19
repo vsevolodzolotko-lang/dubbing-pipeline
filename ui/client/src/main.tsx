@@ -4,6 +4,7 @@ import { BrowserRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RunStateProvider } from './api/useRunState'
 import { CartProvider } from './api/cart'
+import { RunMediaProvider } from './api/runMedia'
 import App from './App'
 // Brand fonts (offline-safe, bundled — no CDN). Lora = serif display headings
 // (Cyrillic-capable), JetBrains Mono = technical text (lang codes, segment IDs).
@@ -23,9 +24,11 @@ createRoot(document.getElementById('root')!).render(
     <QueryClientProvider client={qc}>
       <RunStateProvider>
         <CartProvider>
-          <BrowserRouter>
-            <App />
-          </BrowserRouter>
+          <RunMediaProvider>
+            <BrowserRouter>
+              <App />
+            </BrowserRouter>
+          </RunMediaProvider>
         </CartProvider>
       </RunStateProvider>
     </QueryClientProvider>

@@ -9,6 +9,7 @@ import { Dashboard } from './screens/Dashboard'
 import { TranscriptReview } from './screens/TranscriptReview'
 import { TranslationReview } from './screens/TranslationReview'
 import { Workbench } from './screens/Workbench'
+import { RenderStep } from './screens/RenderStep'
 import { Qa } from './screens/Qa'
 import { Voices } from './screens/Voices'
 import { Config } from './screens/Config'
@@ -32,6 +33,7 @@ export default function App() {
             <Route path="/transcript" element={<TranscriptReview />} />
             <Route path="/translation" element={<TranslationReview />} />
             <Route path="/review" element={<Workbench />} />
+            <Route path="/render" element={<RenderStep />} />
             <Route path="/qa" element={<Qa />} />
             <Route path="/voices" element={<Voices />} />
             <Route path="/prompts" element={<Placeholder title="Промпти" phase="v3" />} />

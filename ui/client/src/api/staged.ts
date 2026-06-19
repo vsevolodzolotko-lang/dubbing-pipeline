@@ -15,6 +15,15 @@ export const applyArchiveSettings = (id: string) =>
 export const approveGate = (gate: Gate) =>
   postJson<{ ok: boolean; stage?: string; status?: string; error?: string }>(`/api/approve/${gate}`, {})
 
+// ── assemble-file step (separate stage after audio review) ───────────────────
+export interface RenderPlan {
+  lessonId: string; langs: string[]; files: string[]
+  destination: string; presets: string[]; built: boolean
+}
+export const getRenderPlan = () => fetchJson<RenderPlan>('/api/render/plan')
+export const startRender = (destination: string) =>
+  postJson<{ ok: boolean; destination?: string; error?: string }>('/api/render', { destination })
+
 export const probeSecondDrop = () =>
   postJson<{ ok: boolean; busy: boolean; error?: string }>('/api/staged/second-drop', {})
 
@@ -28,8 +37,19 @@ export const mergeSegment = (segmentId: string) =>
 export const splitSegment = (segmentId: string, wordIndex: number) =>
   postJson<{ ok: boolean; segments: number }>('/api/segments/split', { segmentId, wordIndex })
 
+// Drag the timeline edges to retime a segment's EN slot (transcript stage).
+export const retimeSegment = (segmentId: string, enStart: number, enEnd: number) =>
+  postJson<{ ok: boolean; enStart?: number; enEnd?: number; durationSec?: number; error?: string }>(
+    '/api/segments/retime', { segmentId, enStart, enEnd })
+
 export const fetchWords = (segmentId: string) =>
   fetchJson<{ segmentId: string; words: Word[] }>(`/api/segments/${segmentId}/words`)
+
+// Loudness-normalize dub segments to a target LUFS (audio stage). Mock records a
+// flag; real R128 gain is applied server-side on live.
+export const normalizeSegments = (rowKeys: string[], targetLufs = -23) =>
+  postJson<{ ok: boolean; normalized?: number; targetLufs?: number; error?: string }>(
+    '/api/segments/normalize', { rowKeys, targetLufs })
 
 // ── translation stage ──────────────────────────────────────────────────────
 export const saveTranslations = (rows: { segmentId: string; lang: string; text: string }[]) =>

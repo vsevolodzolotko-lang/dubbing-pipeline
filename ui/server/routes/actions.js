@@ -2,11 +2,11 @@ import { config, writesEnabled } from '../config.js'
 import {
   RUN_STATES, EDITABLE_CONFIG_KEYS, PIPELINE_STAGES,
   LOCALIZATION_WRITE_STATES, TRANSCRIPT_WRITE_STATES, TRANSLATION_WRITE_STATES,
-  TRANSCRIPT_WRITABLE_COLS, TRANSLATION_WRITABLE_COLS,
+  TRANSCRIPT_WRITABLE_COLS, TRANSLATION_WRITABLE_COLS, RENDER_STATES, RETIME_WRITE_STATES,
 } from '../constants.js'
 import {
   withWriteLock, writeLocalizationCells, writeConfigCell, writeVoiceCells,
-  writeSegmentCells, mergeSegments, splitSegment, approveStage, startStagedRun, applyArchiveSettings,
+  writeSegmentCells, mergeSegments, splitSegment, retimeSegment, normalizeSegments, approveStage, startStagedRun, applyArchiveSettings, startRender,
 } from '../services/writes.js'
 import { wrapWav } from '../services/mockAudio.js'
 import { regenTracker } from '../services/regenTracker.js'
@@ -336,6 +336,34 @@ export function registerActionRoutes(fastify, { snapshot, sheets }) {
     } catch (e) { return reply.code(400).send({ error: e.message }) }
   })
 
+  // Retime a segment's EN slot — drag timeline edges under the video (transcript + audio gates).
+  fastify.post('/api/segments/retime', async (req, reply) => {
+    if (!guard(reply, RETIME_WRITE_STATES)) return
+    const segmentId = String(req.body?.segmentId || '').trim()
+    const enStart = Number(req.body?.enStart)
+    const enEnd = Number(req.body?.enEnd)
+    if (!segmentId || !isFinite(enStart) || !isFinite(enEnd)) return reply.code(400).send({ error: 'потрібні segmentId, enStart, enEnd' })
+    try {
+      const res = await withWriteLock(() => retimeSegment(sheets, segmentId, enStart, enEnd))
+      if (!res.ok) return reply.code(409).send(res)
+      snapshot.refresh()
+      return res
+    } catch (e) { return reply.code(400).send({ error: e.message }) }
+  })
+
+  // Loudness-normalize dub segments to a target LUFS (audio gate).
+  fastify.post('/api/segments/normalize', async (req, reply) => {
+    if (!guard(reply, LOCALIZATION_WRITE_STATES)) return
+    const rowKeys = Array.isArray(req.body?.rowKeys) ? req.body.rowKeys.map(String).filter(Boolean) : []
+    const targetLufs = req.body?.targetLufs == null ? -23 : Number(req.body.targetLufs)
+    if (!rowKeys.length) return reply.code(400).send({ error: 'потрібні rowKeys' })
+    try {
+      const res = await withWriteLock(() => normalizeSegments(sheets, rowKeys, targetLufs))
+      snapshot.refresh()
+      return res
+    } catch (e) { return reply.code(400).send({ error: e.message }) }
+  })
+
   // Approve a review gate → advance the pipeline. Idempotent (409 if not in REVIEW).
   fastify.post('/api/approve/:gate', async (req, reply) => {
     const gate = APPROVE_GATES[req.params.gate]
@@ -344,10 +372,28 @@ export function registerActionRoutes(fastify, { snapshot, sheets }) {
     try {
       const res = await withWriteLock(() => approveStage(sheets, gate.stage, Date.now()))
       if (!res.ok) return reply.code(409).send(res)
-      // Completing the audio gate finishes the lesson → snapshot it to the archive.
-      if (req.params.gate === 'audio') {
-        try { archive.capture(snapshot.get(), new Date().toISOString()) } catch (e) { req.log?.warn?.(e) }
-      }
+      snapshot.refresh()
+      return res
+    } catch (e) { return reply.code(502).send({ error: e.message }) }
+  })
+
+  // Assemble-file step (separate stage after audio review). Plan = files + save
+  // destination + presets; the build records the destination and stitches the
+  // full per-lang files, then the lesson finishes (→ archived with destination).
+  fastify.get('/api/render/plan', async (req, reply) => {
+    if (config.mode !== 'mock') return reply.code(409).send({ error: 'склейка-план лише в mock (Етап P: Drive)' })
+    return mockStore.renderPlan()
+  })
+
+  fastify.post('/api/render', async (req, reply) => {
+    if (!guard(reply, RENDER_STATES)) return
+    const destination = typeof req.body?.destination === 'string' ? req.body.destination : ''
+    try {
+      const res = await withWriteLock(() => startRender(sheets, Date.now(), destination))
+      if (!res.ok) return reply.code(409).send(res)
+      // The run is now final (only stitching remains) → snapshot it with destination.
+      try { archive.capture(snapshot.get(), new Date().toISOString(), { destination: res.destination }) }
+      catch (e) { req.log?.warn?.(e) }
       snapshot.refresh()
       return res
     } catch (e) { return reply.code(502).send({ error: e.message }) }

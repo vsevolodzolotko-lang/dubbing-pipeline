@@ -29,7 +29,7 @@ function nextId(existing) {
 }
 
 // Build a snapshot record from the current pipeline snapshot model.
-function buildRecord(model, finishedAt) {
+function buildRecord(model, finishedAt, extra = {}) {
   const cfg = {}
   for (const key of CONFIG_ALLOWLIST) {
     const v = model.configMap?.get(key)
@@ -44,6 +44,7 @@ function buildRecord(model, finishedAt) {
     langCount: langs.length,
     langs,
     needsAttention: na,
+    destination: extra.destination ?? null,
     settings: {
       config: cfg,
       voices: model.voices || [],
@@ -62,9 +63,9 @@ export const archive = {
     return load().runs.find((r) => r.id === id) || null
   },
   // capture a completed run from the snapshot model
-  capture(model, finishedAt) {
+  capture(model, finishedAt, extra = {}) {
     const store = load()
-    const item = { id: nextId(store.runs), ...buildRecord(model, finishedAt) }
+    const item = { id: nextId(store.runs), ...buildRecord(model, finishedAt, extra) }
     store.runs.unshift(item)
     save(store)
     return item

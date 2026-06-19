@@ -9,10 +9,10 @@ import { config } from '../config.js'
  * editable prompt; this function just parses its JSON.
  */
 
-const CPS_DEFAULTS = { de: 14, es: 15, fr: 13.5, it: 14, pl: 13, pt: 14, tr: 13 }
+export const CPS_DEFAULTS = { de: 14, es: 15, fr: 13.5, it: 14, pl: 13, pt: 14, tr: 13 }
 const num = (v) => (v === '' || v == null || isNaN(Number(v)) ? null : Number(v))
 
-const FORMAL = {
+export const FORMAL = {
   de: /\b(Sie|Ihnen|Ihre[mnrs]?)\b/,
   es: /\b(usted|ustedes)\b/i,
   fr: /\b(vous|votre|vos)\b/i,
@@ -31,12 +31,12 @@ const INFORMAL = {
   tr: [[/\bsiz\b/gi, 'sen']],
 }
 
-function informalize(text, lang) {
+export function informalize(text, lang) {
   let t = text
   for (const [re, rep] of (INFORMAL[lang] || [])) t = t.replace(re, rep)
   return t
 }
-function shortenToBudget(text, budgetChars) {
+export function shortenToBudget(text, budgetChars) {
   if (text.length <= budgetChars) return text
   let out = ''
   for (const w of text.split(/\s+/)) {

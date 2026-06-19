@@ -135,6 +135,7 @@ export const RUN_STATES = {
   TRANSLATION_REVIEW: 'TRANSLATION_REVIEW', // staged gate 2
   SYNTHESIZING: 'SYNTHESIZING',
   AUDIO_REVIEW: 'AUDIO_REVIEW', // staged gate 3 (per-segment audio review)
+  RENDER_REVIEW: 'RENDER_REVIEW', // staged gate 4 — assemble full file: pick destination, then build
   RENDERING: 'RENDERING', // building the full per-lang file from segments (post-review)
   COMPLETE: 'COMPLETE',
   STOPPING: 'STOPPING',
@@ -163,6 +164,11 @@ export const LOCALIZATION_WRITE_STATES = new Set([
 ])
 export const TRANSCRIPT_WRITE_STATES = new Set([RUN_STATES.TRANSCRIPT_REVIEW])
 export const TRANSLATION_WRITE_STATES = new Set([RUN_STATES.TRANSLATION_REVIEW])
+// Segment EN-slot retime (drag timeline edges) — allowed on both the transcript
+// gate and the audio gate (where you check the dub against the video per language).
+export const RETIME_WRITE_STATES = new Set([RUN_STATES.TRANSCRIPT_REVIEW, RUN_STATES.AUDIO_REVIEW])
+// The assemble-file gate accepts the "build" action (with a destination).
+export const RENDER_STATES = new Set([RUN_STATES.RENDER_REVIEW])
 
 // Running states that should NOT be eligible for the staged review gates — used
 // to gate the STALLED overlay so review states (intentionally idle) never stall.

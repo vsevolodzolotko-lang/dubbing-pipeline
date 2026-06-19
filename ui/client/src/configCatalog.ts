@@ -50,7 +50,7 @@ export const CATALOG: Record<string, ConfigField> = {
   movement_borrow_max_sec: num('Borrow для руху, с', 0, 4, 0.1, 'Окремий ліміт borrow для movement-сегментів (Inhale/Hold/Exhale). 0 = жорстка прив’язка до en_duration.', 'Таймінг синтезу (W3)'),
   silence_lead_ratio: { group: 'Таймінг синтезу (W3)', label: 'Частка тиші перед TTS', type: 'ratio', min: 0, max: 1, step: 0.05, editable: true, tooltip: 'Яка частина padding-тиші йде ПЕРЕД аудіо (lead). Застосовується лише коли природний lead-проміжок = 0.' },
   silence_lead_max_sec: num('Макс. lead-тиша, с', 0, 0.5, 0.01, 'Жорсткий стеля breath-lead перед TTS, коли природний EN-проміжок = 0. 0 = строге EN-вирівнювання.', 'Таймінг синтезу (W3)'),
-  max_speed_up_delta: num('Макс. прискорення (+до speed)', 0, 0.4, 0.01, 'Макс. прискорення над базовим speed голосу. Для 1.0 → стеля 1.20; для 0.86 (FR) → 1.06.', 'Таймінг синтезу (W3)'),
+  max_speed_up_delta: num('Макс. прискорення (+до speed)', 0, 0.4, 0.01, 'Макс. прискорення над базовим speed голосу. Для 1.0 — стеля 1.20; для 0.86 (FR) — 1.06.', 'Таймінг синтезу (W3)'),
   max_slow_down_delta: num('Макс. уповільнення (−до speed)', 0, 0.4, 0.01, 'Макс. уповільнення нижче базового speed для заповнення тиші (Phase 2).', 'Таймінг синтезу (W3)'),
   slowdown_min_gap_sec: num('Поріг для уповільнення, с', 0, 2, 0.1, 'Уповільнення-для-заповнення застосовується лише коли залишкова тиша більша за це.', 'Таймінг синтезу (W3)'),
 
@@ -59,15 +59,15 @@ export const CATALOG: Record<string, ConfigField> = {
     num(`CPS ${l.toUpperCase()}`, 5, 25, 0.5, `Оцінка символів/с для ${l.toUpperCase()}. Використовується для прогнозу, чи влізе переклад у слот. Калібрується scripts/analyze_cps.js.`, 'CPS — символів/с'),
   ])),
 
-  drive_input_folder_id: { group: 'Drive-теки', label: '01_input (вхід)', type: 'text', editable: true, tooltip: 'Тека, яку стежить W_Master. ⚠ Зміна впливає на пайплайн.' },
-  drive_output_folder_id: { group: 'Drive-теки', label: '02_output (сегменти)', type: 'text', editable: true, tooltip: 'Тека per-segment WAV. ⚠ Впливає на пайплайн.' },
-  drive_output_full_folder_id: { group: 'Drive-теки', label: '03_full (повні)', type: 'text', editable: true, tooltip: 'Тека повних WAV. ⚠ Впливає на пайплайн.' },
-  drive_output_vtt_folder_id: { group: 'Drive-теки', label: '04_vtt (субтитри)', type: 'text', editable: true, tooltip: 'Тека VTT. ⚠ Впливає на пайплайн.' },
-  drive_archive_folder_id: { group: 'Drive-теки', label: '05_archive (архів)', type: 'text', editable: true, tooltip: 'Корінь архіву. ⚠ Впливає на пайплайн.' },
+  drive_input_folder_id: { group: 'Drive-теки', label: '01_input (вхід)', type: 'text', editable: true, tooltip: 'Тека, яку стежить W_Master. Увага: зміна впливає на пайплайн.' },
+  drive_output_folder_id: { group: 'Drive-теки', label: '02_output (сегменти)', type: 'text', editable: true, tooltip: 'Тека per-segment WAV. Увага: впливає на пайплайн.' },
+  drive_output_full_folder_id: { group: 'Drive-теки', label: '03_full (повні)', type: 'text', editable: true, tooltip: 'Тека повних WAV. Увага: впливає на пайплайн.' },
+  drive_output_vtt_folder_id: { group: 'Drive-теки', label: '04_vtt (субтитри)', type: 'text', editable: true, tooltip: 'Тека VTT. Увага: впливає на пайплайн.' },
+  drive_archive_folder_id: { group: 'Drive-теки', label: '05_archive (архів)', type: 'text', editable: true, tooltip: 'Корінь архіву. Увага: впливає на пайплайн.' },
   sheets_document_id: { group: 'Drive-теки', label: 'ID таблиці (snapshot)', type: 'text', editable: true, tooltip: 'ID живої таблиці для snapshot-копії в архіві. Зазвичай не чіпати.' },
 
   slack_channel: { group: 'Slack / інтеграції', label: 'Slack-канал (ID)', type: 'text', editable: true, tooltip: 'ID каналу, куди постяться повідомлення (напр. C01234ABCDE).' },
-  w_regen_workflow_url: { group: 'Slack / інтеграції', label: 'URL вебхука W_Regen', type: 'text', editable: true, tooltip: 'Публічний вебхук W_Regen. ⚠ Capability-URL: будь-хто з ним може запустити платний реген.' },
+  w_regen_workflow_url: { group: 'Slack / інтеграції', label: 'URL вебхука W_Regen', type: 'text', editable: true, tooltip: 'Публічний вебхук W_Regen. Увага: Capability-URL — будь-хто з ним може запустити платний реген.' },
 
   anthropic_api_key: { group: 'Секрети (лише перегляд)', label: 'Anthropic API key', type: 'secret', testable: true },
   gemini_api_key: { group: 'Секрети (лише перегляд)', label: 'Gemini API key', type: 'secret', testable: true },

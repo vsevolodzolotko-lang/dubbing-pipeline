@@ -1,4 +1,5 @@
 import { NavLink } from 'react-router-dom'
+import { ArrowRight, Check, Hand, Play } from 'lucide-react'
 import { useRunState } from '../api/useRunState'
 import { STAGES, currentStage } from '../ui'
 
@@ -16,7 +17,7 @@ export function StageRail() {
   const done = state.state === 'COMPLETE'
 
   return (
-    <div className="flex items-center gap-2 border-b border-gray-200 bg-gray-50 px-5 py-2 dark:border-[#332b22] dark:bg-[#16130f]">
+    <div className="flex items-center gap-2 border-b border-gray-200 bg-gray-50 px-5 py-2 dark:border-[#29292c] dark:bg-[#0e0e10]">
       {STAGES.map((s, i) => {
         const isCur = i === curIdx
         const phase = isCur ? cur!.phase : null
@@ -27,14 +28,16 @@ export function StageRail() {
           : 'todo'
         return (
           <div key={s.key} className="flex items-center gap-2">
-            {i > 0 && <span className="text-gray-300 dark:text-gray-600">→</span>}
+            {i > 0 && <ArrowRight className="h-4 w-4 text-gray-300 dark:text-gray-600" strokeWidth={1.75} />}
             <NavLink
               to={s.route}
               className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium ${
-                status === 'done' ? 'border-green-300 bg-green-100 text-green-800 dark:border-green-800 dark:bg-green-900/40 dark:text-green-300'
+                // completed / past gates → muted gray ("done, behind you"); the active
+                // gate stands out (blue running / amber gate); future gates are a faint dashed outline.
+                status === 'done' ? 'border-gray-300 bg-gray-100 text-gray-500 dark:border-[#3a3a3d] dark:bg-[#202023] dark:text-gray-400'
                 : status === 'running' ? 'border-blue-300 bg-blue-100 text-blue-800 dark:border-blue-800 dark:bg-blue-900/40 dark:text-blue-300'
                 : status === 'gate' ? 'animate-pulse border-amber-400 bg-amber-100 text-amber-900 dark:border-amber-700 dark:bg-amber-900/40 dark:text-amber-200'
-                : 'border-gray-200 bg-white text-gray-400 dark:border-[#473d31] dark:bg-[#1c1814] dark:text-gray-500'}`}
+                : 'border-dashed border-gray-300 bg-white text-gray-400 dark:border-[#3a3a3d] dark:bg-[#161617] dark:text-gray-500'}`}
             >
               <span>{glyph(status)}</span>
               <span>{i + 1}. {s.label}</span>
@@ -46,6 +49,10 @@ export function StageRail() {
   )
 }
 
-function glyph(s: 'done' | 'running' | 'gate' | 'todo') {
-  return s === 'done' ? '✓' : s === 'running' ? '▶' : s === 'gate' ? '✋' : '·'
+function glyph(s: 'done' | 'running' | 'gate' | 'todo'): React.ReactNode {
+  const cls = 'inline-block h-3.5 w-3.5 align-[-0.2em]'
+  return s === 'done' ? <Check className={cls} strokeWidth={1.75} />
+    : s === 'running' ? <Play className={cls} strokeWidth={1.75} />
+    : s === 'gate' ? <Hand className={cls} strokeWidth={1.75} />
+    : '·'
 }

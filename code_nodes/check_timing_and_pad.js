@@ -62,6 +62,25 @@ const LANG_CPS = {
 if (!EL_KEY)  throw new Error('elevenlabs_api_key missing from config sheet');
 if (!GEM_KEY) throw new Error('gemini_api_key missing from config sheet');
 
+// --- Concurrent Drive upload via OAuth refresh-token ------------------------
+// httpRequestWithAuthentication is blocked in the Code Node sandbox on this deployment,
+// so we mint our own Google access token from a stored refresh token and upload with plain
+// httpRequest. A Buffer body gets JSON-serialized crossing the Code-node VM boundary (which
+// corrupts the raw bytes), so the upload below POSTs a single pure-ASCII multipart/related
+// request with the media part base64-encoded. This lets every segment in the batch upload its
+// WAV concurrently inside the Promise.all below (≤ batchSize in flight) instead of via a
+// downstream serial "Save to Drive" node (~49 sequential uploads/lang — the dominant Phase-1
+// cost). See DECISIONS PARALLEL_DRIVE_UPLOAD_VIA_OAUTH_REFRESH_TOKEN_2026-06-17.
+const OAUTH_CLIENT_ID     = configMap.google_oauth_client_id     || '';
+const OAUTH_CLIENT_SECRET = configMap.google_oauth_client_secret || '';
+const OAUTH_REFRESH_TOKEN = configMap.google_oauth_refresh_token || '';
+const DRIVE_FOLDER_ID     = configMap.drive_output_folder_id     || '';
+if (!OAUTH_CLIENT_ID || !OAUTH_CLIENT_SECRET || !OAUTH_REFRESH_TOKEN) {
+  throw new Error('Drive OAuth creds missing from config (google_oauth_client_id / google_oauth_client_secret / google_oauth_refresh_token)');
+}
+if (!DRIVE_FOLDER_ID) throw new Error('drive_output_folder_id missing from config sheet');
+const driveToken = { value: null };  // mutable holder so re-mint on 401 is visible to all jobs
+
 const MAX_SPEED_UP_DELTA  = parseFloat(configMap.max_speed_up_delta) || 0.20;
 // Movement cues (Inhale/Hold/Exhale) may breath-borrow into trailing silence too,
 // bounded by this many seconds (default 2.0). Set movement_borrow_max_sec=0 to restore
@@ -137,8 +156,84 @@ async function callGemini(systemPrompt, userText) {
   return '';
 }
 
+// Mint a Google access token from the stored refresh token. URLSearchParams is unavailable
+// in the Code Node sandbox, so the form body is hand-encoded; no json:true so n8n doesn't
+// override the x-www-form-urlencoded content-type. Throws if the grant fails (fail-fast at
+// the once-per-pass mint below).
+async function mintDriveToken() {
+  const params =
+    'client_id='      + encodeURIComponent(OAUTH_CLIENT_ID) +
+    '&client_secret=' + encodeURIComponent(OAUTH_CLIENT_SECRET) +
+    '&refresh_token=' + encodeURIComponent(OAUTH_REFRESH_TOKEN) +
+    '&grant_type=refresh_token';
+  const raw = await this.helpers.httpRequest({
+    method: 'POST', url: 'https://oauth2.googleapis.com/token',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: params,
+  });
+  const parsed = (typeof raw === 'string') ? JSON.parse(raw) : raw;
+  if (!parsed || !parsed.access_token) throw new Error('Drive token mint returned no access_token');
+  return parsed.access_token;
+}
+
+// Single-call Drive upload (create metadata + media in one request). We must NOT send a
+// Buffer body: n8n serializes a Buffer to JSON ({"type":"Buffer","data":[...]}) crossing the
+// Code-node VM boundary, which corrupts the bytes. Instead we send a pure-ASCII
+// multipart/related STRING with the media part base64-encoded (Content-Transfer-Encoding:
+// base64); Google decodes it. The boundary contains '-' (not a base64 char) so it cannot
+// collide with the encoded media. Re-mints the token once on 401. Soft-fail: returns '' on
+// persistent failure (caller flags needs_attention) so one bad upload can't reject the batch.
+async function uploadWavToDrive(wavBuf, fileName) {
+  const BND  = 'wav-upload-boundary';
+  const meta = JSON.stringify({ name: fileName, parents: [DRIVE_FOLDER_ID] });
+  const body =
+    `--${BND}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n` +
+    `--${BND}\r\nContent-Type: audio/wav\r\nContent-Transfer-Encoding: base64\r\n\r\n` +
+    wavBuf.toString('base64') +
+    `\r\n--${BND}--`;
+  const MAX_TRIES = 4;
+  for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
+    try {
+      const raw = await this.helpers.httpRequest({
+        method: 'POST',
+        url: 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true',
+        headers: { Authorization: `Bearer ${driveToken.value}`, 'Content-Type': `multipart/related; boundary=${BND}` },
+        body,
+      });
+      const created = (typeof raw === 'string') ? JSON.parse(raw) : raw;
+      const id = created && created.id;
+      if (!id) throw new Error('Drive upload returned no id');
+      return id;
+    } catch (e) {
+      const status = e.httpCode || e.response?.statusCode || e.response?.status;
+      if (String(status) === '401' && attempt < MAX_TRIES - 1) {
+        try { driveToken.value = await mintDriveToken.call(this); } catch (_) { /* retry below */ }
+        continue;
+      }
+      if (attempt === MAX_TRIES - 1) {
+        console.error(`Drive upload failed for ${fileName} after ${MAX_TRIES} tries:`, e.message);
+        return '';
+      }
+      await sleep(2000 * Math.pow(2, attempt));
+    }
+  }
+  return '';
+}
+
+// Upload the finished WAV to Drive (concurrently with the rest of the batch) and attach
+// audio_drive_file_id. No `binary` is returned — downstream Build Full / Trim re-download
+// from Drive via audio_drive_file_id, so the WAV need not survive the loop (smaller payloads).
+async function finalizeItem(jsonOut, wavBuf, fileName) {
+  const id = await uploadWavToDrive.call(this, wavBuf, fileName);
+  if (!id) {
+    jsonOut.needs_attention = true;
+    jsonOut.warning = (jsonOut.warning ? jsonOut.warning + '; ' : '') + 'Drive upload failed';
+  }
+  return { json: { ...jsonOut, audio_drive_file_id: id || '' } };
+}
+
 // ---------------------------------------------------------------------------
-// Per-job synthesis + timing + padding. Returns one { json, binary } item.
+// Per-job synthesis + timing + padding. Synthesizes, times/pads, then uploads the WAV to
+// Drive and returns one { json } item carrying audio_drive_file_id (no binary).
 // All per-job state (voice params, slot budgets, retry loops) lives here so the
 // batch can run many jobs concurrently with no cross-talk.
 // ---------------------------------------------------------------------------
@@ -277,21 +372,20 @@ ATTEMPT LEVEL: ${level}`;
     const wav         = buildWav(Buffer.concat([leadSilence, pcm]));
     const realSec     = pcmDuration(pcm);
     const fileName    = `${segment_id}_${lang}.wav`;
-    return {
-      json: { segment_id, lang, lesson_id, en_duration_sec: 0,
-              lead_silence_sec:              naturalLead,
-              tts_budget_sec:                0,
-              tail_silence_sec:              0,
-              borrowed_sec:                  0,
-              expansion_attempts:            0,
-              shorten_retries_in_synthesize: 0,
-              real_duration_sec:             parseFloat(realSec.toFixed(3)),
-              final_duration_sec:            parseFloat((naturalLead + realSec).toFixed(3)),
-              final_text:                    text,
-              final_speed: 1.0, needs_attention: true, file_name: fileName,
-              warning: 'en_duration_sec missing — file not strictly timed' },
-      binary: { data: { data: wav.toString('base64'), mimeType: 'audio/wav', fileName } }
-    };
+    return await finalizeItem.call(this, {
+      segment_id, lang, lesson_id, en_duration_sec: 0,
+      lead_silence_sec:              naturalLead,
+      tts_budget_sec:                0,
+      tail_silence_sec:              0,
+      borrowed_sec:                  0,
+      expansion_attempts:            0,
+      shorten_retries_in_synthesize: 0,
+      real_duration_sec:             parseFloat(realSec.toFixed(3)),
+      final_duration_sec:            parseFloat((naturalLead + realSec).toFixed(3)),
+      final_text:                    text,
+      final_speed: 1.0, needs_attention: true, file_name: fileName,
+      warning: 'en_duration_sec missing — file not strictly timed',
+    }, wav, fileName);
   }
 
   let finalSpeed        = parseFloat(job.speed) || 1.0;
@@ -300,33 +394,32 @@ ATTEMPT LEVEL: ${level}`;
   let expansionAttempts = 0;
 
   // Soft fallback: if initial TTS produced no audio, emit a silent placeholder WAV of
-  // en_duration length so downstream Save to Drive / Build Full Audio Per Lang still run.
-  // W3 finishes successfully; W_Master Slack notification still fires; flag for manual
-  // review via needs_attention=true.
+  // en_duration length (still uploaded to Drive via finalizeItem) so Build Full Audio Per
+  // Lang still runs. W3 finishes successfully; W_Master Slack notification still fires; flag
+  // for manual review via needs_attention=true.
   if (!pcm) {
     console.error(`Initial ElevenLabs TTS produced no audio for ${segment_id}_${lang}.`);
     const silentBytes = Math.round(enDur * SAMPLE_RATE) * BPS;
     const silentPcm   = silentBytes > 0 ? Buffer.alloc(silentBytes, 0) : Buffer.alloc(0);
     const wav         = buildWav(silentPcm);
     const fileName    = `${segment_id}_${lang}.wav`;
-    return {
-      json: { segment_id, lang, lesson_id,
-              en_duration_sec:               enDur,
-              lead_silence_sec:              0,
-              tts_budget_sec:                0,
-              tail_silence_sec:              0,
-              borrowed_sec:                  0,
-              expansion_attempts:            0,
-              shorten_retries_in_synthesize: 0,
-              real_duration_sec:             0,
-              final_duration_sec:            parseFloat((silentBytes / (SAMPLE_RATE * BPS)).toFixed(3)),
-              final_text:                    text,
-              final_speed:                   1.0,
-              needs_attention:               true,
-              file_name:                     fileName,
-              warning:                       `ElevenLabs initial TTS failed for ${segment_id}_${lang}` },
-      binary: { data: { data: wav.toString('base64'), mimeType: 'audio/wav', fileName } }
-    };
+    return await finalizeItem.call(this, {
+      segment_id, lang, lesson_id,
+      en_duration_sec:               enDur,
+      lead_silence_sec:              0,
+      tts_budget_sec:                0,
+      tail_silence_sec:              0,
+      borrowed_sec:                  0,
+      expansion_attempts:            0,
+      shorten_retries_in_synthesize: 0,
+      real_duration_sec:             0,
+      final_duration_sec:            parseFloat((silentBytes / (SAMPLE_RATE * BPS)).toFixed(3)),
+      final_text:                    text,
+      final_speed:                   1.0,
+      needs_attention:               true,
+      file_name:                     fileName,
+      warning:                       `ElevenLabs initial TTS failed for ${segment_id}_${lang}`,
+    }, wav, fileName);
   }
 
   const LEVELS = ['light', 'medium', 'max'];
@@ -429,25 +522,22 @@ ATTEMPT LEVEL: ${level}`;
   const finalDuration = (leadBytes + pcm.length + tailBytes) / (SAMPLE_RATE * BPS);
   const fileName      = `${segment_id}_${lang}.wav`;
 
-  return {
-    json: {
-      segment_id, lang, lesson_id,
-      en_duration_sec:               enDur,
-      lead_silence_sec:              parseFloat(leadSec.toFixed(3)),
-      tts_budget_sec:                parseFloat(budget.toFixed(3)),
-      tail_silence_sec:              parseFloat(tailSec.toFixed(3)),
-      borrowed_sec:                  parseFloat(borrowedSec.toFixed(3)),
-      expansion_attempts:            expansionAttempts,
-      shorten_retries_in_synthesize: shortenRetries,
-      real_duration_sec:             parseFloat(realDur.toFixed(3)),
-      final_duration_sec:            parseFloat(finalDuration.toFixed(3)),
-      final_text:                    text,
-      final_speed:                   finalSpeed,
-      needs_attention:               needsAttention,
-      file_name:                     fileName,
-    },
-    binary: { data: { data: wav.toString('base64'), mimeType: 'audio/wav', fileName } }
-  };
+  return await finalizeItem.call(this, {
+    segment_id, lang, lesson_id,
+    en_duration_sec:               enDur,
+    lead_silence_sec:              parseFloat(leadSec.toFixed(3)),
+    tts_budget_sec:                parseFloat(budget.toFixed(3)),
+    tail_silence_sec:              parseFloat(tailSec.toFixed(3)),
+    borrowed_sec:                  parseFloat(borrowedSec.toFixed(3)),
+    expansion_attempts:            expansionAttempts,
+    shorten_retries_in_synthesize: shortenRetries,
+    real_duration_sec:             parseFloat(realDur.toFixed(3)),
+    final_duration_sec:            parseFloat(finalDuration.toFixed(3)),
+    final_text:                    text,
+    final_speed:                   finalSpeed,
+    needs_attention:               needsAttention,
+    file_name:                     fileName,
+  }, wav, fileName);
 }
 
 // Drain the batch in parallel. With "Loop Over Items" batchSize=7, ≤7 synthOne run
@@ -457,5 +547,7 @@ ATTEMPT LEVEL: ${level}`;
 // progresses — staying well under the 300s task-runner ceiling even with all
 // 7 segments running their full shorten + speed-up paths in parallel.
 const jobs = $input.all().map(i => i.json);
+// Mint the Drive access token once per pass; synthOne uploads each WAV concurrently below.
+driveToken.value = await mintDriveToken.call(this);
 const out  = await Promise.all(jobs.map(j => synthOne.call(this, j)));
 return out;

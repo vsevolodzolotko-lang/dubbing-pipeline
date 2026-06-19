@@ -4,6 +4,218 @@
 
 ---
 
+### 2026-06-19 — GO_PROCESSES_NEWEST_SINGLE_FILE
+
+**Контекст**: у первинному дизайні (`SLACK_SLASH_COMMANDS_BATCH_AND_GO`, нижче) `/go` йшов гілкою `From Feeder?(false) → List Input Files` і обробляв **усе**, що лежить у `01_input/`. Проблема (виявлена оператором): після прогону файл лишається в `01_input/` (архівується лише наступним прогоном, який розпізнає його як старий — а list-all цього не робить, бо всі файли потрапляють у `new_file_ids` і виключаються з архівації). Тож залишки **накопичувались**: кожен наступний `/go` переганяв і старий, і новий файл разом, ще й паралельним W3.
+
+**Рішення**: `/go` тепер бере **єдиний найновіший** файл (за `modifiedTime`) і віддає його W_Master як **конкретний файл** (`{id,name,mimeType}`) — тобто тим самим file-payload шляхом, що й фідер. Завдяки цьому `new_file_ids=[той один]`, і archive chain **сам переміщує старий залишок** у `05_archive` (self-cleaning, як у `/batch`). Ручне прибирання `01_input/` більше не потрібне.
+
+**Guard проти багатьох свіжих файлів**: якщо два+ файли мають `modifiedTime` у межах **2 хв** один від одного (оператор кинув кілька разом) — `/go` не вгадує, а постить у Slack «кілька свіжих файлів — лиши один або клади в Batch/ і тисни /batch». Старий залишок (давній `modifiedTime`) у вікно не потрапляє, тож не блокує обробку щойно докинутого файлу.
+
+**Інженерія**:
+- `W_Input_Start` розширено: `Verify → Prep Input Query → List Input Files` (fields з `modifiedTime`, `orderBy=modifiedTime desc`) `→ Pick Newest` (сорт за `modifiedTime`, guard 2 хв, статус `process`/`empty`/`ambiguous`) `→ Has File?` → (process) `Fire W_Master (input)` з `{id,name,mimeType}` найновішого / (інакше) Slack-нотіфай. Webhook лишився `onReceived` (миттєвий ack), текст ack зроблено нейтральним.
+- `W_Master`: **прибрано** ноду `From Feeder?` (з учорашнього дизайну) — оскільки і `/go`, і фідер тепер шлють file-payload з `id`, `Batch Feeder Entry` знову веде напряму в `Parse Filename`. Гілка `Manual Trigger (input/) → List Input Files` (list-all, ручна кнопка в n8n) лишилась без змін.
+- Залежність від `modifiedTime` тут низькоризикова (на відміну від polling-тригера): це сортування вже завантаженого списку, а щойно докинутий файл має свіжий `modifiedTime` → надійно найновіший.
+
+**Файли**: `workflows/W_Input_Start.json` (pick-newest ланцюг), `workflows/W_Master.json` (прибрано `From Feeder?`). Оновлено `docs/operator_manual.md`.
+
+---
+
+### 2026-06-18 — SLACK_SLASH_COMMANDS_BATCH_AND_GO
+
+**Контекст**: оператор хоче запускати прогони прямо зі Slack, а не лише Manual-кліком у n8n. Дві команди: **`/batch`** — стартує нічний батч (дренить `Batch/`, `W_BATCH_FEEDER_DRIP_FROM_BATCH_FOLDER`); **`/go`** — обробляє те, що зараз лежить у `01_input/` (Slack-еквівалент кнопки `Manual Trigger (input/)`).
+
+**Рішення**: два тонкі workflow — дзеркала security-ланцюга `W_Abort` (Slack interactivity), але під slash-команди:
+- `W_Batch_Start.json` — `Slash Command Webhook` (POST `/webhook/batch`) → Read Config → Prep Signature → HMAC → Verify → `Fire W_Batch_Feeder` (id `MoQRazOGefZdqk3Y`, `waitForSubWorkflow=false`).
+- `W_Input_Start.json` — той самий ланцюг, POST `/webhook/go` → `Fire W_Master (input)` (id `Y3GWKEi15Lh9njXx`) з payload `{source:'go'}` (без `id`).
+
+Обидва — `responseMode=onReceived` (миттєвий 200 + ephemeral-ack), `rawBody=true`.
+
+**Маршрутизація в W_Master (щоб `/go` перевикористав наявну гілку)**: `Batch Feeder Entry` (Execute Workflow Trigger) тепер веде в новий IF **`From Feeder?`** (`{{ $json.id || '' }}` notEmpty): має `id` (виклик фідера з конкретним файлом) → `Parse Filename`; немає `id` (виклик `/go`) → наявна гілка `List Input Files → Split → Parse Filename`. Один тригер обслуговує обидва шляхи (другий executeWorkflowTrigger у n8n неоднозначний, тому IF, а не другий тригер). Фідерний шлях не змінився; `/go` успадковує семантику `Manual Trigger (input/)` (лістить **усі** файли в `01_input/` → для кількох файлів тримати правило «один файл в input»).
+
+**Інженерія**:
+- **Підпис**: Slack підписує `v0=HMAC_SHA256(slack_signing_secret, "v0:{ts}:{raw_body}")`. `Prep Signature` бере точні raw-байти (Raw Body ON, binary→utf8), `HMAC` рахує, `Verify` порівнює + 5-хв replay-guard. **Той самий `slack_signing_secret`, що й W_Abort — новий секрет не потрібен.** Slash-боді — плейн form-urlencoded (без `payload`-обгортки), парситься вручну (`URLSearchParams` ненадійний у sandbox).
+- **3-сек ліміт Slack**: `onReceived` віддає ack миттєво, verify+fire асинхронно — Sheets-латентність не впирається в таймаут. Компроміс: forged-запит побачить ack, але дії не буде (verify → [] → fire не спрацьовує). Безпека = підпис + приватний канал.
+- **Manual Trigger → Fire** напряму в обох (тест-байпас з редактора).
+- id обох воркфлоу (`WBatchStart00001`, `WInputStart000001`) ніким не реферситься (Slack б'є по webhook-URL), тож re-assign при імпорті безпечний.
+
+**Налаштування Slack/n8n (разове)**:
+1. Імпортувати `W_Batch_Start` + `W_Input_Start`, **активувати** обидва (production-webhook працює лише при активному воркфлоу). Ре-імпортувати W_Master (нова нода `From Feeder?`).
+2. Slack App → **Slash Commands** → `/batch` → Request URL `https://<n8n>/webhook/batch`; `/go` → `https://<n8n>/webhook/go`.
+3. `slack_signing_secret` уже в config (з W_Abort) — нічого додавати.
+4. Бот має бути в каналі, звідки викликають.
+
+**Файли**: `workflows/W_Batch_Start.json` (новий), `workflows/W_Input_Start.json` (новий), `workflows/W_Master.json` (нода `From Feeder?` + rewire `Batch Feeder Entry`). W_Batch_Feeder / W3 — без змін.
+
+---
+
+### 2026-06-18 — AUDIO_TIMELINE_PER_LANGUAGE
+
+**Контекст**: оператор хотів на вкладці Аудіо (Workbench, `/review`) бачити **згенеровані дуб-сегменти під відео для кожної мови** — щоб дивитись, як локалізація сидить у слоті, перемотувати туди з матриці й слухати, і ретаймити слот. Дубляж — це вже згенерований фіксований WAV, тож «редагування» тут = ретайм EN-слота + наявні дії рев'ю (вердикт/кошик/текст), не зміна аудіо.
+
+**Рішення**: новий `AudioTimeline` над матрицею (матриця лишається для cross-language огляду). Показує доріжку **однієї мови** (чіпи + слідує за вибраною коміркою): блоки на EN-слотах, кольори статусу як у матриці (`cellClass`), амбер-маркер коли дубляж довший за слот (`finalDuration/realDuration` vs слот). **Двобічна синхронізація через спільний `selected` Workbench**: клік по комірці матриці → таймлайн перемикає мову, перемотує відео на `enStart` сегмента й підсвічує блок («послухати як там і що» — плеєр у detail-панелі, Space); клік по блоку → вибирає комірку (detail-панель). Edge-drag ретаймить спільний EN-слот через `retimeSegment` (як на транскрипті). **Вейвформа на сегментах**: кожен блок показує власну дуб-вейвформу обраної мови (`DubWaveforms` — fetch `/api/peaks/segment/{rowKey}` з кешем по rowKey, один canvas-шар малює всі сегменти у їхніх слотах) під **напівпрозорими** блоками (статус = тінт+бордер замість опаку `cellClass`), тож видно форму згенерованого аудіо. EN-фон вимкнено на аудіо (`peaks={null}` у TimeTrack) — показуємо саме дубляж.
+
+**Мультитрек + плейбек (DAW-style)**: аудіо-таймлайн переведено з single-lane на **дві доріжки** на спільній шкалі: ORIGINAL (повна EN-вейвформа) + обрана мова DUB (посегментні дуб-вейвформи + статус-блоки з ретаймом). Зліва — **рейл** (`TrackHeader`): назва доріжки (мова) + Mute/Solo (DAW «M»/«S»). Рейл — сиблінг **поза** горизонтальним скролером, тож фіксований; рядки рейлу збігаються по висоті з рядками таймлайну (spacer RULER_H + 2×TRACK_H). Аудіо більше не йде через generic `TimeTrack` — власний layout, що реюзить `RulerCanvas`/`WaveformCanvas`/`AudioSegmentLane`/`Playhead`/`useScrub`. **Безперервний плейбек** (`useTrackPlayback`): `<video>` muted = годинник (картинка); ORIGINAL — повний `<audio src=/api/audio/en>`; DUB — посегментний планувальник (свопає `src` на кліп слота під playhead, сікає на offset), синхрон до video.currentTime через rAF, re-seek при дрифті >0.25с. Mute/Solo (solo-wins) застосовуються через `element.muted` щокадру (живе перемикання; доріжки грають навіть muted, щоб тримати синхрон). Виправлено по рев'ю: deferred dub `play()` re-чекає `!video.paused` (не грає після паузи), стейл `loadedmetadata`-лістенери знімаються при швидких свопах. EN-фон повернено на ORIGINAL-доріжку. Sync best-effort (мікро-стрибки на межах сегментів).
+
+**Розширення (та сама сесія)**:
+- **Рух сегментів**: окрім ретайму країв — drag тіла блока совгає весь сегмент (обидва краї на однакову дельту) зі снапом до слова + клемпом до сусідів (`clampMove`); спільна логіка в `useEdgeEditing.startMove` (поріг 3px відрізняє клік-вибір від руху; `onGrab` вибирає на старті). Транскрипт + аудіо.
+- **Довжина = max(EN-аудіо, останній сегмент, відео)** замість first-non-zero (раніше обрізало); `WaveformCanvas` малює хвилю лише в межах її реальної тривалості (`peaks.durationSec × pxPerSecond`).
+- **N+1 доріжок = мови локалізацій + ORIGINAL**: `useTrackPlayback` узагальнено на N дуб-планувальників (per-lang `dubState`); чіпи мов прибрано; аудіо має власний rail+lanes layout (не через `TimeTrack`).
+- **Гучність доріжок**: повзунок у `TrackHeader` поряд з M/S; плейбек застосовує `element.volume` + `.muted` щокадру.
+- **Нормалізація до −23 LUFS (UI, mock-заглушка)**: кнопка в detail-панелі (сегмент) + «Нормалізувати всі» у хедері → `POST /api/segments/normalize` (guard `LOCALIZATION_WRITE_STATES`; mock пише `normalized_lufs` у `locEdits`, live → 409). Бейдж у панелі + emerald-крапка на блоках. Нове `Cell.normalizedLufs`. Реальний R128 — Етап P.
+- **Пробіл = плейбек таймлайну**: Space грає/паузить відео-годинник (а отже всі доріжки); прибрано конфліктний Space у Workbench (плеєр detail-панелі).
+- **Відео-референс переміщено**: з повноширинного зверху таймлайну — у порожнє місце **праворуч від матриці** (Workbench володіє `<video>` + станом, передає елемент у `AudioTimeline` пропом; один спільний елемент = годинник). Права detail-панель — **тільки текст**: прибрано `WaveformPlayer` (відео + EN/dub-вейвформи + плеєр), лишилось текст сегмента (EN + редаговане поле перекладу) + дії + діагностика. Слухати — на таймлайні (Space).
+- Перевірка: client `tsc` 0 помилок фічі; `node --check` server-файлів; `npm run build` зелений. (Adversarial-рев'ю розширення перервано — покрито gate-перевірками.)
+
+---
+
+### 2026-06-18 — STAGE_RAIL_GRAY_COMPLETED_STAGES
+
+**Контекст**: при переході на наступний етап попередні (виконані) етапи мають ставати сірими — підказка «що вже позаду / закрито», активний виділяється.
+
+**Рішення**: у `StageRail` і у списку етапів на `Dashboard` статус `done` тепер **сірий** (раніше зелений): виконані етапи приглушені (gray fill + сіра мітка + `Check`), активний виділяється (blue running / amber gate), майбутні — **dashed** сірий контур (відрізняє «не почато» від «зроблено»). При `COMPLETE` усі сірі. Клікабельність збережено. Файли: `components/StageRail.tsx`, `screens/Dashboard.tsx`.
+
+**Реюз (DRY)**: винесено спільну логіку ретайму країв у `model/useEdgeEditing.ts` (drag + коалесований nudge + layout-effect прев'ю), яку тепер ділять `SegmentBlock` (транскрипт) і `AudioSegmentBlock` (аудіо). `TimeTrack` узагальнено — приймає `lane: ReactNode` (chrome: scroller+ruler+waveform+scrub+playhead), а кожен таймлайн підставляє свою доріжку. Аудіо реюзить увесь generic-інфра: `useTimelineModel` (EN-слоти через RawSegment-адаптер з lesson), `useTimelineViewport`, `usePeaks('/api/peaks/en')`, `useVideoClock`, `useScrub`, canvas/ruler/playhead/video, pinch-зум + 2-finger скрол.
+
+**Сервер**: ретайм дозволено й на аудіо-воротах — новий `RETIME_WRITE_STATES = {TRANSCRIPT_REVIEW, AUDIO_REVIEW}` (`constants.js`), застосований у `/api/segments/retime` (`actions.js`) замість transcript-only guard. Клієнтський `canWrite` (localizations) уже пускав `AUDIO_REVIEW`. `onRetimed` інвалідовує `['lesson']`. Ретайм у mock клемпить до сусідів + 0.2с; задовгий-під-дубляж слот рендериться як амбер-overrun (без краху).
+
+**Нові файли**: `components/timeline/{AudioTimeline,AudioSegmentLane,AudioSegmentBlock}.tsx`, `model/useEdgeEditing.ts`. **Змінено**: `TimeTrack.tsx` (lane-проп), `SegmentBlock.tsx` + `SegmentTimeline.tsx` (реюз hook/lane), `screens/Workbench.tsx` (таймлайн над матрицею + lift `selected`), сервер `constants.js`/`routes/actions.js`.
+
+**Перевірка**: adversarial-рев'ю — 0 high/med рантайм-багів (loop-патерн відсутній, синхронізація конвергентна, reconcile не клобберить drag, доступ до cell guard-нутий); `tsc --noEmit` 0 помилок фічі; `npm run build` зелений. Manual: `/review` в `AUDIO_REVIEW` з відео — чіпи мов, клік матриці → перемотка, drag країв → ретайм.
+
+---
+
+### 2026-06-18 — MODEL_UPGRADE_OPUS_4_8_ON_PHASE2
+
+**Контекст**: Phase 2 Expand (slowdown-to-fill) сидів на `claude-opus-4-7` від апгрейду `MODEL_UPGRADE_SONNET_4_6_AND_OPUS_ON_PHASE2` (2026-05-28). Вийшов **Opus 4.8** — найздібніша модель Opus-ряду; **та сама ціна, що й 4.7** ($5 input / $25 output за 1M, cached input 10%). Та сама логіка, що й безкоштовний апгрейд Sonnet 4.5→4.6: новіша модель за ті самі гроші.
+
+**Рішення**: swap `claude-opus-4-7` → `claude-opus-4-8` на **обох** Opus-викликах Phase 2 — primary expand (`runOneExpandBatch`) і retry expand (`runOneRetryExpand` в `runRetryGroup`, для `_retry_harder`/`_retry_shorter`). Verify / Formality Fix лишаються на Sonnet 4.6, in-flight shorten — на Gemini 3.5 Flash (без змін).
+
+**Чому безпечно (no breaking changes)**: 4.7→4.8 — це лише зміна model-ID, без нових breaking changes на request surface (підтверджено claude-api migration guide). `callAnthropic` шле `body` verbatim; body містить тільки `model`/`max_tokens`/`system`/`messages` — жодних `temperature`/`top_p`/`top_k`/`thinking`, які 4.7/4.8 відхиляють (400). Prompt caching (`cache_control: ephemeral`) працює без змін; зміна model-ID інвалідує наявний кеш — перший батч на 4.8 платить повний input один раз.
+
+**Інженерія**: `code_nodes/phase2_batch_llm_tts.js` — 2 рядки (399 primary, 841 retry). `workflows/W3_Synthesize_v2.json` — 2 входження в embedded jsCode (синхронно з .js). Verify: async-обгортка n8n code-node — syntax OK; W3 JSON валідний; нуль stale `claude-opus-4-7` у code/workflows.
+
+**Очікування / verification**: ре-прогон Phase 2 на лекції. Очікувати ≥ якість 4.7 на тих самих stacked-промптах (diff-first / no-invention / diversity / gender). Latency: Opus-tier, орієнтовно як 4.7 — Phase 2 на критичному шляху W3, дельта в межах попередніх оцінок. Якщо accept-rate/якість не тримається — відкат тривіальний.
+
+**Rollback**: 2 рядки в `phase2_batch_llm_tts.js` (399, 841) + 2 в W3 JSON назад на `claude-opus-4-7` (або `claude-sonnet-4-6` для pre-2026-05-28 baseline). Атомарно.
+
+**Файли**: `code_nodes/phase2_batch_llm_tts.js`, `workflows/W3_Synthesize_v2.json`, `README.md`, `code_nodes/README.md`, `docs/external_review_briefing.md`, `PLAN.md`.
+
+---
+
+### 2026-06-18 — W_BATCH_FEEDER_DRIP_FROM_BATCH_FOLDER
+
+**Контекст**: оператор хоче закинути **батч** файлів і поставити їх на нічний прогон — щоб оброблялися **строго по черзі** (W1→W2→всі 7 мов W3 повністю готові, тоді наступний). Чому строго послідовно: W_Master уже ганяє W1/W2 серійно per-item і чистить спільні `segments`/`localizations` раз на старті (лекції співіснують, бо все фільтрується по `segment_id.startsWith(lesson_id+'_')`), **але W3 — fire-and-forget** (`Execute W3` `waitForSubWorkflow=false`, і W3 сам ланцюжить 7 мов fire-and-forget). Батч із N файлів запустив би **N паралельних W3-ланцюгів**, а одна лекція-мова вже їсть 14 із 15 глобальних слотів ElevenLabs → 429-и. Це і є латентний баг multi-file drop із backlog.
+
+**Розглянуті варіанти**: (A) loop усередині W_Master; (B) poll-драйвер `W_Batch` (loop + Wait + completion-marker + timeout/skip); (C) continuation-ланцюг `W_Batch_Dispatch` (дзеркало мовного ланцюга, state у config). Обрано **варіант оператора, уточнений**: окрема Drive-папка `Batch/`, з якої файли **по одному переливаються в `01_input/`**.
+
+**Рішення**: drip-feeder. Окремий workflow `W_Batch_Feeder.json` (Manual + Execute Workflow Trigger) лістить `Batch/`, бере перший (за іменем) файл, ставить `batch_active='1'`, **переміщує його `Batch/→01_input/`** (Drive PATCH `addParents/removeParents`, дзеркало `Move File`) і **fire-and-forget запускає W_Master** для цього файлу. Коли лекція доходить до останньої мови W3, новий хук `Prepare Batch Advance → Fire Batch Feeder` (за зразком `Prepare Next Lang → Fire Next Lang`, гейт `is_last_lang===true && batch_active==='1'`) знову смикає фідер → наступний файл. Коли `Batch/` порожня — `batch_active=''` + Slack «Батч завершено». **Запуск тільки Manual.**
+
+**Чому так, а не poll-драйвер**: `01_input/` завжди тримає **≤1 файл**, тож кожна лекція — звичайний повністю ізольований прогон W_Master (archive-ротація, `Clear Sheet Tabs`, `localization_run_token`, кооперативний abort — усе **без змін**). Це знімає паралельний W3 / ElevenLabs-15 за побудовою. Черга — **видима папка**, краш лишає решту файлів у `Batch/` (resume одним кліком). Поверхня змін менша за loop/poll. Ключове обмеження: «підтягувати автоматично» потребує **сигналу завершення** — таймерний watcher не годиться (файл лежить в `input/` усі години синтезу, тож «input порожній» ≠ «готово»), тому крихітний хук у кінці W3.
+
+**Інженерія**:
+- **W_Master** (`Y3GWKEi15Lh9njXx`): додано `Execute Workflow Trigger` («Batch Feeder Entry») → наявний `Parse Filename` (третій вхід поряд із Drive/Manual; payload `{id,name,mimeType}` — рівно те, що читає Parse Filename). Ядро/archive/run-token/abort не чіпані. Drive-тригер тримати **off** під час батчу (інакше подвійна обробка перенесеного файлу).
+- **W3_Synthesize_v2** (`tKWQr2u81BvxtWfV`): третій sibling від `Save Full to Drive` → `Prepare Batch Advance` (code; `is_last_lang!==true` → []; `batch_active!=='1'` → []) → `Fire Batch Feeder` (`executeWorkflow`, `waitForSubWorkflow=false`, клон `Fire Next Lang`). Гілка повішена на `Save Full to Drive`, а не на Slack, щоб збій Slack не зривав advance. Layout збережено.
+- **Abort (self-enforcing)**: Stop-кнопка прив'язана до поточного `localization_run_token`; W3_Dispatch `Check Abort` спиняє мовний ланцюг → остання мова не настає → фідер не смикається → батч стоїть, файли лишаються в `Batch/`. Власний `Aborted?` у фідері — вторинний guard.
+- **Захист від подвійного advance**: `Fire Batch Feeder` без retry (як `Fire Next Lang`). **НЕ** гейтити на «input порожній» — щойно завершений файл легітимно лежить в `01_input/` до наступної archive-ротації.
+- Нові config-ключі: `drive_batch_folder_id` (папка `Batch/`, той самий shared drive), `batch_active` (runtime-гейт). Задокументовано в `docs/config_keys.md`.
+- Code-ноди фідера/хука — inline-only (як інші дрібні W_Master-ноди), у `scripts/sync_jscode.js` не додаються.
+
+**ВАЖЛИВО при імпорті**: `W_Batch_Feeder` — новий workflow; n8n може перепризначити його id на імпорті. Після імпорту перевірити, що в W3 нода `Fire Batch Feeder` указує саме на нього (re-select через UI-дропдаун), як і `Fire W_Master` у фідері → на W_Master. (Та сама best-effort-id-каверза, що описана для `errorWorkflow`.)
+
+**Залишковий ризик**: жорсткий краш W3 до останньої мови → батч стоїть (видно: файли в `Batch/`), recover — ручний re-fire `W_Batch_Feeder`. Опційний watchdog-Schedule — на потім.
+
+**Файли**: `workflows/W_Batch_Feeder.json` (новий), `workflows/W_Master.json` (Batch Feeder Entry), `workflows/W3_Synthesize_v2.json` (Prepare Batch Advance + Fire Batch Feeder), `docs/config_keys.md`.
+
+---
+
+### 2026-06-18 — SEGMENT_TIMELINE_EDITOR
+
+**Контекст**: на воротах транскрипту (`/transcript`) оператор ретаймить EN-слоти сегментів під відео-референс перед витратами TTS на 7 мов. Стара DIY-таймлайн-нода (`components/SegmentTimeline.tsx`) працювала, але була «сира»: блоки на `%`, тонкі краї важко вхопити, нема лінійки часу / зуму / скролу, грубий playhead. За детальним брифом зроблено полірований NLE-style редактор.
+
+**Рішення**: новий шаровий редактор у `components/timeline/` (16 файлів) замінює DIY-компонент, зберігаючи **той самий 5-проп інтерфейс** (`segments, editable, selected, onSelect, onRetimed`), тож `TranscriptReview.tsx` змінив лише шлях імпорту. Редактор **самодостатній** (сам тягне peaks/відео/тривалість).
+
+**Архітектура (з брифу, дотримано)**:
+- **Шарова відмальовка**: canvas (waveform + ruler) перемальовується ЛИШЕ на зум/resize/тему; DOM-блоки позиціонуються `translateX`+`width`; playhead — окремий шар, рухається `translateX` щокадру (canvas НЕ перемальовується для playhead).
+- **Час — джерело істини** (секунди float, округлення до мс на коміт); пікселі похідні. Viewport = `pxPerSecond` (зум) + нативний скрол; canvas на повну ширину контенту (без віртуалізації — scope коротких кліпів).
+- `<video>` — годинник: UI читає `currentTime` через rAF (не `timeupdate`); скраб пише `currentTime`.
+- Drag країв через Pointer Events + `setPointerCapture`, rAF-throttle, снап до слів (поріг у px → секунди за поточним зумом; Alt вимикає), клемп до сусідів/`[0,dur]`/`MIN_DURATION`, локальний прев'ю (ref-write, без re-render списку), один коміт на pointerup.
+
+**Ключова стиковка persistence ↔ React Query**: редактор тримає **локальну робочу копію** часів, засіяну з пропсів; кожен коміт персиститься через `retimeSegment()` → `onRetimed()` (інвалідація `['segments']`). Прапорець `editing` (ref) гейтить ре-сід, тож рефетч не затирає активне редагування; історія чиститься лише на структурній зміні (merge/split). Undo/redo **ре-персистять** реверс через той самий шлях (узгоджено з server-side персистенцією).
+
+**Дані**: внутрішня модель `TSegment{id,startSec,endSec,text}` через адаптер `toTSegments(RawSegment[])` (єдине місце `Number()`-коерсії + мс-округлення). Тривалість: `peaks.durationSec` → max `en_end_sec` (по live-копії) → `video.duration` → guard. Слова з `fetchWords` (lazy, кеш у ref), снап — евристичний (mock) / 409 у live → снап тихо вимикається.
+
+**a11y**: краї — `role="slider"` з `aria-valuemin/max/now` (секунди); блок — `role="group"` з міткою; `LiveRegion` (`aria-live=polite`, імперативний announce — без re-render); клавіатура: фокус на краю → `←/→` ±10мс, `Shift` ±100мс (берст коалеситься в один history entry + один POST); `Cmd/Ctrl+Z`, `Shift+Cmd/Ctrl+Z`. Без емодзі — іконки `lucide-react` (див. `UI_REMOVE_EMOJIS_LUCIDE_ICONS`).
+
+**Навігація (трекпад)**: горизонтальний скрол двома пальцями — нативний (`overflow-x:auto` + `overscroll-x-contain`, щоб свайп не тригерив back/forward браузера); pinch-зум — non-passive `wheel`-лістенер (macOS шле `wheel`+`ctrlKey` під час pinch; також Ctrl/Cmd+wheel), якорений на курсорі, фактор `clamp(exp(-deltaY·0.01), 0.5, 2)`; керування playhead — pointer-capture scrub по **лінійці** і по порожньому фону доріжки (`useScrub`: pointerdown сікає, drag продовжує).
+
+**Інженерія / виправлено після adversarial-рев'ю**: (1) keyboard-nudge прев'ю більше не «відскакує» при re-render від focus→select — `useLayoutEffect` повторно застосовує прев'ю до paint, поки триває жест; (2) `maxSegEnd` рахується з live-копії, не з засіяних `tsegs`; (3) backing-store canvas обмежено 16384px (без порожнього canvas на макс-зумі); (4) undo/redo відкочують курсор при відмові сервера; (5) `timeupdate` доданий для playhead під час paused-скрабу; (6) **фікс нескінченного re-render**: `useWords` повертав новий об'єкт щорендера → ефект active-words крутився щокадру і `setActiveWords([])` (свіжий масив) зациклював рендер («Maximum update depth») → застрягання на /transcript у read-only (URL мінявся, view ні). Фікс: `useWords` мемоїзовано (стабільна ідентичність), `EMPTY_WORDS` — стабільний ref. Залежностей не додано (lucide вже був).
+
+**Перевірка**: `npx tsc -p tsconfig.json --noEmit` — 0 помилок фічі (лишаються 6 pre-existing); `npm run build` зелений. Manual: `cd ui && npm run dev`, `/transcript` у стані `TRANSCRIPT_REVIEW` (drop уроку + відео на Dashboard) — пройти acceptance-критерії брифу.
+
+**Файли**: `ui/client/src/components/timeline/**` (shell `SegmentTimeline`, `TimeTrack`, `SegmentLane`, `SegmentBlock`, `ResizeHandle`, `WaveformCanvas`, `RulerCanvas`, `Playhead`, `WordTicks`, `VideoReference`, `TimelineToolbar`, `LiveRegion`; `model/*` хуки; `lib/*` чисті функції) + правка імпорту в `screens/TranscriptReview.tsx`; видалено старий `components/SegmentTimeline.tsx`.
+
+---
+
+### 2026-06-18 — W_MASTER_DRIVE_TRIGGER_FILEUPDATED
+
+**Контекст**: оператор поскаржився, що `Drive Trigger (input/)` у `W_Master.json` **інколи** не спрацьовує при аплоаді файлу в input-папку на shared drive. Це polling-тригер (`googleDriveTrigger` v1, `everyMinute`, `triggerOn=specificFolder`, `event=fileCreated`). Діагностика (паралельний research + map воркфлоу) перевернула початкову гіпотезу «винен shared drive»:
+- **Головна причина — семантика `event=fileCreated`**: полл фільтрує `createdTime > lastTimeChecked`. Файли, що потрапляють у папку **переміщенням / копіюванням / Drive Desktop sync**, зберігають *старий* `createdTime` і випадають з вікна → тригер їх не бачить. Для конвеєра (закидання готових аудіофайлів) це пряме влучання. Відомі баги n8n #24138 / #19632.
+- **Shared-drive параметри — НЕ причина тут**: інстанс на **n8n 1.123.5** (підтверджено оператором) ≫ 1.9.3, тож `corpora=allDrives` + `supportsAllDrives` зашиті в ядро тригера після PR #7369. Додатковий доказ доступу: архівні ноди `List Files`/`Move File` (raw HTTP) уже успішно лістять/переміщують на цьому ж shared drive лише з `supportsAllDrives=true`+`includeItemsFromAllDrives=true` (без `driveId`/`corpora`).
+- Вторинне (не лікується цим патчем): гонка межі поллу / eventual consistency Drive; втрата вікна при простої n8n.
+
+**Рішення**: швидкий стоп-геп — `event: fileCreated → fileUpdated` (дивиться на `modifiedTime > start`, тож перенесені/завантажені/пересинхронізовані файли зі свіжим `modifiedTime` тепер видно). Топологія, `typeVersion` (у `googleDriveTrigger` немає v2/v3 — вісь хибна) і весь downstream від `Parse Filename` не чіпані.
+
+**Відкладено (durable fix)**: перехід на list-and-drain (`scheduleTrigger` → raw-HTTP `List Input Files` → `IF Has Input Files?` → split → `Move To Processing`) усуває проблему вікна повністю, але тягне супутні зміни (новий ключ `drive_processing_folder_id`, `Plan Sources` має додати `processing/` як джерело, IF-гард проти порожніх поллів, claim-семантика move-first проти конкурентних рунів). Робити окремо, коли стоп-геп підтвердить напрямок.
+
+**Залишковий ризик `fileUpdated`**: може фаєрити повторно, якщо файл модифікують після приземлення; `Parse Filename` дедупить по `lesson_id`, downstream ідемпотентний на рівні рану (W_Master чистить sheet на старті), тож подвійний тригер безпечний, але варто поспостерігати.
+
+**Файли**: `workflows/W_Master.json` (нода `Drive Trigger (input/)`).
+
+**Addendum (той самий день)**: після ре-імпорту з `fileUpdated` тригер давав **0 executions взагалі** (Executions порожні) — фоновий полл не запускався (воркфлоу не активувався / тригер не зареєструвався / відв'язаний credential). Щоб розблокувати оператора негайно (не чекаючи durable list-and-drain), додано **manual-гілку паралельно до Drive-тригера**: `Manual Trigger (input/)` → `List Input Files` (httpRequest, дзеркало робочого архівного `List Files`: `predefinedCredentialType` `googleDriveOAuth2Api` `MoWG4XRaoJGU18eu`, `supportsAllDrives`+`includeItemsFromAllDrives` без `driveId`/`corpora`, `q`= файли в `01_input/` крім папок) → `Split Input Files` (code: розгортає `files[]` у по-айтемні `{id,name,mimeType}`, throw якщо порожньо) → наявний `Parse Filename`. Обидва тригери входять у `Parse Filename` (патерн Manual+Webhook з W_Regen); при ручному запуску дані дає лише manual-гілка, Drive-тригер мовчить. Drive-тригер **не чіпано** — діагностика поллінгу/активації відкладена («далі будемо розбиратись»). Layout збережено (нові ноди на `y=5248`). NB: ручний запуск лістить **усі** файли в `01_input/`, тож перед запуском у папці має лежати лише цільовий файл (або весь набір на обробку).
+
+---
+
+### 2026-06-18 — UI_REMOVE_EMOJIS_LUCIDE_ICONS
+
+**Контекст**: оператор поскаржився, що емодзі в інтерфейсі (`ui/client`) заважають швидко читати текст. Рішення стосується **тільки операторського UI**, не Slack-повідомлень і не CLI-виводу (`check.js`, `auth_oauth.js`).
+
+**Рішення**: прибрати **всі** емодзі/гліфи-символи з відрендереного UI. Функціональні гліфи замінено на іконки `lucide-react` (бібліотека вже була залежністю, конвенція — `Sidebar.tsx`); декоративні емодзі видалено; емодзі всередині рядкових літералів переписано чистою українською. Конвенція надалі: **жодних емодзі в UI — лише `lucide-react` або текст**.
+
+**Мапінг** (гліф → lucide): `▶/⏸`→`Play/Pause`, `✕`→`X`, `✓/✅`→`Check`, `✗/❌`→`X`, `▾/▸`→`ChevronDown/ChevronRight`, `→`→`ArrowRight`, `↻/⟳/🔄`→`RefreshCw` (+`animate-spin`), `⧉`→`Copy`, `⚠`→`AlertTriangle`, `✋`→`Hand`, `🧺`→`ShoppingBasket`, `🔪/✂`→`Scissors`, `💾`→`Save`, `💡`→`Lightbulb`, `🌙/☀/🖥`→`Moon/Sun/Monitor`, `🟢🔴🟡🔵`→`Circle` з кольоровим `fill` (або прибрано, якщо колір уже несе контейнер), причини в `CAUSE_ICON` (Workbench) → `Record<string, LucideIcon>`. Збережено типографіку (`— – … « » • · ~ ≈ −`) і всі код-коментарі.
+
+**Інженерія**:
+- Конвенція розмірів: standalone — `className="h-4 w-4" strokeWidth={1.75}`; інлайн у тексті — `className="inline-block h-3.5 w-3.5 align-[-0.2em]"`.
+- Хелпери, що повертали гліф-рядок, переведено на `React.ReactNode`: `StageRail.glyph()`, `Workbench.cellGlyph()`.
+- Логіку, що залежала від гліфа, виправлено: `Config.tsx` `check` зі `string` (`.startsWith('✓')`) → `{ ok: boolean; text: string }`; аналогічні success/error-прапорці у `Voices.tsx`.
+- `Workbench` маркер руху сегмента (`s.movementLocked`) відновлено як іконку `Footprints` (конвертер його був випадково прибрав разом з 🏃).
+- Серверний user-facing рядок: `ui/server/services/derive.js:154` (прибрано 🏃).
+
+**Перевірка**: `vite build` зелений; `npx tsc --noEmit` — 0 **нових** помилок (лишаються 6 pre-existing: 4 `as Record<string,unknown>` касти у `Voices.tsx` + 2 `vite.config.ts` про `@types/node`); скан Unicode-діапазонів емодзі по `ui/client/src` — 0 у відрендереному коді (лишаються тільки `→`/`─` всередині код-коментарів, що й мало бути).
+
+**Файли**: 21 файл у `ui/client/src` (компоненти, екрани, `ui.ts`, `configCatalog.ts`) + `ui/server/services/derive.js`.
+
+---
+
+### 2026-06-17 — W3_PARALLEL_DRIVE_AND_BATCHED_SHEETS
+
+**Контекст**: запит «пришвидшити пайплайн у 2-3×». Аналіз показав, що для багатосегментних уроків (11 хв ≈ 47 сег × 7 мов = 329 клітинок) ран триває години, і час їсть **серіалізація Drive+Sheets по items**, а не TTS. Хибна початкова гіпотеза — «паралелити мови»: ліміт ElevenLabs **15 одночасних запитів глобальний**, тож серійні vs паралельні мови **не змінюють TTS-стелю**, лише множать контенцію Drive/Sheets. Реальні вузькі місця: (a) `Loop Over Items` batchSize=7 при ліміті 15 — половина TTS-бюджету простоює; (b) `Save to Drive` (n8n googleDrive-нода) вантажить items **послідовно** → ~49 аплоадів/мову; (c) `Update Localizations` (`appendOrUpdate`) пише по 1 рядку → ~49/мову; (d) `Rate Limit Guard` 0.2с/прохід.
+
+**Рішення**: тримати мови **серійними** (стеля все одно глобальна), а в межах мови зробити Phase 1 TTS-bound: batchSize 7→14, батчевий Sheets-`append`, прибрати guard, і — головне — **розпаралелити Drive-аплоад**, перенісши його всередину `check_timing_and_pad.js` (той самий `Promise.all`, що й TTS). Очікування: ~1.7× з (a)+(c)+(d), ~2-3× з паралельним Drive.
+
+**Інженерія**:
+- **Drive concurrency впирається в sandbox**: `httpRequestWithAuthentication` і `getCredentials` заблоковані в Code-нодах (`code_nodes/README.md:43`) — підтверджено probe1 (`"... is not supported in the Code Node"`). Тож код-нода не може автентифікуватись штатно. Обхід: зберігаємо OAuth `client_id`/`client_secret`/`refresh_token` у config (нові ключі `google_oauth_*`, видобуті через Google OAuth Playground з окремим Web-клієнтом), мінтимо access-токен `grant_type=refresh_token` плейн-`httpRequest`-ом (раз на прохід, re-mint на 401), вантажимо з `Bearer`.
+- **Buffer корумпується на межі VM**: `Buffer` як `body` у `httpRequest` серіалізується в JSON `{"type":"Buffer","data":[...]}` на межі Code-node-пісочниці → у Drive лягав цей JSON (probe2: 44-байтний WAV ставав 143 байтами; probe1 multipart з Buffer-тілом → 400). Фікс: тіло — **чистий ASCII-рядок** multipart/related з медіа-частиною в base64 + `Content-Transfer-Encoding: base64` (Google декодує). Один запит = метадані + медіа. Boundary містить `-` (не входить у base64-алфавіт) → колізій з медіа нема. probe3 підтвердив рівно 44 байти.
+- `URLSearchParams` теж недоступний у sandbox → form-тіло токен-запиту кодуємо вручну `encodeURIComponent`; `json:true` НЕ ставимо на токен/аплоад, щоб n8n не перебив наші content-type.
+- **Граф W3**: видалено ноди `Save to Drive` і `Rate Limit Guard`; `Check Timing + Pad → Prepare Localization Row` напряму; `Prepare Localization Row` читає `audio_drive_file_id` прямо з Check-Timing items (раніше джойнив відповідь Save to Drive по `file_name`); `Update Localizations` → `Loop Over Items` (loop-back); `Update Localizations` operation `appendOrUpdate→append` (sheet чиститься W_Master на старті рану → дублів нема). `check_timing_and_pad.js` повертає `audio_drive_file_id`, **дропає `binary`** (downstream Build Full / Trim перечитують з Drive). Phase 2 / Trim Drive-PATCH-ноди не чіпані (їх мало, серійність терпима). Layout/позиції збережено; синхронізація через `scripts/sync_jscode.js`.
+- **Чому НЕ service-account**: користувач обрав refresh-token (менше налаштування — без нового SA, спільного доступу до папок і JWT-підпису через Crypto-ноду). Якщо токен/refresh колись зламається — service-account лишається запасним варіантом.
+- **Перевірка**: probe-gated (probe1 helper → probe2 token+upload → probe3 base64-fix), потім end-to-end de-only тест: посегментні WAV відтворюються, `Save Full to Drive` проходить, `localizations` коректні, нема 429.
+- **Обмеження**: для **ручного** W3-dispatch (без W_Master) `append` дублює рядки й create робить дублі файлів між прогонами — тестувати треба з очищеним `localizations` + `02_output/`. У проді W_Master чистить на старті, тож проблеми нема.
+
+**Не закрите цим**: Phase 2 `ELEVENLABS_CHUNK` 5→12 (окремо, candidate-залежно); swap Opus 4.7 expand на швидшу модель (quality-рішення).
+
+---
+
 ### 2026-06-17 — W1_HARD_PAUSE_PIECE_FLOOR
 
 **Контекст**: оператор помітив, що `som_th_10_en_seg_035` («Breathe in And breathe out focusing on the release of that spot.», 274.835→286.29, 11.455s) лишився цілим сегментом, попри ~4.5s паузу між «Breathe in» і «And breathe out», хоча `hard_pause_split_sec` = `1.7`. Це **одне** речення Deepgram (між «in» і «And» нема крапки), 11.455s < 12s cap, тож порізати міг лише hard-pause. Геп **виявлявся** (`bigPause` = true), але розріз відкидав `min_segment_piece_duration_sec` = 1.5: «Breathe in» ≈ 0.85s — ліва половина коротша за поріг → `leftDur < MIN_PIECE_DURATION` → `bestIdx < 0` → сегмент лишився цілим. Це **той самий safety**, який `W1_HARD_PAUSE_SPLIT` (2026-06-16, рядок нижче) свідомо лишив діяти — але саме він тепер блокує бажаний розріз коротких cue-фраз у соматиці.

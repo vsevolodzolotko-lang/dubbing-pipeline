@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { AlertTriangle, ArrowRight, Check, Circle } from 'lucide-react'
 import { useRunState } from '../api/useRunState'
 import { fetchJson } from '../api/client'
 import { startStagedRun, applyArchiveSettings, fetchPresets, applyVoiceSet } from '../api/staged'
@@ -25,7 +26,7 @@ const isPlaceholderVoice = (v?: VoiceRow) =>
  * readiness before the staged run starts. "Confirm, don't configure": fields are
  * pre-filled; the operator mostly glances and presses one button.
  */
-export function PreflightSetup({ fileName, onCancel }: { fileName: string; onCancel: () => void }) {
+export function PreflightSetup({ fileName, videoName, onCancel }: { fileName: string; videoName?: string | null; onCancel: () => void }) {
   const { state } = useRunState()
   const nav = useNavigate()
 
@@ -145,8 +146,11 @@ export function PreflightSetup({ fileName, onCancel }: { fileName: string; onCan
     <div className="space-y-4">
       <div className="flex items-center gap-2">
         <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300">Підготовка уроку</h2>
-        <span className="text-xs text-gray-400">файл: {fileName}</span>
         <button onClick={onCancel} className="ml-auto text-xs text-gray-400 hover:text-gray-700 dark:hover:text-gray-200">скасувати</button>
+      </div>
+      <div className="flex flex-col gap-0.5 text-xs text-gray-400">
+        <span>аудіо: {fileName}</span>
+        <span>{videoName ? `відео: ${videoName} · референс (необов'язково)` : 'відео: не додано · референс необов’язковий'}</span>
       </div>
 
       {/* lesson name */}
@@ -154,18 +158,18 @@ export function PreflightSetup({ fileName, onCancel }: { fileName: string; onCan
         <label className="text-xs font-medium text-gray-500">Назва уроку (lesson_id)</label>
         <div className="mt-1 flex items-center gap-2">
           <input value={lessonId} onChange={(e) => setLessonId(e.target.value)}
-            className={`w-56 rounded border px-2 py-1 font-mono text-sm dark:bg-[#1c1814] ${idValid ? 'border-gray-300 dark:border-[#473d31]' : 'border-red-400 dark:border-red-700'}`} />
+            className={`w-56 rounded border px-2 py-1 font-mono text-sm dark:bg-[#161617] ${idValid ? 'border-gray-300 dark:border-[#3a3a3d]' : 'border-red-400 dark:border-red-700'}`} />
           {!idValid && (
-            <button onClick={() => setLessonId(slugify(lessonId))} className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-50 dark:border-[#473d31] dark:hover:bg-[#262019]">
-              авто-фікс → {slugify(lessonId)}
+            <button onClick={() => setLessonId(slugify(lessonId))} className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-50 dark:border-[#3a3a3d] dark:hover:bg-[#202023]">
+              авто-фікс <ArrowRight className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> {slugify(lessonId)}
             </button>
           )}
         </div>
         {!idValid && <div className="mt-1 text-xs text-red-600 dark:text-red-400">тільки малі латинські літери, цифри, «_»; починати з літери</div>}
         <div className="mt-1 font-mono text-[11px] text-gray-400">
-          → {lessonId}_seg_001 · {lessonId}_full_{firstLang}.wav
+          <ArrowRight className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> {lessonId}_seg_001 · {lessonId}_full_{firstLang}.wav
         </div>
-        {dup && <div className="mt-1 rounded bg-amber-50 px-2 py-1 text-xs text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">⚠ урок «{lessonId}» уже озвучено — старт перепише його output</div>}
+        {dup && <div className="mt-1 rounded bg-amber-50 px-2 py-1 text-xs text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"><AlertTriangle className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> урок «{lessonId}» уже озвучено — старт перепише його output</div>}
       </div>
 
       {/* languages */}
@@ -182,8 +186,8 @@ export function PreflightSetup({ fileName, onCancel }: { fileName: string; onCan
                   on ? (bad ? 'border-red-400 bg-red-50 text-red-700 dark:border-red-700 dark:bg-red-950/40 dark:text-red-300'
                     : warn ? 'border-amber-400 bg-amber-50 text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300'
                     : 'border-gray-900 bg-gray-900 text-white dark:border-gray-100 dark:bg-gray-100 dark:text-gray-900')
-                  : 'border-gray-300 bg-white text-gray-500 dark:border-[#473d31] dark:bg-[#1c1814] dark:text-gray-400'}`}>
-                {l.toUpperCase()}{on && bad ? ' ✗' : on && warn ? ' ⚠' : ''}
+                  : 'border-gray-300 bg-white text-gray-500 dark:border-[#3a3a3d] dark:bg-[#161617] dark:text-gray-400'}`}>
+                {l.toUpperCase()}
               </button>
             )
           })}
@@ -206,7 +210,7 @@ export function PreflightSetup({ fileName, onCancel }: { fileName: string; onCan
       </div>
 
       {/* start from saved settings: archive snapshot OR voice template (always shown) */}
-      <div className="space-y-2 rounded-lg border border-gray-200 p-2 dark:border-[#332b22]">
+      <div className="space-y-2 rounded-lg border border-gray-200 p-2 dark:border-[#29292c]">
         <div className="text-xs font-medium text-gray-500">Старт із збереженого</div>
 
         {/* archive — full settings snapshot of a past run */}
@@ -217,12 +221,12 @@ export function PreflightSetup({ fileName, onCancel }: { fileName: string; onCan
           ) : (
             <>
               <select value={arcId} onChange={(e) => pickArchive(e.target.value)}
-                className="rounded border border-gray-300 px-1.5 py-0.5 text-xs dark:border-[#473d31] dark:bg-[#1c1814]">
+                className="rounded border border-gray-300 px-1.5 py-0.5 text-xs dark:border-[#3a3a3d] dark:bg-[#161617]">
                 <option value="">— чистий старт —</option>
                 {archive.map((r) => <option key={r.id} value={r.id}>{r.lessonId} ({r.langCount} мов)</option>)}
               </select>
-              {arcId && <button onClick={applyArchive} disabled={busy} className="rounded bg-accent px-2 py-0.5 text-xs text-white hover:bg-accent-hover disabled:opacity-50">Застосувати</button>}
-              {applied && <span className="text-xs text-sage-700 dark:text-sage-200">✓ з «{applied}»</span>}
+              {arcId && <button onClick={applyArchive} disabled={busy} className="rounded bg-gray-900 px-2 py-0.5 text-xs text-white hover:bg-gray-700 disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900">Застосувати</button>}
+              {applied && <span className="text-xs text-green-700 dark:text-green-400"><Check className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> з «{applied}»</span>}
             </>
           )}
         </div>
@@ -232,32 +236,32 @@ export function PreflightSetup({ fileName, onCancel }: { fileName: string; onCan
         <div className="flex flex-wrap items-center gap-2">
           <span className="w-28 shrink-0 text-[11px] text-gray-400">Шаблон голосів</span>
           {sets.length === 0 ? (
-            <span className="text-[11px] text-gray-400">шаблонів нема — збережи набір на <a href="/voices" className="text-accent underline">/voices</a></span>
+            <span className="text-[11px] text-gray-400">шаблонів нема — збережи набір на <a href="/voices" className="text-blue-600 underline dark:text-blue-400">/voices</a></span>
           ) : (
             <>
               <select value={tplId} onChange={(e) => pickTemplate(e.target.value)}
-                className="rounded border border-gray-300 px-1.5 py-0.5 text-xs dark:border-[#473d31] dark:bg-[#1c1814]">
+                className="rounded border border-gray-300 px-1.5 py-0.5 text-xs dark:border-[#3a3a3d] dark:bg-[#161617]">
                 <option value="">— не застосовувати —</option>
                 {sets.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.voices.length} мов)</option>)}
               </select>
-              {tplSet && <button onClick={applyTemplate} disabled={busy} className="rounded bg-accent px-2 py-0.5 text-xs text-white hover:bg-accent-hover disabled:opacity-50">Застосувати</button>}
-              {tplApplied && <span className="text-xs text-sage-700 dark:text-sage-200">✓ голоси з «{tplApplied}»</span>}
+              {tplSet && <button onClick={applyTemplate} disabled={busy} className="rounded bg-gray-900 px-2 py-0.5 text-xs text-white hover:bg-gray-700 disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900">Застосувати</button>}
+              {tplApplied && <span className="text-xs text-green-700 dark:text-green-400"><Check className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> голоси з «{tplApplied}»</span>}
             </>
           )}
         </div>
         {tplSet && !tplApplied && <TemplateDiff set={tplSet} voices={voices} selected={selected} />}
       </div>
 
-      {err && <div className="rounded bg-rust-100 p-2 text-xs text-rust-700 dark:bg-rust-900/40 dark:text-rust-200">{err}</div>}
+      {err && <div className="rounded bg-red-50 p-2 text-xs text-red-700 dark:bg-red-950/50 dark:text-red-300">{err}</div>}
 
       {/* start */}
       <div>
         <button onClick={start} disabled={blocks.length > 0 || busy}
           className={`w-full rounded-md px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed ${
-            blocks.length ? 'bg-gray-300 dark:bg-[#473d31] dark:text-gray-500'
-            : warns.length ? 'bg-ochre-700 hover:bg-ochre-900'
-            : 'bg-sage-700 hover:bg-sage-900'}`}>
-          {busy ? 'Стартую…' : blocks.length ? `Недоступно: ${blocks[0]}` : warns.length ? `Почати попри попередження (${warns.length})` : '✅ Почати урок'}
+            blocks.length ? 'bg-gray-300 dark:bg-[#3a3a3d] dark:text-gray-500'
+            : warns.length ? 'bg-amber-600 hover:bg-amber-700'
+            : 'bg-green-700 hover:bg-green-800'}`}>
+          {busy ? 'Стартую…' : blocks.length ? `Недоступно: ${blocks[0]}` : warns.length ? `Почати попри попередження (${warns.length})` : 'Почати урок'}
         </button>
         <p className="mt-2 text-[11px] text-gray-400">Окремий шлях від авто-потоку: файл у Drive <code>01_input</code> досі стартує повну автоматику без воріт.</p>
       </div>
@@ -266,13 +270,17 @@ export function PreflightSetup({ fileName, onCancel }: { fileName: string; onCan
 }
 
 function ReadyRow({ label, ok, bad, text, link }: { label: string; ok: boolean; bad: boolean; text: string; link?: string }) {
-  const icon = bad ? '🔴' : ok ? '🟢' : '🟡'
+  const dotClass = bad
+    ? 'inline-block h-2.5 w-2.5 fill-red-500 text-red-500'
+    : ok
+      ? 'inline-block h-2.5 w-2.5 fill-green-500 text-green-500'
+      : 'inline-block h-2.5 w-2.5 fill-amber-500 text-amber-500'
   return (
     <div className="flex items-center gap-2">
-      <span>{icon}</span>
+      <Circle className={dotClass} />
       <span className="w-14 shrink-0 font-medium text-gray-600 dark:text-gray-400">{label}</span>
       <span className="text-gray-600 dark:text-gray-400">{text}</span>
-      {link && !ok && <a href={link} className="ml-auto text-blue-600 underline dark:text-blue-400">налаштувати →</a>}
+      {link && !ok && <a href={link} className="ml-auto inline-flex items-center gap-1 text-blue-600 underline dark:text-blue-400">налаштувати <ArrowRight className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /></a>}
     </div>
   )
 }
@@ -285,7 +293,7 @@ function ArchiveDiff({ detail, voices, config }: { detail: ArchiveRun; voices: V
     if (snapV && liveV && snapV !== liveV) changes.push(`${l}: голос зміниться`)
     const snapC = detail.settings.config[`cps_estimate_${l}`]
     const liveC = config.find((r) => r.key === `cps_estimate_${l}`)?.value
-    if (snapC && liveC && snapC !== liveC) changes.push(`cps ${l}: ${liveC}→${snapC}`)
+    if (snapC && liveC && snapC !== liveC) changes.push(`cps ${l}: ${liveC}–${snapC}`)
   }
   return (
     <div className="mt-1.5 text-[11px] text-gray-500 dark:text-gray-400">

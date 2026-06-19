@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { ShoppingBasket, X } from 'lucide-react'
 import { useCart } from '../api/cart'
 import { useRunState } from '../api/useRunState'
 import { recordRegen } from '../api/regenHistory'
@@ -22,7 +23,7 @@ export function CartBar() {
       if (retrigger) {
         const res = await fetch('/api/regen/retrigger', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
         const data = await res.json().catch(() => ({}))
-        if (res.ok) { setMsg({ kind: 'ok', text: '🔄 Запуск повторено' }); setOpen(false) }
+        if (res.ok) { setMsg({ kind: 'ok', text: 'Запуск повторено' }); setOpen(false) }
         else setMsg({ kind: 'err', text: data.error || 'не вдалося', canRetrigger: true })
         return
       }
@@ -35,7 +36,7 @@ export function CartBar() {
       const data = await res.json().catch(() => ({}))
       if (res.ok && data.ok) {
         recordRegen(items.map((i) => ({ rowKey: i.rowKey, oldText: i.oldText, newText: i.newText })))
-        setMsg({ kind: 'ok', text: `🔄 Перегенерацію запущено (${data.count}). Рядки стануть REVIEW — послухай у Перевірці.` })
+        setMsg({ kind: 'ok', text: `Перегенерацію запущено (${data.count}). Рядки стануть REVIEW — послухай у Перевірці.` })
         clear(); setOpen(false)
       } else if (data.flagsWritten) {
         setMsg({ kind: 'err', text: data.error || 'Прапорці виставлені, але вебхук не спрацював.', canRetrigger: true })
@@ -52,10 +53,10 @@ export function CartBar() {
 
   return (
     <>
-      <div className="flex items-center gap-3 border-t border-gray-200 bg-white px-5 py-2 shadow-[0_-1px_3px_rgba(0,0,0,0.04)] dark:border-[#332b22] dark:bg-[#1c1814]">
+      <div className="flex items-center gap-3 border-t border-gray-200 bg-white px-5 py-2 shadow-[0_-1px_3px_rgba(0,0,0,0.04)] dark:border-[#29292c] dark:bg-[#161617]">
         {items.length > 0 ? (
           <>
-            <span className="text-sm dark:text-gray-200">🧺 Кошик перегенерації: <b>{items.length}</b></span>
+            <span className="text-sm dark:text-gray-200"><ShoppingBasket className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> Кошик перегенерації: <b>{items.length}</b></span>
             <button
               onClick={() => setOpen(true)}
               disabled={!writable}
@@ -74,14 +75,14 @@ export function CartBar() {
             {msg.canRetrigger && (
               <button onClick={() => fire(true)} disabled={busy} className="rounded border border-red-300 px-2 py-0.5 text-xs">Повторити запуск</button>
             )}
-            <button onClick={() => setMsg(null)} className="text-gray-400">✕</button>
+            <button onClick={() => setMsg(null)} className="text-gray-400"><X className="h-4 w-4" strokeWidth={1.75} /></button>
           </span>
         )}
       </div>
 
       {open && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 dark:bg-black/60" onClick={() => !busy && setOpen(false)}>
-          <div className="max-h-[80vh] w-[40rem] overflow-auto rounded-xl bg-white p-5 dark:bg-[#1c1814] dark:text-gray-100" onClick={(e) => e.stopPropagation()}>
+          <div className="max-h-[80vh] w-[40rem] overflow-auto rounded-xl bg-white p-5 dark:bg-[#161617] dark:text-gray-100" onClick={(e) => e.stopPropagation()}>
             <h2 className="text-lg font-semibold">Перегенерувати {items.length} сегментів?</h2>
             <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
               Будуть виставлені <code>needs_retts=TRUE</code> і записані правки тексту, потім запуститься W_Regen.
@@ -89,7 +90,7 @@ export function CartBar() {
             </p>
             <ul className="mt-3 space-y-2">
               {items.map((i) => (
-                <li key={i.rowKey} className="rounded-md border border-gray-200 p-2 text-sm dark:border-[#332b22]">
+                <li key={i.rowKey} className="rounded-md border border-gray-200 p-2 text-sm dark:border-[#29292c]">
                   <div className="font-mono text-xs text-gray-400">{shortId(i.segmentId)} · {i.lang}{i.comment ? ` · ${i.comment}` : ''}</div>
                   {i.newText !== i.oldText ? (
                     <>

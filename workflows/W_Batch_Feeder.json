@@ -1,0 +1,633 @@
+{
+  "name": "W_Batch_Feeder - drip input from Batch/",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "wbf-manual-trigger-000001",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        120
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "wbf-execwf-trigger-000001",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "config",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "wbf-read-config-0000001",
+      "name": "Read Config",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        220,
+        220
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build everything the feeder needs from config in one item:\n//   aborted     — cooperative kill-switch (same protocol as W3 Dispatch Check Abort)\n//   q           — Drive files.list query for the Batch/ folder\n//   batch_folder / input_folder — folder IDs for the move\n//   slack_channel — for batch-level notifications\nconst cfg = {};\n$('Read Config').all().forEach(i => { if (i.json && i.json.key) cfg[i.json.key] = i.json.value; });\nconst batch_folder = (cfg.drive_batch_folder_id || '').toString().trim();\nconst input_folder = (cfg.drive_input_folder_id || '').toString().trim();\nif (!batch_folder) throw new Error('drive_batch_folder_id is not set in config');\nif (!input_folder) throw new Error('drive_input_folder_id is not set in config');\nconst runToken = (cfg.localization_run_token || '').toString().trim();\nconst abortToken = (cfg.localization_abort_token || '').toString().trim();\nconst aborted = !!(runToken && abortToken && abortToken === runToken);\nconst q = \"'\" + batch_folder + \"' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'\";\nreturn [{ json: { aborted, q, batch_folder, input_folder, slack_channel: cfg.slack_channel || '' } }];"
+      },
+      "id": "wbf-prep-000000000001",
+      "name": "Prep",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "wbf-aborted-cond",
+              "leftValue": "={{ $json.aborted }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wbf-aborted-if-000001",
+      "name": "Aborted?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const prep = $('Prep').first().json;\nconst channel = prep.slack_channel;\nif (!channel) return [];\nreturn [{ json: { channel, text: ':octagonal_sign: Батч зупинено оператором — решта файлів лишається в Batch/.' } }];"
+      },
+      "id": "wbf-build-stopped-001",
+      "name": "Build Stopped Slack",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "slackApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ channel: $json.channel, text: $json.text, unfurl_links: false, unfurl_media: false }) }}",
+        "options": {}
+      },
+      "id": "wbf-slack-stopped-001",
+      "name": "Slack Notify (Stopped)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        60
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "slackApi": {
+          "id": "ogtQ2NONkRrXj2kl",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.googleapis.com/drive/v3/files",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $json.q }}"
+            },
+            {
+              "name": "fields",
+              "value": "files(id,name,mimeType)"
+            },
+            {
+              "name": "pageSize",
+              "value": "1000"
+            },
+            {
+              "name": "orderBy",
+              "value": "name_natural"
+            },
+            {
+              "name": "supportsAllDrives",
+              "value": "true"
+            },
+            {
+              "name": "includeItemsFromAllDrives",
+              "value": "true"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "wbf-list-batch-00001",
+      "name": "List Batch Files",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "MoWG4XRaoJGU18eu",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pick the first (name-sorted) file from Batch/ and derive its lesson_id with the EXACT\n// Parse Filename logic. Emit has_next=false when the folder is empty (batch finished).\nconst files = ($json.files) || [];\nconst derive = (filename) => {\n  const baseName = (filename || '').replace(/\\.[^./\\\\]+$/, '');\n  return baseName.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '');\n};\nconst prep = $('Prep').first().json;\nif (files.length === 0) {\n  return [{ json: { has_next: false, batch_folder: prep.batch_folder, input_folder: prep.input_folder, slack_channel: prep.slack_channel } }];\n}\nconst sorted = files.slice().sort((a, b) => (a.name || '').localeCompare(b.name || ''));\nconst f = sorted[0];\nreturn [{ json: { has_next: true, id: f.id, name: f.name, mimeType: f.mimeType, lesson_id: derive(f.name), batch_folder: prep.batch_folder, input_folder: prep.input_folder, slack_channel: prep.slack_channel, remaining: sorted.length } }];"
+      },
+      "id": "wbf-pick-next-000001",
+      "name": "Pick Next",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "wbf-hasnext-cond",
+              "leftValue": "={{ $json.has_next }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wbf-hasnext-if-00001",
+      "name": "Has Next?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "config",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "key": "batch_active",
+            "value": "1"
+          },
+          "matchingColumns": [
+            "key"
+          ]
+        },
+        "options": {}
+      },
+      "id": "wbf-set-active-00001",
+      "name": "Set batch_active",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        1540,
+        380
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://www.googleapis.com/drive/v3/files/{{ $('Pick Next').first().json.id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "addParents",
+              "value": "={{ $('Pick Next').first().json.input_folder }}"
+            },
+            {
+              "name": "removeParents",
+              "value": "={{ $('Pick Next').first().json.batch_folder }}"
+            },
+            {
+              "name": "supportsAllDrives",
+              "value": "true"
+            },
+            {
+              "name": "fields",
+              "value": "id,name,parents"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "wbf-move-to-input-001",
+      "name": "Move To Input",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1760,
+        380
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "MoWG4XRaoJGU18eu",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "Y3GWKEi15Lh9njXx",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/Y3GWKEi15Lh9njXx",
+          "cachedResultName": "W_Master - Drive Trigger Orchestrator"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "id": "={{ $('Pick Next').first().json.id }}",
+            "name": "={{ $('Pick Next').first().json.name }}",
+            "mimeType": "={{ $('Pick Next').first().json.mimeType }}"
+          },
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "id": "wbf-fire-wmaster-0001",
+      "name": "Fire W_Master",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1980,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "config",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "key": "batch_active",
+            "value": ""
+          },
+          "matchingColumns": [
+            "key"
+          ]
+        },
+        "options": {}
+      },
+      "id": "wbf-clear-active-001",
+      "name": "Clear batch_active",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        1540,
+        160
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const prep = $('Pick Next').first().json;\nconst channel = prep.slack_channel;\nif (!channel) return [];\nreturn [{ json: { channel, text: ':checkered_flag: Батч завершено — папка Batch/ порожня, усі файли оброблено.' } }];"
+      },
+      "id": "wbf-build-complete-01",
+      "name": "Build Complete Slack",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "slackApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ channel: $json.channel, text: $json.text, unfurl_links: false, unfurl_media: false }) }}",
+        "options": {}
+      },
+      "id": "wbf-slack-complete-01",
+      "name": "Slack Notify (Complete)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1980,
+        160
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "slackApi": {
+          "id": "ogtQ2NONkRrXj2kl",
+          "name": "Slack account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Config": {
+      "main": [
+        [
+          {
+            "node": "Prep",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep": {
+      "main": [
+        [
+          {
+            "node": "Aborted?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aborted?": {
+      "main": [
+        [
+          {
+            "node": "Build Stopped Slack",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "List Batch Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Stopped Slack": {
+      "main": [
+        [
+          {
+            "node": "Slack Notify (Stopped)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Batch Files": {
+      "main": [
+        [
+          {
+            "node": "Pick Next",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick Next": {
+      "main": [
+        [
+          {
+            "node": "Has Next?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Next?": {
+      "main": [
+        [
+          {
+            "node": "Set batch_active",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Clear batch_active",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set batch_active": {
+      "main": [
+        [
+          {
+            "node": "Move To Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move To Input": {
+      "main": [
+        [
+          {
+            "node": "Fire W_Master",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clear batch_active": {
+      "main": [
+        [
+          {
+            "node": "Build Complete Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Complete Slack": {
+      "main": [
+        [
+          {
+            "node": "Slack Notify (Complete)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 14400,
+    "errorWorkflow": "WErrorNotify01"
+  },
+  "versionId": "wbf-version-000000000001",
+  "meta": {},
+  "id": "MoQRazOGefZdqk3Y",
+  "tags": []
+}

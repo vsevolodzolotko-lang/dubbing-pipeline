@@ -138,6 +138,7 @@ function stageToState({ pipelineStage, stageStatus, langs, fullDoneLangs, synthB
       return { state: RUN_STATES.SYNTHESIZING, currentLang }
     }
     case PIPELINE_STAGES.RENDER:
+      if (stageStatus === R) return { state: RUN_STATES.RENDER_REVIEW } // gate: pick destination, then build
       return { state: RUN_STATES.RENDERING } // building the full file from segments
     case PIPELINE_STAGES.DONE:
       return { state: RUN_STATES.COMPLETE }

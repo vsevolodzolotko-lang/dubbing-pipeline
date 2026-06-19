@@ -396,7 +396,7 @@ async function runOneExpandBatch(batch, systemPrompt, charsMultiplier) {
     }
   }
   const body = {
-    model: 'claude-opus-4-7',
+    model: 'claude-opus-4-8',
     max_tokens: 8000,
     system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content: JSON.stringify(userMap, null, 2) }],
@@ -838,7 +838,7 @@ async function runRetryGroup(tasks, systemPrompt, charsMultiplier) {
       }
     }
     const body = {
-      model: 'claude-opus-4-7',
+      model: 'claude-opus-4-8',
       max_tokens: 8000,
       system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
       messages: [{ role: 'user', content: JSON.stringify(userMap, null, 2) }],

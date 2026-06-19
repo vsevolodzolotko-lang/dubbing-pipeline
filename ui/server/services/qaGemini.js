@@ -5,10 +5,13 @@
 // browser). One call per language over the WHOLE lesson, so cross-segment
 // consistency (formality / gender) is actually visible to the model.
 
+import { config } from '../config.js'
 import { getAiPrompt } from './mockStore.js'
+import { FORMAL, CPS_DEFAULTS, informalize, shortenToBudget } from './qaCheck.js'
 
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
 const MODEL = 'gemini-3.5-flash'
+const NUM = (v) => (v === '' || v == null || isNaN(Number(v)) ? null : Number(v))
 
 const LANG_NAMES = {
   de: 'німецька', es: 'іспанська', fr: 'французька', it: 'італійська',
@@ -20,9 +23,6 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 export async function runAnalysis({ snapshot, langs, onProgress, model }) {
   const m = snapshot.get()
   const useModel = (typeof model === 'string' && model.trim()) ? model.trim() : MODEL
-  const apiKey = (m.configMap.get('gemini_api_key') || '').toString().trim()
-  // Etap P: route non-gemini models (claude-*, gpt-*) to Anthropic/OpenAI here.
-  if (!apiKey) throw new Error('gemini_api_key відсутній у config-табі (модель: ' + useModel + ')')
 
   const allLangs = (langs && langs.length ? langs : m.activeLangs).filter((l) => LANG_NAMES[l])
   const segs = m.segments
@@ -30,45 +30,61 @@ export async function runAnalysis({ snapshot, langs, onProgress, model }) {
 
   const findings = []
   let done = 0
-  const CONC = Math.min(4, Number(m.configMap.get('w2_llm_chunk')) || 4)
 
-  await pool(allLangs, CONC, async (lang) => {
-    const payload = segs
-      .filter((s) => String(s[`${lang}_text`] ?? '').trim())
-      .map((s) => ({ segment_id: s.segment_id, en: s.en_text || '', t: s[`${lang}_text`] }))
+  if (config.mode === 'mock') {
+    // Etap M stand-in: deterministic findings (no key, no API call) over EVERY
+    // active language — so the analysis is representative and never silently
+    // drops a language (e.g. de). Live wiring swaps this for the real LLM below.
+    for (const lang of allLangs) {
+      const f = mockLangFindings(m, segs, lang)
+      findings.push(...f)
+      done++
+      onProgress?.({ lang, done, total: allLangs.length, found: f.length })
+    }
+  } else {
+    const apiKey = (m.configMap.get('gemini_api_key') || '').toString().trim()
+    // Etap P: route non-gemini models (claude-*, gpt-*) to Anthropic/OpenAI here.
+    if (!apiKey) throw new Error('gemini_api_key відсутній у config-табі (модель: ' + useModel + ')')
+    const CONC = Math.min(4, Number(m.configMap.get('w2_llm_chunk')) || 4)
 
-    let raw = []
-    if (payload.length) {
-      const body = {
-        model: useModel,
-        messages: [
-          { role: 'system', content: systemPrompt(lang) },
-          { role: 'user', content: JSON.stringify(payload) },
-        ],
-        response_format: { type: 'json_object' },
+    await pool(allLangs, CONC, async (lang) => {
+      const payload = segs
+        .filter((s) => String(s[`${lang}_text`] ?? '').trim())
+        .map((s) => ({ segment_id: s.segment_id, en: s.en_text || '', t: s[`${lang}_text`] }))
+
+      let raw = []
+      if (payload.length) {
+        const body = {
+          model: useModel,
+          messages: [
+            { role: 'system', content: systemPrompt(lang) },
+            { role: 'user', content: JSON.stringify(payload) },
+          ],
+          response_format: { type: 'json_object' },
+        }
+        const text = await callGemini(apiKey, body)
+        raw = parseFindings(text)
       }
-      const text = await callGemini(apiKey, body)
-      raw = parseFindings(text)
-    }
 
-    for (const f of raw) {
-      const seg = segs.find((s) => s.segment_id === f.segment_id)
-      if (!seg) continue
-      findings.push({
-        lang,
-        segmentId: f.segment_id,
-        rowKey: rowKeyFor(f.segment_id, lang),
-        type: normType(f.type),
-        severity: normSeverity(f.severity),
-        issue: String(f.issue || '').slice(0, 400),
-        suggestion: String(f.suggestion || '').slice(0, 600),
-        enText: seg.en_text || '',
-        current: seg[`${lang}_text`] || '',
-      })
-    }
-    done++
-    onProgress?.({ lang, done, total: allLangs.length, found: raw.length })
-  })
+      for (const f of raw) {
+        const seg = segs.find((s) => s.segment_id === f.segment_id)
+        if (!seg) continue
+        findings.push({
+          lang,
+          segmentId: f.segment_id,
+          rowKey: rowKeyFor(f.segment_id, lang),
+          type: normType(f.type),
+          severity: normSeverity(f.severity),
+          issue: String(f.issue || '').slice(0, 400),
+          suggestion: String(f.suggestion || '').slice(0, 600),
+          enText: seg.en_text || '',
+          current: seg[`${lang}_text`] || '',
+        })
+      }
+      done++
+      onProgress?.({ lang, done, total: allLangs.length, found: raw.length })
+    })
+  }
 
   // stable order: by lang, then segment number
   findings.sort((a, b) =>
@@ -82,6 +98,41 @@ export async function runAnalysis({ snapshot, langs, onProgress, model }) {
     findings,
     total: findings.length,
   }
+}
+
+// Deterministic mock findings for ONE language (Etap M): formality + length-fit,
+// reusing the same checks as the translation-gate "Перевірити AI". Ensures every
+// active language is evaluated — e.g. de's formal "Sie" is flagged, so German
+// never silently drops out of the analysis.
+function mockLangFindings(m, segs, lang) {
+  const out = []
+  const cps = NUM(m.configMap.get(`cps_estimate_${lang}`)) || CPS_DEFAULTS[lang] || 14
+  for (const seg of segs) {
+    const text = String(seg[`${lang}_text`] ?? '').trim()
+    if (!text) continue
+    const base = {
+      lang, segmentId: seg.segment_id, rowKey: rowKeyFor(seg.segment_id, lang),
+      enText: seg.en_text || '', current: text,
+    }
+    if (FORMAL[lang] && FORMAL[lang].test(text)) {
+      out.push({
+        ...base, type: 'formality', severity: 'medium',
+        issue: 'Формальне звертання — у wellness-контенті має бути неформальне «ти».',
+        suggestion: informalize(text, lang),
+      })
+    }
+    const enDur = NUM(seg.en_duration_sec) ?? ((NUM(seg.en_end_sec) ?? 0) - (NUM(seg.en_start_sec) ?? 0))
+    const budget = Math.max(1, enDur * cps)
+    const ratio = text.length / budget
+    if (ratio > 1.4) {
+      out.push({
+        ...base, type: 'naturalness', severity: 'high',
+        issue: `Задовгий для слоту (~${Math.round(ratio * 100)}% бюджету ${Math.round(budget)} симв.) — TTS прискорить/обріже.`,
+        suggestion: shortenToBudget(text, Math.round(budget)),
+      })
+    }
+  }
+  return out
 }
 
 function systemPrompt(lang) {

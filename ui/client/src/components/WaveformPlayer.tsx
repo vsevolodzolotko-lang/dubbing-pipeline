@@ -1,4 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
+import { Pause, Play } from 'lucide-react'
+import { useRunMedia } from '../api/runMedia'
 
 export interface PlayerHandle {
   toggle: () => void
@@ -12,6 +14,7 @@ interface Props {
   peaksUrl: string
   enUrl?: string | null // self-contained EN clip for this segment (stops on `ended`)
   enPeaksUrl?: string | null // when set → dual view: EN waveform stacked above the dub
+  videoStartSec?: number | null // segment's absolute start in the reference video → synced clip
   autoPlay?: boolean
   mainLabel?: string // label for the primary track button (default "дубляж")
 }
@@ -65,10 +68,13 @@ function drawWave(cv: HTMLCanvasElement | null, peaks: Peaks | null, widthFrac: 
  * the localized audio sits relative to the original (lead silence, overshoot/borrow).
  */
 export const WaveformPlayer = forwardRef<PlayerHandle, Props>(function WaveformPlayer(
-  { audioUrl, peaksUrl, enUrl, enPeaksUrl, autoPlay, mainLabel = 'дубляж' }, ref,
+  { audioUrl, peaksUrl, enUrl, enPeaksUrl, videoStartSec, autoPlay, mainLabel = 'дубляж' }, ref,
 ) {
+  const { videoUrl } = useRunMedia()
   const dubRef = useRef<HTMLAudioElement>(null)
   const enRef = useRef<HTMLAudioElement>(null)
+  const vidRef = useRef<HTMLVideoElement>(null)
+  const vStart = videoStartSec || 0
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const enCanvasRef = useRef<HTMLCanvasElement>(null)
   const [peaks, setPeaks] = useState<Peaks | null>(null)
@@ -76,6 +82,7 @@ export const WaveformPlayer = forwardRef<PlayerHandle, Props>(function WaveformP
   const [playing, setPlaying] = useState(false)
   const [enPlaying, setEnPlaying] = useState(false)
   const [pos, setPos] = useState(0) // 0..1 within the dub clip
+  const [enPos, setEnPos] = useState(0) // 0..1 within the EN clip
   const dual = Boolean(enPeaksUrl)
 
   useEffect(() => {
@@ -95,10 +102,11 @@ export const WaveformPlayer = forwardRef<PlayerHandle, Props>(function WaveformP
   useEffect(() => {
     const maxDur = dual ? Math.max(peaks?.durationSec || 0, enPeaks?.durationSec || 0) || 1 : (peaks?.durationSec || 1)
     const dubFrac = dual ? (peaks?.durationSec || 0) / maxDur : 1
-    const slotFrac = dual && enPeaks ? (enPeaks.durationSec / maxDur) : null
-    drawWave(canvasRef.current, peaks, dubFrac, pos * dubFrac, slotFrac)
-    if (dual) drawWave(enCanvasRef.current, enPeaks, (enPeaks?.durationSec || 0) / maxDur, 0, null)
-  }, [peaks, enPeaks, pos, dual])
+    const enFrac = (enPeaks?.durationSec || 0) / maxDur
+    const slotFrac = dual && enPeaks ? enFrac : null
+    drawWave(canvasRef.current, peaks, dubFrac, pos, slotFrac)
+    if (dual) drawWave(enCanvasRef.current, enPeaks, enFrac, enPos, null)
+  }, [peaks, enPeaks, pos, enPos, dual])
 
   useEffect(() => {
     const a = dubRef.current; if (!a) return
@@ -113,10 +121,27 @@ export const WaveformPlayer = forwardRef<PlayerHandle, Props>(function WaveformP
 
   useEffect(() => {
     const a = enRef.current; if (!a) return
-    const on = () => setEnPlaying(true), off = () => setEnPlaying(false)
-    a.addEventListener('play', on); a.addEventListener('pause', off); a.addEventListener('ended', off)
-    return () => { a.removeEventListener('play', on); a.removeEventListener('pause', off); a.removeEventListener('ended', off) }
-  }, [enUrl])
+    let raf = 0
+    const tick = () => { if (a.duration) setEnPos(a.currentTime / a.duration); raf = requestAnimationFrame(tick) }
+    // The EN clip == the segment's original audio, so the reference video tracks
+    // it: play/pause/seek the EN clip drives the video to the matching frame.
+    const onPlay = () => {
+      setEnPlaying(true)
+      const v = vidRef.current; if (v) { try { v.currentTime = vStart + a.currentTime } catch { /* */ } v.play().catch(() => {}) }
+      raf = requestAnimationFrame(tick)
+    }
+    const onPause = () => { setEnPlaying(false); vidRef.current?.pause(); cancelAnimationFrame(raf) }
+    const onEnd = () => { setEnPlaying(false); setEnPos(0); vidRef.current?.pause(); cancelAnimationFrame(raf) }
+    a.addEventListener('play', onPlay); a.addEventListener('pause', onPause); a.addEventListener('ended', onEnd)
+    return () => { a.removeEventListener('play', onPlay); a.removeEventListener('pause', onPause); a.removeEventListener('ended', onEnd); cancelAnimationFrame(raf) }
+  }, [enUrl, videoUrl, vStart])
+
+  // park the reference video on this segment's first frame when it changes
+  useEffect(() => {
+    const v = vidRef.current; if (!v) return
+    const set = () => { try { v.currentTime = vStart } catch { /* */ } }
+    if (v.readyState >= 1) set(); else { v.addEventListener('loadedmetadata', set, { once: true }); return () => v.removeEventListener('loadedmetadata', set) }
+  }, [videoUrl, vStart])
 
   useEffect(() => { if (autoPlay) dubRef.current?.play().catch(() => {}) }, [audioUrl, autoPlay])
 
@@ -132,39 +157,61 @@ export const WaveformPlayer = forwardRef<PlayerHandle, Props>(function WaveformP
   }
   useImperativeHandle(ref, () => ({ toggle, playEn }))
 
-  function seek(e: React.MouseEvent<HTMLCanvasElement>) {
-    const a = dubRef.current; if (!a || !a.duration) return
+  // Click a waveform → seek to that point and play that track (pausing the other).
+  // Both waves share one time scale, so each occupies `frac` of its canvas width;
+  // clicks past the clip end are ignored.
+  function seekAt(kind: 'dub' | 'en', e: React.MouseEvent<HTMLCanvasElement>) {
+    const isEn = kind === 'en'
+    const a = isEn ? enRef.current : dubRef.current
+    if (!a) return
     const rect = e.currentTarget.getBoundingClientRect()
-    a.currentTime = ((e.clientX - rect.left) / rect.width) * a.duration
+    const clickFrac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width))
+    const maxDur = dual ? Math.max(peaks?.durationSec || 0, enPeaks?.durationSec || 0) || 1 : (peaks?.durationSec || 1)
+    const frac = isEn ? (enPeaks?.durationSec || 0) / maxDur : (dual ? (peaks?.durationSec || 0) / maxDur : 1)
+    if (frac <= 0 || clickFrac > frac) return // clicked the empty area past this clip
+    const within = Math.min(1, clickFrac / frac)
+    const dur = a.duration || (isEn ? enPeaks?.durationSec : peaks?.durationSec) || 0
+    if (dur) a.currentTime = within * dur
+    if (isEn) {
+      dubRef.current?.pause(); setEnPos(within)
+      const v = vidRef.current; if (v && dur) { try { v.currentTime = vStart + within * dur } catch { /* */ } }
+    } else { enRef.current?.pause(); setPos(within) }
+    a.play().catch(() => {})
   }
 
   return (
-    <div className="rounded-md border border-gray-200 p-2 dark:border-[#473d31]">
+    <div className="rounded-md border border-gray-200 p-2 dark:border-[#3a3a3d]">
+      {dual && videoUrl && (
+        <div className="mb-1">
+          <div className="mb-0.5 text-[11px] text-gray-400">відео-референс (грає синхронно з оригіналом)</div>
+          <video ref={vidRef} src={videoUrl} muted playsInline controls className="max-h-40 w-full rounded bg-black" />
+        </div>
+      )}
       {dual && (
         <div className="mb-1">
           <div className="mb-0.5 flex items-center justify-between text-[11px] text-gray-400">
             <span>оригінал (EN)</span>
             <span>{enPeaks ? `${enPeaks.durationSec.toFixed(1)}с` : '…'}</span>
           </div>
-          <canvas ref={enCanvasRef} className="h-10 w-full rounded bg-gray-50 dark:bg-[#262019]" />
+          <canvas ref={enCanvasRef} onClick={(e) => seekAt('en', e)} className="h-10 w-full cursor-pointer rounded bg-gray-50 dark:bg-[#202023]" />
         </div>
       )}
-      {dual && <div className="mb-0.5 text-[11px] text-gray-400">локалізація{enPeaks && peaks && peaks.durationSec > enPeaks.durationSec ? ' · виходить за слот →' : ''}</div>}
-      <canvas ref={canvasRef} onClick={seek} className="h-16 w-full cursor-pointer rounded bg-gray-50 dark:bg-[#262019]" />
+      {dual && <div className="mb-0.5 text-[11px] text-gray-400">локалізація{enPeaks && peaks && peaks.durationSec > enPeaks.durationSec ? ' · виходить за слот' : ''}</div>}
+      <canvas ref={canvasRef} onClick={(e) => seekAt('dub', e)} className="h-16 w-full cursor-pointer rounded bg-gray-50 dark:bg-[#202023]" />
       <div className="mt-2 flex items-center gap-2">
         <button onClick={toggle} className="rounded bg-gray-900 px-3 py-1 text-sm text-white hover:bg-gray-700 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white">
-          {playing ? '⏸' : '▶'} <span className="ml-1">{mainLabel}</span>
+          {playing ? <Pause className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> : <Play className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} />} <span className="ml-1">{mainLabel}</span>
         </button>
         {enUrl && (
-          <button onClick={playEn} className="rounded border border-gray-300 px-3 py-1 text-sm hover:bg-gray-100 dark:border-gray-600 dark:hover:bg-[#262019]" title="клавіша E">
-            {enPlaying ? '⏸' : '▶'} оригінал
+          <button onClick={playEn} className="rounded border border-gray-300 px-3 py-1 text-sm hover:bg-gray-100 dark:border-gray-600 dark:hover:bg-[#202023]" title="клавіша E">
+            {enPlaying ? <Pause className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> : <Play className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} />} оригінал
           </button>
         )}
-        {dual && <span className="text-[10px] text-amber-600 dark:text-amber-500">┊ межа слота</span>}
+        {dual && <span className="text-[10px] text-amber-600 dark:text-amber-500">межа слота</span>}
         <span className="ml-auto text-xs text-gray-400">{peaks ? `${peaks.durationSec.toFixed(1)}с` : '…'}</span>
       </div>
-      <audio ref={dubRef} src={audioUrl} preload="none" />
-      {enUrl && <audio ref={enRef} src={enUrl} preload="none" />}
+      <audio ref={dubRef} src={audioUrl} preload="metadata" />
+      {enUrl && <audio ref={enRef} src={enUrl} preload="metadata" />}
     </div>
   )
 })

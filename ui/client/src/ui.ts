@@ -8,11 +8,12 @@ export const STATE_COPY: Record<RunStateName, { label: string; tone: Tone }> = {
   STARTING: { label: 'Запуск…', tone: 'blue' },
   ARCHIVING: { label: 'Архівую попередній урок…', tone: 'blue' },
   STT: { label: 'Розпізнаю мовлення…', tone: 'blue' },
-  TRANSCRIPT_REVIEW: { label: 'Перевір транскрипцію → підтверди', tone: 'amber' },
+  TRANSCRIPT_REVIEW: { label: 'Перевір транскрипцію, далі підтверди', tone: 'amber' },
   TRANSLATING: { label: 'Перекладаю…', tone: 'blue' },
-  TRANSLATION_REVIEW: { label: 'Перевір переклади → підтверди', tone: 'amber' },
+  TRANSLATION_REVIEW: { label: 'Перевір переклади, далі підтверди', tone: 'amber' },
   SYNTHESIZING: { label: 'Синтезую аудіо…', tone: 'blue' },
-  AUDIO_REVIEW: { label: 'Перевір аудіо → збери повний файл', tone: 'amber' },
+  AUDIO_REVIEW: { label: 'Перевір аудіо, далі склейка', tone: 'amber' },
+  RENDER_REVIEW: { label: 'Склейка — обери, куди зберегти', tone: 'amber' },
   RENDERING: { label: 'Збираю повний файл…', tone: 'blue' },
   COMPLETE: { label: 'Дубляж готовий', tone: 'green' },
   STOPPING: { label: 'Зупинку прийнято — чекаю межі мови…', tone: 'amber' },
@@ -23,22 +24,21 @@ export const STATE_COPY: Record<RunStateName, { label: string; tone: Tone }> = {
 
 export type Tone = 'gray' | 'green' | 'blue' | 'amber' | 'red'
 
-// Spirio wellness palette: sage=ok, ochre=review/warn, rust=danger, info=running.
 export const TONE_CLASSES: Record<Tone, string> = {
-  gray: 'bg-gray-100 text-gray-700 border-gray-300 dark:bg-[#262019] dark:text-gray-300 dark:border-[#473d31]',
-  green: 'bg-sage-100 text-sage-700 border-sage-200 dark:bg-sage-900/40 dark:text-sage-200 dark:border-sage-700',
-  blue: 'bg-info-100 text-info-700 border-info-200 dark:bg-info-900/40 dark:text-info-200 dark:border-info-700',
-  amber: 'bg-ochre-100 text-ochre-700 border-ochre-200 dark:bg-ochre-900/40 dark:text-ochre-200 dark:border-ochre-700',
-  red: 'bg-rust-100 text-rust-700 border-rust-200 dark:bg-rust-900/40 dark:text-rust-200 dark:border-rust-700',
+  gray: 'bg-gray-100 text-gray-700 border-gray-300 dark:bg-gray-800 dark:text-gray-300 dark:border-gray-700',
+  green: 'bg-green-100 text-green-800 border-green-300 dark:bg-green-900/40 dark:text-green-300 dark:border-green-800',
+  blue: 'bg-blue-100 text-blue-800 border-blue-300 dark:bg-blue-900/40 dark:text-blue-300 dark:border-blue-800',
+  amber: 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-800',
+  red: 'bg-red-100 text-red-800 border-red-300 dark:bg-red-900/40 dark:text-red-300 dark:border-red-800',
 }
 
 // needs_attention cell coloring.
 export const CELL_CLASSES: Record<string, string> = {
-  TRUE: 'bg-rust-100 text-rust-700 border-rust-200 dark:bg-rust-900/40 dark:text-rust-200 dark:border-rust-700',
-  FALSE: 'bg-sage-100 text-sage-700 border-sage-200 dark:bg-sage-900/30 dark:text-sage-200 dark:border-sage-700',
-  REVIEW: 'bg-ochre-100 text-ochre-700 border-ochre-200 dark:bg-ochre-900/40 dark:text-ochre-200 dark:border-ochre-700',
-  MISSING: 'bg-gray-50 text-gray-400 border-gray-200 dark:bg-[#262019] dark:text-gray-500 dark:border-[#473d31]',
-  QUEUED: 'bg-info-100 text-info-700 border-info-200 dark:bg-info-900/40 dark:text-info-200 dark:border-info-700',
+  TRUE: 'bg-red-100 text-red-900 border-red-200 dark:bg-red-900/40 dark:text-red-200 dark:border-red-800',
+  FALSE: 'bg-green-50 text-green-900 border-green-200 dark:bg-green-900/30 dark:text-green-200 dark:border-green-800',
+  REVIEW: 'bg-amber-100 text-amber-900 border-amber-200 dark:bg-amber-900/40 dark:text-amber-200 dark:border-amber-800',
+  MISSING: 'bg-gray-50 text-gray-400 border-gray-200 dark:bg-gray-800 dark:text-gray-500 dark:border-gray-700',
+  QUEUED: 'bg-blue-100 text-blue-900 border-blue-200 dark:bg-blue-900/40 dark:text-blue-200 dark:border-blue-800',
 }
 
 export function cellClass(status: string, queued?: boolean): string {
@@ -77,13 +77,14 @@ export function writeBlockReason(state: StateLike): string {
 }
 
 // ── staged pipeline: 3 review gates ─────────────────────────────────────────
-export type StageKey = 'transcript' | 'translation' | 'audio'
+export type StageKey = 'transcript' | 'translation' | 'audio' | 'render'
 export interface StageInfo { key: StageKey; index: number; phase: 'running' | 'gate' }
 
 export const STAGES: { key: StageKey; label: string; route: string }[] = [
   { key: 'transcript', label: 'Транскрипт', route: '/transcript' },
   { key: 'translation', label: 'Переклад', route: '/translation' },
   { key: 'audio', label: 'Аудіо', route: '/review' },
+  { key: 'render', label: 'Склейка', route: '/render' },
 ]
 
 /** Map a run state to its staged gate + whether the pipeline is mid-run
@@ -96,8 +97,9 @@ export function currentStage(stateName?: string | null): StageInfo | null {
     case 'TRANSLATION_REVIEW': return { key: 'translation', index: 1, phase: 'gate' }
     case 'SYNTHESIZING': return { key: 'audio', index: 2, phase: 'running' }
     case 'AUDIO_REVIEW': return { key: 'audio', index: 2, phase: 'gate' }
-    case 'RENDERING': return { key: 'audio', index: 2, phase: 'running' } // building the full file
-    case 'COMPLETE': return { key: 'audio', index: 2, phase: 'gate' }
+    case 'RENDER_REVIEW': return { key: 'render', index: 3, phase: 'gate' } // assemble-file gate
+    case 'RENDERING': return { key: 'render', index: 3, phase: 'running' } // building the full file
+    case 'COMPLETE': return { key: 'render', index: 3, phase: 'gate' }
     default: return null
   }
 }

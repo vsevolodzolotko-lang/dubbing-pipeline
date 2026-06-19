@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { Scissors } from 'lucide-react'
 import { useSegments } from '../api/queries'
 import { useRunState } from '../api/useRunState'
 import { canWriteTranscript } from '../ui'
 import { GateBar } from '../components/GateBar'
 import { WaveformPlayer } from '../components/WaveformPlayer'
+import { SegmentTimeline } from '../components/timeline/SegmentTimeline'
 import { saveTranscript, mergeSegment, splitSegment, fetchWords, type Word } from '../api/staged'
 import type { RawSegment } from '../api/types'
 
@@ -66,6 +68,12 @@ export function TranscriptReview() {
   return (
     <div className="flex h-full flex-col">
       <div className="flex-1 overflow-auto">
+        {segs.length > 0 && (
+          <div className="px-6 pt-6">
+            <SegmentTimeline segments={segs} editable={editable} selected={selected}
+              onSelect={setSelected} onRetimed={refresh} />
+          </div>
+        )}
         <div className="grid grid-cols-1 gap-6 p-6 lg:grid-cols-[1fr_22rem]">
           {/* ── segment list ── */}
           <section>
@@ -85,11 +93,11 @@ export function TranscriptReview() {
                   return (
                     <li key={seg.segment_id}
                       onClick={() => setSelected(seg.segment_id)}
-                      className={`rounded-lg border p-3 ${isSel ? 'border-gray-900 dark:border-gray-100 bg-white dark:bg-[#1c1814]' : 'border-gray-200 dark:border-[#332b22] bg-white dark:bg-[#1c1814] hover:border-gray-300 dark:border-[#473d31]'}`}>
+                      className={`rounded-lg border p-3 ${isSel ? 'border-gray-900 dark:border-gray-100 bg-white dark:bg-[#161617]' : 'border-gray-200 dark:border-[#29292c] bg-white dark:bg-[#161617] hover:border-gray-300 dark:border-[#3a3a3d]'}`}>
                       <div className="mb-1.5 flex items-center gap-2 text-xs text-gray-500">
                         <span className="font-mono">{shortId(seg.segment_id)}</span>
-                        <span>{fmt(n(seg.en_start_sec))}→{fmt(n(seg.en_end_sec))}с ({fmt(n(seg.en_duration_sec))}с)</span>
-                        {move && <span className="rounded bg-purple-100 px-1.5 py-0.5 text-purple-700" title="рух — суворе вирівнювання">🏃 {move}</span>}
+                        <span>{fmt(n(seg.en_start_sec))}–{fmt(n(seg.en_end_sec))}с ({fmt(n(seg.en_duration_sec))}с)</span>
+                        {move && <span className="rounded bg-purple-100 px-1.5 py-0.5 text-purple-700" title="рух — суворе вирівнювання">{move}</span>}
                         {dirty && <span className="rounded bg-amber-100 px-1.5 py-0.5 text-amber-800">змінено</span>}
                       </div>
                       <textarea
@@ -98,15 +106,15 @@ export function TranscriptReview() {
                         onChange={(e) => setDrafts((d) => ({ ...d, [seg.segment_id]: e.target.value }))}
                         onBlur={() => commitEdit(seg)}
                         rows={2}
-                        className="w-full resize-none rounded border border-gray-200 dark:border-[#332b22] px-2 py-1 text-sm disabled:bg-gray-50 dark:bg-[#1c1814] dark:disabled:bg-[#262019] disabled:text-gray-500"
+                        className="w-full resize-none rounded border border-gray-200 dark:border-[#29292c] px-2 py-1 text-sm disabled:bg-gray-50 dark:bg-[#161617] dark:disabled:bg-[#202023] disabled:text-gray-500"
                       />
                       {editable && (
                         <div className="mt-1.5 flex gap-2 text-xs">
                           <button onClick={(e) => { e.stopPropagation(); openSplit(seg.segment_id) }}
-                            className="rounded border border-gray-300 dark:border-[#473d31] px-2 py-0.5 hover:bg-gray-50">🔪 розділити</button>
+                            className="rounded border border-gray-300 dark:border-[#3a3a3d] px-2 py-0.5 hover:bg-gray-50"><Scissors className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> розділити</button>
                           {i < segs.length - 1 && (
                             <button onClick={(e) => { e.stopPropagation(); doMerge(seg.segment_id) }}
-                              className="rounded border border-gray-300 dark:border-[#473d31] px-2 py-0.5 hover:bg-gray-50">⤵ злити з наступним</button>
+                              className="rounded border border-gray-300 dark:border-[#3a3a3d] px-2 py-0.5 hover:bg-gray-50">злити з наступним</button>
                           )}
                         </div>
                       )}
@@ -145,7 +153,7 @@ export function TranscriptReview() {
         gate="transcript"
         title="Етап 1/3 · Транскрипт"
         summary={`${segs.length} сегментів${editedCount ? ` · ${editedCount} змінено` : ''}`}
-        primaryLabel="Затвердити та продовжити →"
+        primaryLabel="Затвердити та продовжити"
       />
     </div>
   )

@@ -6,6 +6,7 @@ import { canWriteTranslations } from '../ui'
 import { GateBar } from '../components/GateBar'
 import { saveTranslations, checkTranslations, type CheckResult } from '../api/staged'
 import type { RawSegment } from '../api/types'
+import { AlertTriangle, Check } from 'lucide-react'
 
 const shortId = (id: string) => id.replace(/^.*_seg_/, 'seg ')
 const langsOf = (seg?: RawSegment) =>
@@ -106,7 +107,7 @@ export function TranslationReview() {
 
           {translating || (!hasText && !isLoading) ? (
             <div className="rounded-lg border border-blue-200 bg-blue-50 p-6 text-center text-sm text-blue-800 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300">
-              ⏳ Виконується переклад (W2) на {langs.length} мов… Сторінка оновиться сама, коли буде готово.
+              Виконується переклад (W2) на {langs.length} мов… Сторінка оновиться сама, коли буде готово.
             </div>
           ) : isLoading ? (
             <div className="text-sm text-gray-400">Завантаження…</div>
@@ -121,25 +122,29 @@ export function TranslationReview() {
                   return (
                     <button key={l} onClick={() => setLang(l)}
                       className={`rounded-full border px-3 py-1 text-xs font-medium ${
-                        active ? 'border-gray-900 bg-gray-900 text-white dark:border-gray-100 dark:bg-gray-100 dark:text-gray-900' : 'border-gray-300 dark:border-[#473d31] bg-white dark:bg-[#1c1814] text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-[#262019]'}`}>
+                        active ? 'border-gray-900 bg-gray-900 text-white dark:border-gray-100 dark:bg-gray-100 dark:text-gray-900' : 'border-gray-300 dark:border-[#3a3a3d] bg-white dark:bg-[#161617] text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-[#202023]'}`}>
                       {l.toUpperCase()}
-                      {issues != null && <span className={`ml-1.5 ${issues ? 'text-red-400' : 'text-green-500'}`}>{issues ? `⚠${issues}` : '✓'}</span>}
+                      {issues != null && (
+                        <span className={`ml-1.5 inline-flex items-center gap-0.5 ${issues ? 'text-red-400' : 'text-green-500'}`}>
+                          {issues ? (<><AlertTriangle className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} />{issues}</>) : <Check className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} />}
+                        </span>
+                      )}
                     </button>
                   )
                 })}
               </div>
 
               {/* batch controls */}
-              <div className="mb-3 flex items-center gap-3 rounded-md border border-gray-200 dark:border-[#332b22] bg-gray-50 px-3 py-2 dark:bg-[#262019]/60">
+              <div className="mb-3 flex items-center gap-3 rounded-md border border-gray-200 dark:border-[#29292c] bg-gray-50 px-3 py-2 dark:bg-[#202023]/60">
                 <label className="flex items-center gap-1.5 text-sm text-gray-700 dark:text-gray-300">
                   <input type="checkbox" checked={allChecked} onChange={toggleAll} />
                   Вибрати все
                 </label>
                 <span className="text-xs text-gray-400">{selectedIds.length} з {segs.length} вибрано</span>
                 <button onClick={check} disabled={checking || !selectedIds.length}
-                  className="ml-auto rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-700 disabled:bg-gray-300 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white dark:disabled:bg-[#473d31] dark:disabled:text-gray-400"
+                  className="ml-auto rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-700 disabled:bg-gray-300 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white dark:disabled:bg-[#3a3a3d] dark:disabled:text-gray-400"
                   title="Відправити вибрані сегменти цієї мови на AI-перевірку одним батчем">
-                  {checking ? 'Перевіряю…' : `🤖 Перевірити AI (${lang.toUpperCase()}, ${selectedIds.length})`}
+                  {checking ? 'Перевіряю…' : `Перевірити AI (${lang.toUpperCase()}, ${selectedIds.length})`}
                 </button>
                 {suggestedCount > 0 && editable && (
                   <button onClick={applyAllSuggested}
@@ -158,24 +163,28 @@ export function TranslationReview() {
                   const orig = String(seg[`${lang}_text`] ?? '')
                   const draft = drafts[key] ?? orig
                   const res = langResults[seg.segment_id]
-                  const tone = !res ? 'border-gray-200 dark:border-[#332b22] bg-white dark:bg-[#1c1814]'
+                  const tone = !res ? 'border-gray-200 dark:border-[#29292c] bg-white dark:bg-[#161617]'
                     : res.ok ? 'border-green-200 bg-green-50 dark:border-green-900 dark:bg-green-950/40' : 'border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/40'
                   return (
                     <li key={seg.segment_id} className={`rounded-lg border p-3 ${tone}`}>
                       <div className="mb-1 flex items-center gap-2 text-xs text-gray-500">
                         <input type="checkbox" checked={isChecked(seg.segment_id)} onChange={() => toggle(seg.segment_id)} />
                         <span className="font-mono">{shortId(seg.segment_id)}</span>
-                        {res && <span className={`ml-auto ${res.ok ? 'text-green-700' : 'text-amber-700'}`}>{res.ok ? '✓ ОК' : '⚠ є зауваги'}</span>}
+                        {res && (
+                          <span className={`ml-auto inline-flex items-center gap-1 ${res.ok ? 'text-green-700' : 'text-amber-700'}`}>
+                            {res.ok ? (<><Check className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} />ОК</>) : (<><AlertTriangle className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} />є зауваги</>)}
+                          </span>
+                        )}
                       </div>
                       <div className="mb-1.5 text-xs text-gray-400">{seg.en_text}</div>
                       <textarea
                         value={draft} disabled={!editable} rows={2}
                         onChange={(e) => setDrafts((d) => ({ ...d, [key]: e.target.value }))}
                         onBlur={() => commit(seg)}
-                        className="w-full resize-none rounded border border-gray-200 dark:border-[#332b22] bg-white dark:bg-[#1c1814] px-2 py-1 text-sm disabled:bg-gray-50 dark:bg-[#1c1814] dark:disabled:bg-[#262019]"
+                        className="w-full resize-none rounded border border-gray-200 dark:border-[#29292c] bg-white dark:bg-[#161617] px-2 py-1 text-sm disabled:bg-gray-50 dark:bg-[#161617] dark:disabled:bg-[#202023]"
                       />
                       {res && !res.ok && (
-                        <div className="mt-1.5 rounded-md border border-amber-200 bg-white dark:border-amber-900 dark:bg-[#1c1814] p-2 text-xs">
+                        <div className="mt-1.5 rounded-md border border-amber-200 bg-white dark:border-amber-900 dark:bg-[#161617] p-2 text-xs">
                           <div className="text-amber-800 dark:text-amber-300"><b>Коментар AI:</b> {res.comment}</div>
                           {res.suggestion && (
                             <>
@@ -188,7 +197,12 @@ export function TranslationReview() {
                           )}
                         </div>
                       )}
-                      {res && res.ok && <div className="mt-1 text-xs text-green-700">✓ {res.comment}</div>}
+                      {res && res.ok && (
+                        <div className="mt-1 inline-flex items-center gap-1 text-xs text-green-700">
+                          <Check className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} />
+                          {res.comment}
+                        </div>
+                      )}
                     </li>
                   )
                 })}
@@ -201,9 +215,9 @@ export function TranslationReview() {
       <GateBar
         gate="translations"
         title="Етап 2/3 · Переклад"
-        summary={Object.keys(results).length ? `AI перевірено · ${warnings.length} невирішених зауваг` : `${segs.length} сегментів × ${langs.length} мов`}
+        summary={Object.keys(results).length ? `AI перевірено · ${warnings.length} невирішених зауваг` : `${segs.length} сегментів · ${langs.length} мов`}
         warnings={warnings}
-        primaryLabel="Затвердити та почати синтез →"
+        primaryLabel="Затвердити та почати синтез"
       />
     </div>
   )

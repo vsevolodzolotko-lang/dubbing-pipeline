@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { AlertTriangle, RefreshCw } from 'lucide-react'
 import { useRunState } from '../api/useRunState'
 
 /** In-flight regen status: progress, stale-watchdog warning, and a done toast. */
@@ -18,16 +19,16 @@ export function RegenBanner() {
     const mins = Math.max(1, Math.round((regen.elapsedSec ?? 0) / 60))
     return (
       <Bar tone="red">
-        ⚠ Перегенерація могла впасти — {regen.remaining} з {regen.total} рядків не оновились за ~{mins} хв.
+        <AlertTriangle className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> Перегенерація могла впасти — {regen.remaining} з {regen.total} рядків не оновились за ~{mins} хв.
         Перевір n8n executions / Slack (W_Regen без error-воркфлоу — тихий збій можливий).
       </Bar>
     )
   }
   if (regen.active) {
-    return <Bar tone="blue">🔄 Перегенерація триває — лишилось {regen.remaining} з {regen.total} ({regen.elapsedSec ?? 0}с)…</Bar>
+    return <Bar tone="blue"><RefreshCw className="inline-block h-3.5 w-3.5 align-[-0.2em] animate-spin" strokeWidth={1.75} /> Перегенерація триває — лишилось {regen.remaining} з {regen.total} ({regen.elapsedSec ?? 0}с)…</Bar>
   }
   if (doneCount != null) {
-    return <Bar tone="green">🔄 Перегенерація завершена — {doneCount} рядків стали REVIEW. Послухай і постав вердикт (фільтр «Після регену»).</Bar>
+    return <Bar tone="green"><RefreshCw className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> Перегенерація завершена — {doneCount} рядків стали REVIEW. Послухай і постав вердикт (фільтр «Після регену»).</Bar>
   }
   return null
 }

@@ -1,3 +1,4 @@
+import { ArrowRight, Check, Minus, X } from 'lucide-react'
 import { useSetupStatus } from '../api/queries'
 
 export function SetupErrorScreen() {
@@ -16,19 +17,31 @@ export function SetupErrorScreen() {
           : 'Знайдено проблеми — виправ їх, щоб підключити живу таблицю.'}
       </p>
       {data.serviceAccountEmail && (
-        <div className="mt-3 rounded bg-gray-100 p-2 dark:bg-[#262019] text-sm">
+        <div className="mt-3 rounded bg-gray-100 p-2 dark:bg-[#202023] text-sm">
           Service account: <code className="select-all">{data.serviceAccountEmail}</code>
         </div>
       )}
       <ul className="mt-4 space-y-2">
         {data.checks.map((c) => (
-          <li key={c.id} className="rounded-lg border border-gray-200 dark:border-[#332b22] bg-white dark:bg-[#1c1814] p-3">
+          <li key={c.id} className="rounded-lg border border-gray-200 dark:border-[#29292c] bg-white dark:bg-[#161617] p-3">
             <div className="flex items-center gap-2">
-              <span>{c.status === 'pass' ? '✅' : c.status === 'fail' ? '❌' : '➖'}</span>
+              <span>
+                {c.status === 'pass' ? (
+                  <Check className="h-4 w-4 text-green-600" strokeWidth={1.75} />
+                ) : c.status === 'fail' ? (
+                  <X className="h-4 w-4 text-red-600" strokeWidth={1.75} />
+                ) : (
+                  <Minus className="h-4 w-4 text-gray-400" strokeWidth={1.75} />
+                )}
+              </span>
               <span className="font-medium">{c.label}</span>
               <span className="text-sm text-gray-500">— {c.detail}</span>
             </div>
-            {c.remediation && <div className="mt-1 pl-6 text-sm text-amber-700">→ {c.remediation}</div>}
+            {c.remediation && (
+              <div className="mt-1 pl-6 text-sm text-amber-700">
+                <ArrowRight className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> {c.remediation}
+              </div>
+            )}
           </li>
         ))}
       </ul>

@@ -63,6 +63,7 @@ function buildCell(seg, loc, vSpeed, cfg) {
     lastRegenAt: loc.last_regen_at ?? '',
     regenComment: loc.regen_comment ?? '',
     audioFileId: loc.audio_drive_file_id ?? '',
+    normalizedLufs: loc.normalized_lufs === '' || loc.normalized_lufs == null ? null : Number(loc.normalized_lufs),
     diagnosis,
   }
 }
@@ -109,7 +110,7 @@ function diagnose(seg, loc, vSpeed, cfg) {
     if (regenAt) add('regen', `Перегенеровано ${regenAt}`, 'certain')
     if (realDur != null && slot) add('tight', `Нова тривалість ${realDur.toFixed(1)}с проти слота ${slot.toFixed(1)}с`, 'certain')
     if (loc.regen_comment) add('regen', `Коментар: ${loc.regen_comment}`, 'certain')
-    advice = 'Звучить добре → постав «Ок»; усе ще погано → «Погано» (далі кошик або ElevenLabs)'
+    advice = 'Звучить добре — постав «Ок»; усе ще погано — постав «Погано» (далі кошик або ElevenLabs)'
   } else if (status === 'TRUE') {
     severity = 'bad'
 
@@ -151,7 +152,7 @@ function diagnose(seg, loc, vSpeed, cfg) {
       primary = 'Перегенерація не допомогла — модель не вкладається у слот'
       advice = 'Спробуй ElevenLabs UI вручну: інший темп, паузи „…“, простіша фраза'
     } else if (kinds.has('movement')) {
-      primary = '🏃 Сегмент із рухом: аудіо не вмістилось у жорсткий слот'
+      primary = 'Сегмент із рухом: аудіо не вмістилось у жорсткий слот'
       advice = 'Сильно коротша фраза — або зніми позначку руху, якщо це помилка класифікації'
     } else if (kinds.has('length') || kinds.has('speed')) {
       primary = 'Переклад не вмістився у слот — аудіо обрізано в кінці'

@@ -30,7 +30,7 @@ export function Config() {
   const orderedGroups = [...GROUP_ORDER.filter((g) => groups[g]), ...Object.keys(groups).filter((g) => !GROUP_ORDER.includes(g))]
 
   return (
-    <div className="p-6">
+    <div className="mx-auto max-w-5xl p-6">
       <div className="flex items-center gap-3">
         <h1 className="text-xl font-semibold">Конфігурація</h1>
         {!writable && <span className="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-700">лише перегляд — {reason}</span>}
@@ -70,7 +70,7 @@ function Field({ k, meta, value, masked, writable, reason, onSaved }: {
   const [val, setVal] = useState(value)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
-  const [check, setCheck] = useState<string | null>(null)
+  const [check, setCheck] = useState<{ ok: boolean; text: string } | null>(null)
   const editable = Boolean(meta.editable) && meta.type !== 'secret' && meta.type !== 'readonly'
   const changed = val !== value
 
@@ -82,22 +82,22 @@ function Field({ k, meta, value, masked, writable, reason, onSaved }: {
         body: JSON.stringify({ expected: value, value: val }),
       })
       const d = await res.json().catch(() => ({}))
-      if (res.ok && d.ok) { setMsg({ kind: 'ok', text: '✓ збережено' }); onSaved() }
+      if (res.ok && d.ok) { setMsg({ kind: 'ok', text: 'Збережено' }); onSaved() }
       else setMsg({ kind: 'err', text: d.error || `помилка ${res.status}` })
     } catch (e) { setMsg({ kind: 'err', text: String(e) }) } finally { setBusy(false) }
   }
 
   async function runCheck() {
-    setCheck('…')
+    setCheck({ ok: false, text: '…' })
     try {
       const res = await fetch(`/api/config/check/${encodeURIComponent(k)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
       const d = await res.json().catch(() => ({}))
-      setCheck(d.ok ? '✓ ключ робочий' : `✗ ${d.reason || d.status || 'не валідний'}`)
-    } catch (e) { setCheck(`✗ ${e}`) }
+      setCheck(d.ok ? { ok: true, text: 'ключ робочий' } : { ok: false, text: String(d.reason || d.status || 'не валідний') })
+    } catch (e) { setCheck({ ok: false, text: String(e) }) }
   }
 
   return (
-    <div className="rounded-lg border border-gray-200 dark:border-[#332b22] bg-white dark:bg-[#1c1814] px-3 py-2">
+    <div className="rounded-lg border border-gray-200 dark:border-[#29292c] bg-white dark:bg-[#161617] px-3 py-2">
       <div className="flex flex-wrap items-center gap-2">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
@@ -113,10 +113,10 @@ function Field({ k, meta, value, masked, writable, reason, onSaved }: {
             {meta.type === 'number' || meta.type === 'ratio' ? (
               <input type="number" value={val} min={meta.min} max={meta.max} step={meta.step}
                 onChange={(e) => setVal(e.target.value)} disabled={!writable}
-                className="w-28 rounded border border-gray-300 dark:border-[#473d31] px-2 py-1 text-sm disabled:bg-gray-100 dark:disabled:bg-[#262019]" />
+                className="w-28 rounded border border-gray-300 dark:border-[#3a3a3d] px-2 py-1 text-sm disabled:bg-gray-100 dark:disabled:bg-[#202023]" />
             ) : (
               <input type="text" value={val} onChange={(e) => setVal(e.target.value)} disabled={!writable}
-                className="w-56 rounded border border-gray-300 dark:border-[#473d31] px-2 py-1 text-sm disabled:bg-gray-100 dark:disabled:bg-[#262019]" />
+                className="w-56 rounded border border-gray-300 dark:border-[#3a3a3d] px-2 py-1 text-sm disabled:bg-gray-100 dark:disabled:bg-[#202023]" />
             )}
             {changed && writable && (
               <button onClick={save} disabled={busy} className="rounded bg-gray-900 px-2 py-1 text-xs text-white hover:bg-gray-700 disabled:opacity-50">
@@ -127,7 +127,7 @@ function Field({ k, meta, value, masked, writable, reason, onSaved }: {
         ) : meta.type === 'secret' ? (
           <div className="flex items-center gap-2">
             <span className="font-mono text-sm text-gray-400">{masked ? '••••••••' : value || '—'}</span>
-            {meta.testable && <button onClick={runCheck} className="rounded border border-gray-300 dark:border-[#473d31] px-2 py-1 text-xs hover:bg-gray-100">Перевірити</button>}
+            {meta.testable && <button onClick={runCheck} className="rounded border border-gray-300 dark:border-[#3a3a3d] px-2 py-1 text-xs hover:bg-gray-100">Перевірити</button>}
           </div>
         ) : (
           <span className="max-w-[16rem] truncate font-mono text-sm text-gray-500" title={value}>{value || '—'}</span>
@@ -136,7 +136,7 @@ function Field({ k, meta, value, masked, writable, reason, onSaved }: {
 
       {!writable && editable && val !== value && <div className="mt-1 text-[11px] text-amber-600">{reason}</div>}
       {msg && <div className={`mt-1 text-xs ${msg.kind === 'ok' ? 'text-green-700' : 'text-red-700'}`}>{msg.text}</div>}
-      {check && <div className={`mt-1 text-xs ${check.startsWith('✓') ? 'text-green-700' : 'text-gray-500'}`}>{check}</div>}
+      {check && <div className={`mt-1 text-xs ${check.ok ? 'text-green-700' : 'text-gray-500'}`}>{check.text}</div>}
     </div>
   )
 }
