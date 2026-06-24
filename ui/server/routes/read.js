@@ -1,6 +1,8 @@
 import { buildLessonMatrix, filterLocalizations } from '../services/derive.js'
 import { maskConfigValue } from '../constants.js'
+import { config } from '../config.js'
 import { archive } from '../services/archive.js'
+import * as mockStore from '../services/mockStore.js'
 
 /** Read endpoints — all served instantly from the in-memory snapshot. */
 export function registerReadRoutes(fastify, { snapshot }) {
@@ -32,6 +34,7 @@ export function registerReadRoutes(fastify, { snapshot }) {
   })
 
   fastify.get('/api/prompts', async () => {
+    if (config.mode === 'mock') return { rows: mockStore.listPrompts() }
     const rows = snapshot.get().prompts.map((p) => ({
       key: p.key, description: p.description ?? '', length: String(p.value ?? '').length,
     }))
@@ -39,6 +42,11 @@ export function registerReadRoutes(fastify, { snapshot }) {
   })
 
   fastify.get('/api/prompts/:key', async (req, reply) => {
+    if (config.mode === 'mock') {
+      const p = mockStore.getPrompt(req.params.key)
+      if (!p) return reply.code(404).send({ error: 'prompt not found' })
+      return p
+    }
     const p = snapshot.get().prompts.find((x) => x.key === req.params.key)
     if (!p) return reply.code(404).send({ error: 'prompt not found' })
     return { key: p.key, description: p.description ?? '', value: p.value ?? '' }

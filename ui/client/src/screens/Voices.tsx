@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { fetchJson } from '../api/client'
 import { useRunState } from '../api/useRunState'
 import { canWrite, writeBlockReason } from '../ui'
+import { VoiceSetsModal } from '../components/VoiceSetsModal'
 import type { Lesson } from '../api/types'
 
 interface Voice {
@@ -21,9 +22,10 @@ const NUM_FIELDS: { key: keyof Voice; label: string; min: number; max: number; s
   { key: 'speed', label: 'speed', min: 0.5, max: 1.5, step: 0.01 },
 ]
 const VFIELDS = ['voice_id', 'voice_name', 'model', 'stability', 'similarity_boost', 'style', 'speed'] as const
-function pick(src: Record<string, unknown>) {
+function pick(src: object) {
+  const r = src as Record<string, unknown>
   const o: Record<string, string> = {}
-  for (const k of VFIELDS) if (src[k] != null && src[k] !== '') o[k] = String(src[k])
+  for (const k of VFIELDS) if (r[k] != null && r[k] !== '') o[k] = String(r[k])
   return o
 }
 
@@ -43,7 +45,7 @@ export function Voices() {
     return m
   }, [lesson])
 
-  if (isLoading) return <div className="p-8 text-sm text-gray-400">Завантаження голосів…</div>
+  if (isLoading) return <div className="p-8 text-sm text-gray-400">Loading voices…</div>
   const writable = canWrite(state)
   const live = state?.mode === 'live'
   const rows = data?.rows ?? []
@@ -53,11 +55,11 @@ export function Voices() {
   return (
     <div className="mx-auto max-w-5xl p-6">
       <div className="flex items-center gap-3">
-        <h1 className="text-xl font-semibold">Голоси</h1>
-        {!writable && <span className="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-700">редагування: {writeBlockReason(state)}</span>}
+        <h1 className="text-xl font-semibold">Voices</h1>
+        {!writable && <span className="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-700">editing: {writeBlockReason(state)}</span>}
       </div>
       <p className="mt-1 max-w-prose text-sm text-gray-500">
-        Параметри ElevenLabs на кожну мову. Встав текст і <b>прослухай голос</b> із поточними (навіть незбереженими) параметрами.{' '}
+        ElevenLabs parameters for each language. Paste text and <b>preview the voice</b> with the current (even unsaved) parameters.{' '}
         <a href="https://elevenlabs.io/app/voice-library" target="_blank" rel="noreferrer" className="text-blue-700 underline">Voice Library <ExternalLink className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /></a>
       </p>
 
@@ -79,69 +81,43 @@ function LibraryPanel({ lib, rows, langs, writable, onChanged, onApplyToLang }: 
   lib?: Library; rows: Voice[]; langs: string[]; writable: boolean
   onChanged: () => void; onApplyToLang: (lang: string, fields: Record<string, string>) => void
 }) {
-  const [msg, setMsg] = useState<string | null>(null)
+  const [setsOpen, setSetsOpen] = useState(false)
   const voices = lib?.voices ?? []
   const sets = lib?.sets ?? []
 
-  async function saveCurrentSet() {
-    const name = window.prompt('Назва набору (поточні збережені голоси):')
-    if (!name) return
-    const body = { name, voices: rows.map((v) => ({ lang: v.lang, ...pick(v as Record<string, unknown>) })) }
-    await fetch('/api/presets/set', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-    onChanged(); setMsg(`Набір «${name}» збережено`)
-  }
-  async function applySet(s: VoiceSet) {
-    if (!writable) { setMsg('запис заблоковано (увімкни записи / не під час рану)'); return }
-    if (!window.confirm(`Застосувати набір «${s.name}» (${s.voices.length} мов) у таблицю голосів?`)) return
-    const body = { voices: s.voices.map((v) => ({ lang: v.lang, fields: pick(v as Record<string, unknown>) })) }
-    const res = await fetch('/api/voices/apply-set', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-    const d = await res.json().catch(() => ({}))
-    setMsg(res.ok && d.ok ? `Набір застосовано (${d.applied} мов)` : `${d.error || res.status}`)
-  }
-  async function del(kind: 'voice' | 'set', id: string) {
-    await fetch(`/api/presets/${kind}/${id}`, { method: 'DELETE' })
+  async function delVoice(id: string) {
+    await fetch(`/api/presets/voice/${id}`, { method: 'DELETE' })
     onChanged()
   }
 
   return (
     <div className="mt-4 rounded-xl border border-gray-200 dark:border-[#29292c] bg-gray-50 dark:bg-[#202023] p-4">
       <div className="flex items-center gap-3">
-        <h2 className="text-sm font-semibold text-gray-800 dark:text-gray-200">Бібліотека голосів</h2>
-        <button onClick={saveCurrentSet} className="rounded border border-gray-300 dark:border-[#3a3a3d] bg-white dark:bg-[#161617] px-2 py-1 text-xs hover:bg-gray-100">Зберегти поточний набір…</button>
-        {msg && <span className="text-xs text-gray-500">{msg}</span>}
+        <h2 className="text-sm font-semibold text-gray-800 dark:text-gray-200">Voice library</h2>
+        <button onClick={() => setSetsOpen(true)}
+          className="rounded border border-gray-300 dark:border-[#3a3a3d] bg-white dark:bg-[#161617] px-2 py-1 text-xs hover:bg-gray-100 dark:hover:bg-[#29292c]">
+          Voice sets by course ({sets.length})
+        </button>
       </div>
 
-      <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2">
-        <div>
-          <div className="mb-1 text-xs font-medium text-gray-500">Окремі голоси ({voices.length})</div>
-          {voices.length === 0 ? <div className="text-xs text-gray-400">порожньо — збережи голос із картки нижче</div> : (
-            <ul className="space-y-1">
-              {voices.map((p) => (
-                <li key={p.id} className="flex items-center gap-2 rounded border border-gray-200 dark:border-[#29292c] bg-white dark:bg-[#161617] px-2 py-1 text-sm">
-                  <span className="flex-1 truncate" title={`${p.voice_name || ''} ${p.voice_id || ''}`}>{p.name}</span>
-                  <LangApply langs={langs} onApply={(lang) => onApplyToLang(lang, pick(p as Record<string, unknown>))} />
-                  <button onClick={() => del('voice', p.id)} className="text-gray-400 hover:text-red-600"><X className="h-4 w-4" strokeWidth={1.75} /></button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-        <div>
-          <div className="mb-1 text-xs font-medium text-gray-500">Набори ({sets.length})</div>
-          {sets.length === 0 ? <div className="text-xs text-gray-400">порожньо — «Зберегти поточний набір»</div> : (
-            <ul className="space-y-1">
-              {sets.map((s) => (
-                <li key={s.id} className="flex items-center gap-2 rounded border border-gray-200 dark:border-[#29292c] bg-white dark:bg-[#161617] px-2 py-1 text-sm">
-                  <span className="flex-1 truncate">{s.name} <span className="text-xs text-gray-400">({s.voices.length} мов)</span></span>
-                  <button onClick={() => applySet(s)} disabled={!writable} title={writable ? '' : 'запис заблоковано'}
-                    className="rounded border border-gray-300 dark:border-[#3a3a3d] px-2 py-0.5 text-xs hover:bg-gray-100 disabled:opacity-40">Застосувати</button>
-                  <button onClick={() => del('set', s.id)} className="text-gray-400 hover:text-red-600"><X className="h-4 w-4" strokeWidth={1.75} /></button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+      <div className="mt-3">
+        <div className="mb-1 text-xs font-medium text-gray-500">Individual voices ({voices.length})</div>
+        {voices.length === 0 ? <div className="text-xs text-gray-400">empty — save a voice from a card below</div> : (
+          <ul className="grid grid-cols-1 gap-1 md:grid-cols-2">
+            {voices.map((p) => (
+              <li key={p.id} className="flex items-center gap-2 rounded border border-gray-200 dark:border-[#29292c] bg-white dark:bg-[#161617] px-2 py-1 text-sm">
+                <span className="flex-1 truncate" title={`${p.voice_name || ''} ${p.voice_id || ''}`}>{p.name}</span>
+                <LangApply langs={langs} onApply={(lang) => onApplyToLang(lang, pick(p))} />
+                <button onClick={() => delVoice(p.id)} className="text-gray-400 hover:text-red-600"><X className="h-4 w-4" strokeWidth={1.75} /></button>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
+
+      {setsOpen && (
+        <VoiceSetsModal sets={sets} rows={rows} writable={writable} onChanged={onChanged} onClose={() => setSetsOpen(false)} />
+      )}
     </div>
   )
 }
@@ -175,7 +151,7 @@ function VoiceCard({ voice, writable, live, sample, apply, onSaved, onLibraryCha
 
   useEffect(() => () => { if (urlRef.current) URL.revokeObjectURL(urlRef.current) }, [])
   // apply a library preset into this card's form
-  useEffect(() => { if (apply) { setForm((f) => ({ ...f, ...apply.fields })); setSaveErr(false); setSaveMsg('з бібліотеки (натисни Зберегти)') } }, [apply?.n]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (apply) { setForm((f) => ({ ...f, ...apply.fields })); setSaveErr(false); setSaveMsg('from library (click Save)') } }, [apply?.n]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const changed = (Object.keys(voice) as (keyof Voice)[]).some((k) => (form[k] ?? '') !== (voice[k] ?? '')) ||
     VFIELDS.some((k) => (form[k] ?? '') !== (voice[k] ?? ''))
@@ -191,21 +167,21 @@ function VoiceCard({ voice, writable, live, sample, apply, onSaved, onLibraryCha
       const d = await res.json().catch(() => ({}))
       const ok = res.ok && d.ok
       setSaveErr(!ok)
-      setSaveMsg(ok ? 'Збережено' : `${d.error || res.status}`)
+      setSaveMsg(ok ? 'Saved' : `${d.error || res.status}`)
       if (ok) onSaved()
     } catch (e) { setSaveErr(true); setSaveMsg(`${e}`) } finally { setBusy(false) }
   }
 
   async function saveToLibrary() {
-    const name = window.prompt(`Назва пресета для голосу ${voice.lang}:`, form.voice_name || voice.lang)
+    const name = window.prompt(`Preset name for voice ${voice.lang}:`, form.voice_name || voice.lang)
     if (!name) return
-    await fetch('/api/presets/voice', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, ...pick(form as Record<string, unknown>) }) })
-    onLibraryChanged(); setSaveErr(false); setSaveMsg(`«${name}» у бібліотеці`)
+    await fetch('/api/presets/voice', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, ...pick(form) }) })
+    onLibraryChanged(); setSaveErr(false); setSaveMsg(`"${name}" added to library`)
   }
 
   async function play() {
-    if (!text.trim()) { setTestMsg('встав текст'); return }
-    setBusy(true); setTestMsg('синтезую…')
+    if (!text.trim()) { setTestMsg('paste text'); return }
+    setBusy(true); setTestMsg('synthesizing…')
     try {
       const res = await fetch('/api/voices/test', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -224,8 +200,8 @@ function VoiceCard({ voice, writable, live, sample, apply, onSaved, onLibraryCha
     <div className="rounded-xl border border-gray-200 dark:border-[#29292c] bg-white dark:bg-[#161617] p-3">
       <div className="mb-2 flex items-center gap-2">
         <span className="font-mono text-sm font-semibold">{voice.lang}</span>
-        {changed && writable && <button onClick={save} disabled={busy} className="rounded bg-gray-900 px-2 py-1 text-xs text-white hover:bg-gray-700 disabled:opacity-50">Зберегти</button>}
-        <button onClick={saveToLibrary} className="inline-flex items-center gap-1 rounded border border-gray-300 dark:border-[#3a3a3d] px-2 py-1 text-xs hover:bg-gray-100 dark:hover:bg-[#202023]" title="Зберегти ці параметри у бібліотеку"><Save className="h-3.5 w-3.5" strokeWidth={1.75} /> У бібліотеку</button>
+        {changed && writable && <button onClick={save} disabled={busy} className="rounded bg-gray-900 px-2 py-1 text-xs text-white hover:bg-gray-700 disabled:opacity-50">Save</button>}
+        <button onClick={saveToLibrary} className="inline-flex items-center gap-1 rounded border border-gray-300 dark:border-[#3a3a3d] px-2 py-1 text-xs hover:bg-gray-100 dark:hover:bg-[#202023]" title="Save these parameters to the library"><Save className="h-3.5 w-3.5" strokeWidth={1.75} /> To library</button>
         {saveMsg && <span className={`text-xs ${saveErr ? 'text-red-700' : 'text-gray-500'}`}>{saveMsg}</span>}
       </div>
 
@@ -255,20 +231,20 @@ function VoiceCard({ voice, writable, live, sample, apply, onSaved, onLibraryCha
         ))}
       </div>
 
-      {voiceIdChanged && <div className="mt-2 rounded bg-amber-50 px-2 py-1 text-[11px] text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">Увага: змінив голос — після наступного уроку перекалібруй CPS ({voice.lang}).</div>}
+      {voiceIdChanged && <div className="mt-2 rounded bg-amber-50 px-2 py-1 text-[11px] text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">Note: voice changed — recalibrate CPS after the next lesson ({voice.lang}).</div>}
 
       {/* listen panel — collapsed by default to keep the card short */}
       <button onClick={() => setShowListen((s) => !s)}
         className="mt-2 flex w-full items-center gap-1 text-[11px] font-medium text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
-        {showListen ? <ChevronDown className="h-4 w-4 shrink-0" strokeWidth={1.75} /> : <ChevronRight className="h-4 w-4 shrink-0" strokeWidth={1.75} />} Прослухати голос
+        {showListen ? <ChevronDown className="h-4 w-4 shrink-0" strokeWidth={1.75} /> : <ChevronRight className="h-4 w-4 shrink-0" strokeWidth={1.75} />} Preview voice
       </button>
       {showListen && (
         <div className="mt-1.5 rounded-lg bg-gray-50 dark:bg-[#202023] p-2">
-          {sample && <button onClick={() => setText(sample)} className="mb-1 text-[11px] text-blue-700 underline">приклад з уроку</button>}
-          <textarea value={text} onChange={(e) => setText(e.target.value)} rows={2} placeholder={`Встав текст мовою ${voice.lang}…`} className="w-full resize-y rounded border border-gray-300 dark:border-[#3a3a3d] px-2 py-1 text-sm" />
+          {sample && <button onClick={() => setText(sample)} className="mb-1 text-[11px] text-blue-700 underline">example from lesson</button>}
+          <textarea value={text} onChange={(e) => setText(e.target.value)} rows={2} placeholder={`Paste text in ${voice.lang}…`} className="w-full resize-y rounded border border-gray-300 dark:border-[#3a3a3d] px-2 py-1 text-sm" />
           <div className="mt-1 flex items-center gap-2">
-            <button onClick={play} disabled={busy || !live} title={live ? '' : 'лише live-режим'} className="inline-flex items-center gap-1 rounded-md bg-gray-900 px-3 py-1 text-sm text-white hover:bg-gray-700 disabled:opacity-40"><Play className="h-3.5 w-3.5" strokeWidth={1.75} /> Прослухати</button>
-            <span className="text-[11px] text-gray-400">{tests > 0 ? `тестів: ${tests}` : 'PCM 44.1k, як у пайплайні'}</span>
+            <button onClick={play} disabled={busy || !live} title={live ? '' : 'live mode only'} className="inline-flex items-center gap-1 rounded-md bg-gray-900 px-3 py-1 text-sm text-white hover:bg-gray-700 disabled:opacity-40"><Play className="h-3.5 w-3.5" strokeWidth={1.75} /> Preview</button>
+            <span className="text-[11px] text-gray-400">{tests > 0 ? `tests: ${tests}` : 'PCM 44.1k, same as the pipeline'}</span>
             {testMsg && <span className="text-xs text-red-700">{testMsg}</span>}
           </div>
           <audio ref={audioRef} className="mt-2 w-full" controls />

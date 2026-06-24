@@ -67,7 +67,14 @@ function reducer(s: State, a: Action): State {
  * re-seeding so a refetch never clobbers an in-flight edit; history is cleared
  * only on a structural change (merge/split renumber).
  */
-export function useTimelineModel(segments: RawSegment[], onRetimed: () => void) {
+type PersistFn = (id: string, startSec: number, endSec: number) => Promise<{ ok: boolean; enStart?: number; enEnd?: number; error?: string }>
+
+/**
+ * @param persist How a committed time is written to the server. Defaults to the
+ *   per-segment EN-slot retime (transcript gate); the audio gate passes a
+ *   per-language slot retime so each language moves independently.
+ */
+export function useTimelineModel(segments: RawSegment[], onRetimed: () => void, persist?: PersistFn) {
   const tsegs = useMemo(() => toTSegments(segments), [segments])
 
   const [state, dispatch] = useReducer(reducer, undefined, () => ({
@@ -98,18 +105,21 @@ export function useTimelineModel(segments: RawSegment[], onRetimed: () => void) 
   }, [])
 
   // Round-trip a time to the server; adopt server's (possibly re-clamped) value.
+  const persistRef = useRef(persist)
+  persistRef.current = persist
   const persistServer = useCallback(async (id: string, next: Times, patchHistory: boolean): Promise<boolean> => {
     setPending((p) => ({ ...p, [id]: true }))
     try {
-      const r = await retimeSegment(id, ms(next.start), ms(next.end))
-      if (!r.ok) { setError(r.error || 'не вдалося змінити тайминг'); return false }
+      const doPersist = persistRef.current ?? ((segId: string, s: number, e: number) => retimeSegment(segId, s, e))
+      const r = await doPersist(id, ms(next.start), ms(next.end))
+      if (!r.ok) { setError(r.error || 'Failed to change timing'); return false }
       if (r.enStart != null && r.enEnd != null) {
         dispatch({ t: 'adopt', id, times: { start: r.enStart, end: r.enEnd }, patch: patchHistory })
       }
       return true
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      setError(msg.includes('409') ? 'ретайм недоступний у live-режимі' : 'помилка ретайму')
+      setError(msg.includes('409') ? 'Retime is unavailable in live mode' : 'Retime error')
       return false
     } finally {
       setPending((p) => { const n = { ...p }; delete n[id]; return n })

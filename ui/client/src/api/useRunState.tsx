@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import type { RunState } from './types'
 
@@ -17,9 +17,13 @@ interface RunCtx {
   state: RunState | null
   connected: boolean
   regen: RegenStatus
+  // Proactively pull the current run state + refetch all data — used right after a
+  // project switch so the UI follows the active project even if the SSE stream is
+  // momentarily stale (e.g. just after a server restart).
+  refresh: () => void
 }
 
-const Ctx = createContext<RunCtx>({ state: null, connected: false, regen: { active: false } })
+const Ctx = createContext<RunCtx>({ state: null, connected: false, regen: { active: false }, refresh: () => {} })
 
 /**
  * Single EventSource to /api/events. Holds the latest run state and invalidates
@@ -47,10 +51,16 @@ export function RunStateProvider({ children }: { children: ReactNode }) {
       es.addEventListener('state', (e) => {
         try {
           setState(JSON.parse((e as MessageEvent).data))
-          // staged transitions reveal segments/translations without a row_key
-          // change, so refresh those gate data sources on every state push.
+          // A state push fires on staged transitions AND when the active project
+          // switches (open/create → snapshot.onActiveChange resets the diff cache,
+          // so `rows_changed` won't fire). Refresh ALL run-scoped data so the whole
+          // UI follows the active project, not just the gate data sources.
+          qc.invalidateQueries({ queryKey: ['lesson'] })
+          qc.invalidateQueries({ queryKey: ['localizations'] })
           qc.invalidateQueries({ queryKey: ['segments'] })
           qc.invalidateQueries({ queryKey: ['translations'] })
+          qc.invalidateQueries({ queryKey: ['projects'] })
+          qc.invalidateQueries({ queryKey: ['tuning'] }) // refresh Tuning metrics on state change (incl. COMPLETE)
         } catch { /* ignore */ }
       })
       es.addEventListener('regen', (e) => {
@@ -70,7 +80,12 @@ export function RunStateProvider({ children }: { children: ReactNode }) {
     return () => { closed = true; esRef.current?.close() }
   }, [qc])
 
-  return <Ctx.Provider value={{ state, connected, regen }}>{children}</Ctx.Provider>
+  const refresh = useCallback(() => {
+    fetch('/api/state').then((r) => r.json()).then((d) => { if (d) setState(d) }).catch(() => {})
+    qc.invalidateQueries() // refetch every run-scoped query for the (possibly new) active project
+  }, [qc])
+
+  return <Ctx.Provider value={{ state, connected, regen, refresh }}>{children}</Ctx.Provider>
 }
 
 export function useRunState() {

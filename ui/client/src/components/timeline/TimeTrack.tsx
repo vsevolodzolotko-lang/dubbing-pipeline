@@ -1,6 +1,6 @@
 import type { ReactNode, RefObject } from 'react'
 import { LANE_H, RULER_H } from './lib/constants'
-import { RulerCanvas } from './RulerCanvas'
+import { WindowedRuler } from './WindowedRuler'
 import { WaveformCanvas } from './WaveformCanvas'
 import { Playhead } from './Playhead'
 import { useScrub } from './model/useScrub'
@@ -36,7 +36,7 @@ export function TimeTrack({
       <div className="relative" style={{ width: contentWidth }}>
         <div style={{ height: RULER_H }} onPointerDown={scrub}
           className="cursor-pointer border-b border-gray-200 dark:border-[#29292c]">
-          <RulerCanvas pxPerSecond={pxPerSecond} durationSec={durationSec} contentWidth={contentWidth} />
+          <WindowedRuler scrollerRef={scrollerRef} pxPerSecond={pxPerSecond} durationSec={durationSec} />
         </div>
         <div className="relative" style={{ height: LANE_H }}>
           <WaveformCanvas peaks={peaks} contentWidth={contentWidth} pxPerSecond={pxPerSecond} />

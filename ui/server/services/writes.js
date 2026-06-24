@@ -140,10 +140,46 @@ export async function retimeSegment(sheets, segmentId, enStart, enEnd) {
   throw new Error(`ретайм сегмента ${LIVE_TODO}`)
 }
 
+/** Retime ONE language's dub slot independently (audio stage). EN slot untouched;
+ *  the render stage rebuilds that language's VTT/full file from the new slot. */
+export async function retimeLocalization(sheets, rowKey, enStart, enEnd) {
+  if (config.mode === 'mock') return mockStore.retimeLocalization(rowKey, enStart, enEnd)
+  throw new Error(`пер-мовний ретайм ${LIVE_TODO}`)
+}
+
 /** Loudness-normalize dub segments to a target LUFS (audio stage). */
 export async function normalizeSegments(sheets, rowKeys, targetLufs) {
   if (config.mode === 'mock') return mockStore.normalizeSegments(rowKeys, targetLufs)
   throw new Error(`нормалізація гучності ${LIVE_TODO}`)
+}
+
+/** Set ONE language's dub fade in/out envelope (audio stage). EN slot untouched;
+ *  the render stage bakes the envelope into that language's full file. */
+export async function setLocalizationFades(sheets, rowKey, fadeIn, fadeOut) {
+  if (config.mode === 'mock') return mockStore.setLocalizationFades(rowKey, fadeIn, fadeOut)
+  throw new Error(`фейди дубляжу ${LIVE_TODO}`)
+}
+
+// ── audio-timeline clips (per-language, independent pieces; audio stage) ──────
+/** Cut one dub clip into two pieces at a timeline time (this lang only). */
+export async function cutClip(sheets, clipId, atSec) {
+  if (config.mode === 'mock') return mockStore.cutClip(clipId, atSec)
+  throw new Error(`розріз аудіо-кліпу ${LIVE_TODO}`)
+}
+/** Move/trim one dub clip on the timeline. */
+export async function retimeClip(sheets, clipId, start, end) {
+  if (config.mode === 'mock') return mockStore.retimeClip(clipId, start, end)
+  throw new Error(`переміщення кліпу ${LIVE_TODO}`)
+}
+/** Fade in/out envelope on one dub clip. */
+export async function setClipFades(sheets, clipId, fadeIn, fadeOut) {
+  if (config.mode === 'mock') return mockStore.setClipFades(clipId, fadeIn, fadeOut)
+  throw new Error(`фейди кліпу ${LIVE_TODO}`)
+}
+/** Delete one dub clip (its audio piece). */
+export async function deleteClip(sheets, clipId) {
+  if (config.mode === 'mock') return mockStore.deleteClip(clipId)
+  throw new Error(`видалення кліпу ${LIVE_TODO}`)
 }
 
 /** Split a segment at a word boundary (transcript stage only). */

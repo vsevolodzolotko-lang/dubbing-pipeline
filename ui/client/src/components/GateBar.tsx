@@ -47,11 +47,11 @@ export function GateBar({ gate, title, summary, warnings = [], primaryLabel }: P
     setBusy(true); setErr(null)
     try {
       const res = await approveGate(gate)
-      if (!res.ok) { setErr(res.error || 'не вдалося'); return }
+      if (!res.ok) { setErr(res.error || 'failed'); return }
       setOpen(false)
       nav(NEXT_ROUTE[gate]) // jump to the next stage's screen
     } catch (e) {
-      setErr(e instanceof Error ? e.message : 'помилка')
+      setErr(e instanceof Error ? e.message : 'error')
     } finally {
       setBusy(false)
     }
@@ -66,13 +66,13 @@ export function GateBar({ gate, title, summary, warnings = [], primaryLabel }: P
         </div>
         <div className="ml-auto flex items-center gap-3">
           {warnings.length > 0 && (
-            <span className="text-xs text-amber-700 dark:text-amber-400"><AlertTriangle className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> {warnings.length} невирішених зауваг</span>
+            <span className="text-xs text-amber-700 dark:text-amber-400"><AlertTriangle className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> {warnings.length} unresolved notes</span>
           )}
           <button
             onClick={() => { setErr(null); setOpen(true) }}
             disabled={!enabled}
             className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:cursor-not-allowed disabled:bg-gray-300 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white dark:disabled:bg-[#3a3a3d] dark:disabled:text-gray-400"
-            title={enabled ? '' : (writeBlockReason(state) || 'недоступно на цьому етапі')}
+            title={enabled ? '' : (writeBlockReason(state) || 'unavailable at this stage')}
           >
             {warnings.length > 0
               ? <AlertTriangle className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} />
@@ -81,7 +81,7 @@ export function GateBar({ gate, title, summary, warnings = [], primaryLabel }: P
         </div>
       </div>
       {!enabled && !atGate && (
-        <div className="mt-1 text-xs text-gray-400">Доступно, коли пайплайн зупиниться на цих воротах.</div>
+        <div className="mt-1 text-xs text-gray-400">Available when the pipeline pauses at this gate.</div>
       )}
 
       {open && (
@@ -91,21 +91,21 @@ export function GateBar({ gate, title, summary, warnings = [], primaryLabel }: P
             {summary && <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">{summary}</p>}
             {warnings.length > 0 && (
               <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/50 dark:text-amber-200">
-                <div className="font-medium">Є невирішені зауваги AI ({warnings.length}):</div>
+                <div className="font-medium">Unresolved AI notes ({warnings.length}):</div>
                 <ul className="mt-1 list-disc pl-5 text-xs">
                   {warnings.slice(0, 6).map((w, i) => <li key={i}>{w}</li>)}
-                  {warnings.length > 6 && <li>…ще {warnings.length - 6}</li>}
+                  {warnings.length > 6 && <li>...{warnings.length - 6} more</li>}
                 </ul>
-                <div className="mt-2 text-xs">Можна затвердити попри них — рішення за тобою.</div>
+                <div className="mt-2 text-xs">You can approve despite them — the decision is yours.</div>
               </div>
             )}
             {err && <div className="mt-3 rounded-md bg-red-50 p-2 text-sm text-red-700 dark:bg-red-950/50 dark:text-red-300">{err}</div>}
             <div className="mt-4 flex justify-end gap-2">
               <button onClick={() => setOpen(false)} disabled={busy} className="rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 dark:border-[#3a3a3d] dark:hover:bg-[#202023]">
-                Скасувати
+                Cancel
               </button>
               <button onClick={confirm} disabled={busy} className="rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-700 disabled:bg-gray-300 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white">
-                {busy ? 'Запускаю…' : warnings.length > 0 ? 'Затвердити попри попередження' : 'Підтвердити'}
+                {busy ? 'Running...' : warnings.length > 0 ? 'Approve despite warnings' : 'Confirm'}
               </button>
             </div>
           </div>

@@ -42,6 +42,36 @@ export const retimeSegment = (segmentId: string, enStart: number, enEnd: number)
   postJson<{ ok: boolean; enStart?: number; enEnd?: number; durationSec?: number; error?: string }>(
     '/api/segments/retime', { segmentId, enStart, enEnd })
 
+// Per-language dub retime (audio gate) — nudges one localization's slot only.
+export const retimeLocalization = (rowKey: string, enStart: number, enEnd: number) =>
+  postJson<{ ok: boolean; enStart?: number; enEnd?: number; error?: string }>(
+    '/api/localizations/retime', { rowKey, enStart, enEnd })
+
+// Per-language dub fade in/out envelope (audio gate). Seconds at the clip start/end;
+// the render stage bakes the envelope into that language's full file.
+export const setFades = (rowKey: string, fadeIn: number, fadeOut: number) =>
+  postJson<{ ok: boolean; rowKey?: string; fadeIn?: number; fadeOut?: number; error?: string }>(
+    '/api/localizations/fade', { rowKey, fadeIn, fadeOut })
+
+// ── audio-timeline clips (per-language, independent pieces; audio gate) ───────
+// Cut one dub clip at a timeline time (seconds) → two pieces (this lang only).
+export const cutClip = (clipId: string, atSec: number) =>
+  postJson<{ ok: boolean; clipId?: string; error?: string }>('/api/clips/cut', { clipId, atSec })
+
+// Move/trim one dub clip (returns the accepted, clamped position).
+export const retimeClip = (clipId: string, start: number, end: number) =>
+  postJson<{ ok: boolean; clipId?: string; enStart?: number; enEnd?: number; error?: string }>(
+    '/api/clips/retime', { clipId, start, end })
+
+// Fade in/out envelope on one dub clip.
+export const setClipFades = (clipId: string, fadeIn: number, fadeOut: number) =>
+  postJson<{ ok: boolean; clipId?: string; fadeIn?: number; fadeOut?: number; error?: string }>(
+    '/api/clips/fade', { clipId, fadeIn, fadeOut })
+
+// Delete one dub clip (its audio piece).
+export const deleteClip = (clipId: string) =>
+  postJson<{ ok: boolean; clipId?: string; error?: string }>('/api/clips/delete', { clipId })
+
 export const fetchWords = (segmentId: string) =>
   fetchJson<{ segmentId: string; words: Word[] }>(`/api/segments/${segmentId}/words`)
 

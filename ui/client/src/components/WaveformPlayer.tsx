@@ -68,7 +68,7 @@ function drawWave(cv: HTMLCanvasElement | null, peaks: Peaks | null, widthFrac: 
  * the localized audio sits relative to the original (lead silence, overshoot/borrow).
  */
 export const WaveformPlayer = forwardRef<PlayerHandle, Props>(function WaveformPlayer(
-  { audioUrl, peaksUrl, enUrl, enPeaksUrl, videoStartSec, autoPlay, mainLabel = 'дубляж' }, ref,
+  { audioUrl, peaksUrl, enUrl, enPeaksUrl, videoStartSec, autoPlay, mainLabel = 'localization' }, ref,
 ) {
   const { videoUrl } = useRunMedia()
   const dubRef = useRef<HTMLAudioElement>(null)
@@ -183,32 +183,32 @@ export const WaveformPlayer = forwardRef<PlayerHandle, Props>(function WaveformP
     <div className="rounded-md border border-gray-200 p-2 dark:border-[#3a3a3d]">
       {dual && videoUrl && (
         <div className="mb-1">
-          <div className="mb-0.5 text-[11px] text-gray-400">відео-референс (грає синхронно з оригіналом)</div>
+          <div className="mb-0.5 text-[11px] text-gray-400">reference video (plays in sync with the original)</div>
           <video ref={vidRef} src={videoUrl} muted playsInline controls className="max-h-40 w-full rounded bg-black" />
         </div>
       )}
       {dual && (
         <div className="mb-1">
           <div className="mb-0.5 flex items-center justify-between text-[11px] text-gray-400">
-            <span>оригінал (EN)</span>
-            <span>{enPeaks ? `${enPeaks.durationSec.toFixed(1)}с` : '…'}</span>
+            <span>original (EN)</span>
+            <span>{enPeaks ? `${enPeaks.durationSec.toFixed(1)}s` : '…'}</span>
           </div>
           <canvas ref={enCanvasRef} onClick={(e) => seekAt('en', e)} className="h-10 w-full cursor-pointer rounded bg-gray-50 dark:bg-[#202023]" />
         </div>
       )}
-      {dual && <div className="mb-0.5 text-[11px] text-gray-400">локалізація{enPeaks && peaks && peaks.durationSec > enPeaks.durationSec ? ' · виходить за слот' : ''}</div>}
+      {dual && <div className="mb-0.5 text-[11px] text-gray-400">localization{enPeaks && peaks && peaks.durationSec > enPeaks.durationSec ? ' · exceeds slot' : ''}</div>}
       <canvas ref={canvasRef} onClick={(e) => seekAt('dub', e)} className="h-16 w-full cursor-pointer rounded bg-gray-50 dark:bg-[#202023]" />
       <div className="mt-2 flex items-center gap-2">
         <button onClick={toggle} className="rounded bg-gray-900 px-3 py-1 text-sm text-white hover:bg-gray-700 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white">
           {playing ? <Pause className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> : <Play className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} />} <span className="ml-1">{mainLabel}</span>
         </button>
         {enUrl && (
-          <button onClick={playEn} className="rounded border border-gray-300 px-3 py-1 text-sm hover:bg-gray-100 dark:border-gray-600 dark:hover:bg-[#202023]" title="клавіша E">
-            {enPlaying ? <Pause className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> : <Play className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} />} оригінал
+          <button onClick={playEn} className="rounded border border-gray-300 px-3 py-1 text-sm hover:bg-gray-100 dark:border-gray-600 dark:hover:bg-[#202023]" title="E key">
+            {enPlaying ? <Pause className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> : <Play className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} />} original
           </button>
         )}
-        {dual && <span className="text-[10px] text-amber-600 dark:text-amber-500">межа слота</span>}
-        <span className="ml-auto text-xs text-gray-400">{peaks ? `${peaks.durationSec.toFixed(1)}с` : '…'}</span>
+        {dual && <span className="text-[10px] text-amber-600 dark:text-amber-500">slot boundary</span>}
+        <span className="ml-auto text-xs text-gray-400">{peaks ? `${peaks.durationSec.toFixed(1)}s` : '…'}</span>
       </div>
       <audio ref={dubRef} src={audioUrl} preload="metadata" />
       {enUrl && <audio ref={enRef} src={enUrl} preload="metadata" />}

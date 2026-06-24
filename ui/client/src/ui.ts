@@ -2,24 +2,24 @@ import type { RunStateName } from './api/types'
 
 // Human Ukrainian copy + color for each run state (status language §3).
 export const STATE_COPY: Record<RunStateName, { label: string; tone: Tone }> = {
-  SETUP_REQUIRED: { label: 'Потрібне налаштування', tone: 'gray' },
-  UNKNOWN: { label: 'Стан невідомий', tone: 'gray' },
-  IDLE: { label: 'Готово до нового уроку', tone: 'green' },
-  STARTING: { label: 'Запуск…', tone: 'blue' },
-  ARCHIVING: { label: 'Архівую попередній урок…', tone: 'blue' },
-  STT: { label: 'Розпізнаю мовлення…', tone: 'blue' },
-  TRANSCRIPT_REVIEW: { label: 'Перевір транскрипцію, далі підтверди', tone: 'amber' },
-  TRANSLATING: { label: 'Перекладаю…', tone: 'blue' },
-  TRANSLATION_REVIEW: { label: 'Перевір переклади, далі підтверди', tone: 'amber' },
-  SYNTHESIZING: { label: 'Синтезую аудіо…', tone: 'blue' },
-  AUDIO_REVIEW: { label: 'Перевір аудіо, далі склейка', tone: 'amber' },
-  RENDER_REVIEW: { label: 'Склейка — обери, куди зберегти', tone: 'amber' },
-  RENDERING: { label: 'Збираю повний файл…', tone: 'blue' },
-  COMPLETE: { label: 'Дубляж готовий', tone: 'green' },
-  STOPPING: { label: 'Зупинку прийнято — чекаю межі мови…', tone: 'amber' },
-  STOPPED: { label: 'Зупинено — можна класти новий файл', tone: 'green' },
-  REGENERATING: { label: 'Перегенерація триває…', tone: 'blue' },
-  STALLED: { label: 'Немає прогресу — можливо, ран впав', tone: 'red' },
+  SETUP_REQUIRED: { label: 'Setup required', tone: 'gray' },
+  UNKNOWN: { label: 'Status unknown', tone: 'gray' },
+  IDLE: { label: 'Ready for a new lesson', tone: 'green' },
+  STARTING: { label: 'Starting…', tone: 'blue' },
+  ARCHIVING: { label: 'Archiving the previous lesson…', tone: 'blue' },
+  STT: { label: 'Recognizing speech…', tone: 'blue' },
+  TRANSCRIPT_REVIEW: { label: 'Review the transcript, then approve', tone: 'amber' },
+  TRANSLATING: { label: 'Translating…', tone: 'blue' },
+  TRANSLATION_REVIEW: { label: 'Review the translations, then approve', tone: 'amber' },
+  SYNTHESIZING: { label: 'Synthesizing audio…', tone: 'blue' },
+  AUDIO_REVIEW: { label: 'Review the audio, then export', tone: 'amber' },
+  RENDER_REVIEW: { label: 'Export — assemble and download', tone: 'amber' },
+  RENDERING: { label: 'Building the full file…', tone: 'blue' },
+  COMPLETE: { label: 'Localization ready', tone: 'green' },
+  STOPPING: { label: 'Stop accepted — waiting for a speech boundary…', tone: 'amber' },
+  STOPPED: { label: 'Stopped — you can drop in a new file', tone: 'green' },
+  REGENERATING: { label: 'Regeneration in progress…', tone: 'blue' },
+  STALLED: { label: 'No progress — the run may have crashed', tone: 'red' },
 }
 
 export type Tone = 'gray' | 'green' | 'blue' | 'amber' | 'red'
@@ -51,7 +51,8 @@ type StateLike = { enableWrites?: boolean; readOnly?: boolean; state?: string } 
 // Per-gate write scopes (mirror the server's *_WRITE_STATES sets).
 const LOCALIZATION_WRITE_STATES = ['IDLE', 'COMPLETE', 'STOPPED', 'AUDIO_REVIEW']
 const TRANSCRIPT_WRITE_STATES = ['TRANSCRIPT_REVIEW']
-const TRANSLATION_WRITE_STATES = ['TRANSLATION_REVIEW']
+// Translation gate + audio review (fixing a flagged translation there feeds regen).
+const TRANSLATION_WRITE_STATES = ['TRANSLATION_REVIEW', 'AUDIO_REVIEW']
 
 function can(state: StateLike, ok: string[]): boolean {
   return Boolean(state?.enableWrites) && ok.includes(state?.state ?? '')
@@ -71,9 +72,9 @@ export function canWriteTranslations(state: StateLike): boolean {
 }
 
 export function writeBlockReason(state: StateLike): string {
-  if (!state) return 'немає стану'
-  if (!state.enableWrites) return 'записи вимкнені (ENABLE_WRITES + повторний вхід з правом запису)'
-  return 'заблоковано на цьому етапі'
+  if (!state) return 'no state'
+  if (!state.enableWrites) return 'writes disabled (ENABLE_WRITES + re-enter with write access)'
+  return 'blocked at this stage'
 }
 
 // ── staged pipeline: 3 review gates ─────────────────────────────────────────
@@ -81,10 +82,10 @@ export type StageKey = 'transcript' | 'translation' | 'audio' | 'render'
 export interface StageInfo { key: StageKey; index: number; phase: 'running' | 'gate' }
 
 export const STAGES: { key: StageKey; label: string; route: string }[] = [
-  { key: 'transcript', label: 'Транскрипт', route: '/transcript' },
-  { key: 'translation', label: 'Переклад', route: '/translation' },
-  { key: 'audio', label: 'Аудіо', route: '/review' },
-  { key: 'render', label: 'Склейка', route: '/render' },
+  { key: 'transcript', label: 'Transcript', route: '/transcript' },
+  { key: 'translation', label: 'Translation', route: '/translation' },
+  { key: 'audio', label: 'Audio', route: '/review' },
+  { key: 'render', label: 'Export', route: '/render' },
 ]
 
 /** Map a run state to its staged gate + whether the pipeline is mid-run

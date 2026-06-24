@@ -1,17 +1,20 @@
 import { config, writesEnabled } from '../config.js'
 import {
-  RUN_STATES, EDITABLE_CONFIG_KEYS, PIPELINE_STAGES,
+  EDITABLE_CONFIG_KEYS, PIPELINE_STAGES, START_STATES,
   LOCALIZATION_WRITE_STATES, TRANSCRIPT_WRITE_STATES, TRANSLATION_WRITE_STATES,
   TRANSCRIPT_WRITABLE_COLS, TRANSLATION_WRITABLE_COLS, RENDER_STATES, RETIME_WRITE_STATES,
 } from '../constants.js'
 import {
   withWriteLock, writeLocalizationCells, writeConfigCell, writeVoiceCells,
-  writeSegmentCells, mergeSegments, splitSegment, retimeSegment, normalizeSegments, approveStage, startStagedRun, applyArchiveSettings, startRender,
+  writeSegmentCells, mergeSegments, splitSegment, retimeSegment, retimeLocalization, normalizeSegments, setLocalizationFades,
+  cutClip, retimeClip, setClipFades, deleteClip, approveStage, startStagedRun, applyArchiveSettings, startRender,
 } from '../services/writes.js'
 import { wrapWav } from '../services/mockAudio.js'
 import { regenTracker } from '../services/regenTracker.js'
 import * as mockStore from '../services/mockStore.js'
 import { archive } from '../services/archive.js'
+import { qualityStore } from '../services/qualityStore.js'
+import { buildRunQualityReport } from '../services/qualityReport.js'
 
 const numOr = (v, d) => (v === '' || v == null || isNaN(Number(v)) ? d : Number(v))
 
@@ -22,9 +25,6 @@ const APPROVE_GATES = {
   translations: { stage: PIPELINE_STAGES.TRANSLATE, states: TRANSLATION_WRITE_STATES },
   audio: { stage: PIPELINE_STAGES.SYNTH, states: LOCALIZATION_WRITE_STATES },
 }
-
-// States from which a new staged run may be started (nothing in flight).
-const START_STATES = new Set([RUN_STATES.IDLE, RUN_STATES.COMPLETE, RUN_STATES.STOPPED])
 
 // API keys we can cheaply validate with a GET. Value read server-side only.
 const KEY_CHECKS = {
@@ -145,6 +145,18 @@ export function registerActionRoutes(fastify, { snapshot, sheets }) {
       if (e.code === 'CONFLICT') return reply.code(409).send({ error: e.message })
       return reply.code(502).send({ error: e.message })
     }
+  })
+
+  // Edit a pipeline prompt template (mock: per-project override; live: Етап P → prompts-таб).
+  fastify.post('/api/prompts/:key', async (req, reply) => {
+    if (!writesEnabled) return reply.code(403).send({ error: 'Записи вимкнені (ENABLE_WRITES=false)' })
+    if (config.mode !== 'mock') return reply.code(409).send({ error: 'Збереження промптів у live — Етап P (prompts-таб)' })
+    const value = req.body?.value
+    if (typeof value !== 'string') return reply.code(400).send({ error: 'value має бути рядком' })
+    const res = mockStore.setPrompt(req.params.key, value)
+    if (!res.ok) return reply.code(400).send(res)
+    snapshot.refresh()
+    return { ok: true }
   })
 
   // Validate an API key with a minimal GET (read-only — no enableWrites needed).
@@ -323,7 +335,8 @@ export function registerActionRoutes(fastify, { snapshot, sheets }) {
     } catch (e) { return reply.code(400).send({ error: e.message }) }
   })
 
-  // Split a segment at a word boundary (transcript review only).
+  // Split a segment at a word boundary (transcript review only; audio-stage cutting
+  // is per-language and lives on /api/clips/cut, not here).
   fastify.post('/api/segments/split', async (req, reply) => {
     if (!guard(reply, TRANSCRIPT_WRITE_STATES)) return
     const segmentId = String(req.body?.segmentId || '').trim()
@@ -345,6 +358,94 @@ export function registerActionRoutes(fastify, { snapshot, sheets }) {
     if (!segmentId || !isFinite(enStart) || !isFinite(enEnd)) return reply.code(400).send({ error: 'потрібні segmentId, enStart, enEnd' })
     try {
       const res = await withWriteLock(() => retimeSegment(sheets, segmentId, enStart, enEnd))
+      if (!res.ok) return reply.code(409).send(res)
+      snapshot.refresh()
+      return res
+    } catch (e) { return reply.code(400).send({ error: e.message }) }
+  })
+
+  // Per-language dub retime (audio gate): nudge one localization's slot only.
+  fastify.post('/api/localizations/retime', async (req, reply) => {
+    if (!guard(reply, RETIME_WRITE_STATES)) return
+    const rowKey = String(req.body?.rowKey || '').trim()
+    const enStart = Number(req.body?.enStart)
+    const enEnd = Number(req.body?.enEnd)
+    if (!rowKey || !isFinite(enStart) || !isFinite(enEnd)) return reply.code(400).send({ error: 'потрібні rowKey, enStart, enEnd' })
+    try {
+      const res = await withWriteLock(() => retimeLocalization(sheets, rowKey, enStart, enEnd))
+      if (!res.ok) return reply.code(409).send(res)
+      snapshot.refresh()
+      return res
+    } catch (e) { return reply.code(400).send({ error: e.message }) }
+  })
+
+  // Per-language dub fade in/out (audio gate): envelope on one localization's clip.
+  fastify.post('/api/localizations/fade', async (req, reply) => {
+    if (!guard(reply, RETIME_WRITE_STATES)) return
+    const rowKey = String(req.body?.rowKey || '').trim()
+    const fadeIn = Number(req.body?.fadeIn)
+    const fadeOut = Number(req.body?.fadeOut)
+    if (!rowKey || !isFinite(fadeIn) || !isFinite(fadeOut)) return reply.code(400).send({ error: 'потрібні rowKey, fadeIn, fadeOut' })
+    try {
+      const res = await withWriteLock(() => setLocalizationFades(sheets, rowKey, fadeIn, fadeOut))
+      if (!res.ok) return reply.code(409).send(res)
+      snapshot.refresh()
+      return res
+    } catch (e) { return reply.code(400).send({ error: e.message }) }
+  })
+
+  // ── audio-timeline clips (per-language, independent pieces; audio gate) ─────
+  // Cut one dub clip into two pieces at a timeline time (this language only).
+  fastify.post('/api/clips/cut', async (req, reply) => {
+    if (!guard(reply, RETIME_WRITE_STATES)) return
+    const clipId = String(req.body?.clipId || '').trim()
+    const atSec = Number(req.body?.atSec)
+    if (!clipId || !isFinite(atSec)) return reply.code(400).send({ error: 'потрібні clipId, atSec' })
+    try {
+      const res = await withWriteLock(() => cutClip(sheets, clipId, atSec))
+      if (!res.ok) return reply.code(409).send(res)
+      snapshot.refresh()
+      return res
+    } catch (e) { return reply.code(400).send({ error: e.message }) }
+  })
+
+  // Move/trim one dub clip on the timeline.
+  fastify.post('/api/clips/retime', async (req, reply) => {
+    if (!guard(reply, RETIME_WRITE_STATES)) return
+    const clipId = String(req.body?.clipId || '').trim()
+    const start = Number(req.body?.start)
+    const end = Number(req.body?.end)
+    if (!clipId || !isFinite(start) || !isFinite(end)) return reply.code(400).send({ error: 'потрібні clipId, start, end' })
+    try {
+      const res = await withWriteLock(() => retimeClip(sheets, clipId, start, end))
+      if (!res.ok) return reply.code(409).send(res)
+      snapshot.refresh()
+      return res
+    } catch (e) { return reply.code(400).send({ error: e.message }) }
+  })
+
+  // Fade in/out envelope on one dub clip.
+  fastify.post('/api/clips/fade', async (req, reply) => {
+    if (!guard(reply, RETIME_WRITE_STATES)) return
+    const clipId = String(req.body?.clipId || '').trim()
+    const fadeIn = Number(req.body?.fadeIn)
+    const fadeOut = Number(req.body?.fadeOut)
+    if (!clipId || !isFinite(fadeIn) || !isFinite(fadeOut)) return reply.code(400).send({ error: 'потрібні clipId, fadeIn, fadeOut' })
+    try {
+      const res = await withWriteLock(() => setClipFades(sheets, clipId, fadeIn, fadeOut))
+      if (!res.ok) return reply.code(409).send(res)
+      snapshot.refresh()
+      return res
+    } catch (e) { return reply.code(400).send({ error: e.message }) }
+  })
+
+  // Delete one dub clip (its audio piece).
+  fastify.post('/api/clips/delete', async (req, reply) => {
+    if (!guard(reply, RETIME_WRITE_STATES)) return
+    const clipId = String(req.body?.clipId || '').trim()
+    if (!clipId) return reply.code(400).send({ error: 'потрібен clipId' })
+    try {
+      const res = await withWriteLock(() => deleteClip(sheets, clipId))
       if (!res.ok) return reply.code(409).send(res)
       snapshot.refresh()
       return res
@@ -393,6 +494,9 @@ export function registerActionRoutes(fastify, { snapshot, sheets }) {
       if (!res.ok) return reply.code(409).send(res)
       // The run is now final (only stitching remains) → snapshot it with destination.
       try { archive.capture(snapshot.get(), new Date().toISOString(), { destination: res.destination }) }
+      catch (e) { req.log?.warn?.(e) }
+      // Capture the quality report too, so the Tuning trends accumulate per run.
+      try { qualityStore.capture(buildRunQualityReport(snapshot.get())) }
       catch (e) { req.log?.warn?.(e) }
       snapshot.refresh()
       return res

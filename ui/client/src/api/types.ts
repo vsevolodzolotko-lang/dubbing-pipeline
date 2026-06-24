@@ -54,6 +54,21 @@ export interface Diagnosis {
   fill: { real: number; slot: number } | null
 }
 
+// One independent audio piece on a language's timeline lane. A localization starts
+// as a single clip spanning its slot; the operator can cut it into pieces and
+// move/trim/fade/delete each. `src*` track which slice of the source audio a piece
+// plays (seconds, 1:1) so playback + waveform stay accurate after edits.
+export interface Clip {
+  id: string
+  start: number
+  end: number
+  srcStart: number
+  srcEnd: number
+  sourceDur: number
+  fadeIn: number
+  fadeOut: number
+}
+
 export interface Cell {
   present: boolean
   rowKey?: string
@@ -61,6 +76,9 @@ export interface Cell {
   status: 'TRUE' | 'FALSE' | 'REVIEW' | 'MISSING'
   needsRetts?: boolean
   textTranslated?: string
+  // Per-language dub slot on the timeline (independent of the shared EN slot).
+  slotStart?: number | null
+  slotEnd?: number | null
   realDuration?: number | null
   finalDuration?: number | null
   finalSpeed?: number | null
@@ -72,6 +90,11 @@ export interface Cell {
   regenComment?: string
   audioFileId?: string
   normalizedLufs?: number | null
+  // Per-language dub fade envelope (seconds at the clip start/end).
+  fadeIn?: number | null
+  fadeOut?: number | null
+  // Independent audio clips on the timeline lane (always ≥1; default = whole slot).
+  clips?: Clip[]
   diagnosis?: Diagnosis
 }
 
@@ -123,6 +146,109 @@ export interface ArchiveRun extends ArchiveRunSummary {
     activeLangs: string[]
     aiPrompt: string
   }
+}
+
+// ── Tuning tab (text-quality intelligence) ──────────────────────────────────
+export type CpsConfidence = 'HIGH' | 'MED' | 'LOW'
+export type RecConfidence = 'high' | 'medium' | 'low'
+
+export interface LangQuality {
+  lang: string
+  cells: number
+  score: number
+  cps: {
+    observed: number | null
+    configured: number | null
+    recommend: number | null
+    delta: number | null
+    confidence: CpsConfidence
+    sampleSize: number
+    baseSpeed: number | null
+    baseSpeedSource: 'voices' | 'mode' | null
+  }
+  adaptation: { avgAttempts: number; maxAttempts: number; saturationRate: number }
+  speed: { hist: Record<string, number>; meanFinalSpeed: number | null; speedUpRate: number; slowDownRate: number }
+  borrow: { meanSec: number; maxSec: number; capHitRate: number }
+  phase2: Record<string, number>
+  attention: { trueRate: number; reviewRate: number; trueCount: number; reviewCount: number }
+  regen: { rate: number; count: number; reasons: Record<string, number> }
+  qa: { rate: number; count: number; byType: Record<string, number>; bySeverity: Record<string, number> }
+}
+
+export interface TypeQuality {
+  type: string
+  cells: number
+  observedCps: number | null
+  attentionTrueRate: number
+  speedUpRate: number
+}
+
+export interface LangTypeCps {
+  lang: string
+  type: string
+  n: number
+  observedCps: number | null
+  driftVsLangMean: number | null
+}
+
+export interface CpsDeltaHint {
+  key: string; lang: string; current: number | null; recommend: number | null
+  delta: number; confidence: CpsConfidence; sampleSize: number
+}
+
+export interface RunQualityReport {
+  schema: number
+  generatedAt: string | null
+  lessonId: string | null
+  runToken: string | null
+  mode: 'mock' | 'live'
+  langs: string[]
+  segmentTypes: string[]
+  totals: { segments: number; cells: number; attentionTrue: number; langs: number }
+  perLang: Record<string, LangQuality>
+  perType: Record<string, TypeQuality>
+  perLangType: Record<string, LangTypeCps>
+  recommendationsHint: { cpsDeltas: CpsDeltaHint[] }
+  config: Record<string, string>
+}
+
+export interface Evidence { metric: string; value: string | number; sampleSize?: number }
+
+export interface ConfigRecommendation {
+  key: string; scope: 'global' | 'lang'; lang?: string
+  current: string; proposed: string; confidence: RecConfidence
+  rationale: string; expectedEffect?: string; evidence: Evidence[]
+}
+export interface VoiceRecommendation {
+  lang: string; field: 'speed' | 'stability' | 'similarity_boost' | 'style'
+  current: string; proposed: string; confidence: RecConfidence
+  rationale: string; evidence: Evidence[]
+}
+export interface PromptRecommendation {
+  promptKey: string; failurePattern: string; confidence: RecConfidence; rationale: string
+  evidence: Evidence[]
+  proposedEdit: { mode: 'rewrite' | 'patch'; rewrite?: string; patch?: { find: string; replace: string } } | null
+}
+export interface RecommendationSet {
+  schema?: number
+  generatedAt: string | null
+  model?: string | null
+  lessonId?: string | null
+  runToken?: string | null
+  summary?: string
+  configRecommendations: ConfigRecommendation[]
+  voiceRecommendations: VoiceRecommendation[]
+  promptRecommendations: PromptRecommendation[]
+}
+
+export interface TuningRunSummary {
+  id: string; lessonId: string | null; runToken: string | null; finishedAt: string | null
+  mode: 'mock' | 'live'; langs: string[]; score: number | null
+  attTrueRate: number; regenRate: number; cpsDeltaMax: number
+}
+export interface TuningTrend {
+  metric: string
+  points: { id: string; lessonId: string | null; finishedAt: string | null; value: number | null }[]
 }
 
 export interface SetupCheck {

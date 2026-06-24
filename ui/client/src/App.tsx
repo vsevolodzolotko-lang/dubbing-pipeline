@@ -1,7 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { Sidebar } from './components/Sidebar'
 import { Header } from './components/Header'
-import { StageRail } from './components/StageRail'
 import { RunBanner } from './components/RunBanner'
 import { RegenBanner } from './components/RegenBanner'
 import { CartBar } from './components/CartBar'
@@ -13,8 +12,8 @@ import { RenderStep } from './screens/RenderStep'
 import { Qa } from './screens/Qa'
 import { Voices } from './screens/Voices'
 import { Config } from './screens/Config'
-import { Archive } from './screens/Archive'
-import { Placeholder } from './screens/Placeholder'
+import { Prompts } from './screens/Prompts'
+import { TuningLab } from './screens/TuningLab'
 import { SetupErrorScreen } from './screens/SetupError'
 
 export default function App() {
@@ -23,25 +22,24 @@ export default function App() {
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <Header />
-        <StageRail />
         <RunBanner />
         <RegenBanner />
         <main className="min-h-0 flex-1 overflow-auto">
           <Routes>
-            <Route path="/" element={<Navigate to="/lesson" replace />} />
-            <Route path="/lesson" element={<Dashboard />} />
+            <Route path="/" element={<Navigate to="/projects" replace />} />
+            <Route path="/projects" element={<Dashboard />} />
+            <Route path="/lesson" element={<Navigate to="/projects" replace />} />
             <Route path="/transcript" element={<TranscriptReview />} />
             <Route path="/translation" element={<TranslationReview />} />
             <Route path="/review" element={<Workbench />} />
             <Route path="/render" element={<RenderStep />} />
             <Route path="/qa" element={<Qa />} />
             <Route path="/voices" element={<Voices />} />
-            <Route path="/prompts" element={<Placeholder title="Промпти" phase="v3" />} />
-            <Route path="/cps" element={<Placeholder title="Калібрування CPS" phase="v3" />} />
+            <Route path="/prompts" element={<Prompts />} />
+            <Route path="/cps" element={<TuningLab />} />
             <Route path="/config" element={<Config />} />
-            <Route path="/archive" element={<Archive />} />
             <Route path="/setup" element={<SetupErrorScreen />} />
-            <Route path="*" element={<Navigate to="/lesson" replace />} />
+            <Route path="*" element={<Navigate to="/projects" replace />} />
           </Routes>
         </main>
         <CartBar />

@@ -3,18 +3,18 @@ import { useSetupStatus } from '../api/queries'
 
 export function SetupErrorScreen() {
   const { data, isLoading } = useSetupStatus()
-  if (isLoading) return <div className="p-8 text-sm text-gray-400">Перевірка налаштувань…</div>
-  if (!data) return <div className="p-8 text-sm text-red-600">Не вдалося перевірити налаштування.</div>
+  if (isLoading) return <div className="p-8 text-sm text-gray-400">Checking settings…</div>
+  if (!data) return <div className="p-8 text-sm text-red-600">Could not check settings.</div>
 
   return (
     <div className="mx-auto max-w-2xl p-8">
-      <h1 className="text-xl font-semibold">Налаштування доступу</h1>
+      <h1 className="text-xl font-semibold">Access settings</h1>
       <p className="mt-1 text-sm text-gray-500">
         {data.mock
-          ? 'Працюємо у MOCK-режимі на тестових даних. Підключи живу таблицю, коли будеш готовий.'
+          ? 'Running in MOCK mode on test data. Connect a live sheet when you are ready.'
           : data.ok
-          ? 'Усе підключено.'
-          : 'Знайдено проблеми — виправ їх, щоб підключити живу таблицю.'}
+          ? 'Everything is connected.'
+          : 'Issues found — fix them to connect a live sheet.'}
       </p>
       {data.serviceAccountEmail && (
         <div className="mt-3 rounded bg-gray-100 p-2 dark:bg-[#202023] text-sm">

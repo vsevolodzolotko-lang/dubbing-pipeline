@@ -23,14 +23,15 @@ The pipeline uses 5 Drive folders, identified in the operator's UI as `01_input`
                                      Cue text   = text_translated column from localizations
 
 05_archive/                          ← drive_archive_folder_id
-└── {prev_basename}_{YYYY-MM-DD_HH-MM}/    one subfolder per W_Master run, Kyiv-local time
-    ├── 01_input/{prev_lesson}.mp3         the EN source from the previous run
-    ├── 02_output/{prev_lesson}_seg_*.wav  all per-segment WAVs from previous run
-    ├── 03_full/{prev_lesson}_full_*.wav   all full-lesson WAVs (one per lang)
-    ├── 04_vtt/{prev_lesson}_full_*.vtt    all VTT files (one per lang)
-    └── sheet_snapshot_{archive_name}      Drive copy of the live Google Sheet at archive time
-                                           (independent Sheet — edits to the original after this
-                                            point don't affect the snapshot)
+└── {lesson_id}_{YYYY-MM-DD_HH-MM}/        one subfolder per lesson, Kyiv-local time
+    ├── 01_input/{lesson_id}.mp3           the EN source — COPIED here at this lesson's run start
+    ├── 02_output/{lesson_id}_seg_*.wav    all per-segment WAVs — moved in at the NEXT run's start
+    ├── 03_full/{lesson_id}_full_*.wav     all full-lesson WAVs (one per lang) — moved in next start
+    ├── 04_vtt/{lesson_id}_full_*.vtt      all VTT files (one per lang) — moved in next start
+    └── sheet_snapshot_{lesson_id}_{ts}    Drive copy of the live Google Sheet, captured at the
+        [_INCOMPLETE]                       next run's start (independent Sheet). Suffixed
+                                            `_INCOMPLETE` if that lesson never produced a full WAV
+                                            for every active language (crashed / partial run).
 ```
 
 ## File-name conventions
@@ -50,21 +51,25 @@ Per-segment WAVs in `02_output/` may have **different durations across languages
 
 So while individual files can drift in size, the full-lesson WAV per language is always the same total duration as the EN audio, with every speech-start at its EN-aligned position. This is verified by `scripts/verify_borrow_compensation.js`.
 
-## Archive rotation on each W_Master run
+## Self-archive at start of next run (lesson-scoped, by file_id)
 
-Triggered every time a new file is dropped into `01_input/`:
+Each lesson owns one archive folder. Its artifacts arrive in two checkpoints so the archive always reflects the lesson's **final** state — including any W_Regen done after the run finished — while the working folders are never scanned wholesale (no `pageSize` truncation, no "exclude the just-dropped file" race). See `W_MASTER_ARCHIVE_LESSON_SCOPED_BY_FILEID` in DECISIONS.
 
-1. **Before W1 fires**: W_Master's `Archive Previous Run` chain (11 nodes) lists all files in `01_input/`, `02_output/`, `03_full/`, `04_vtt/`, excludes any file whose Drive ID matches the just-dropped trigger file(s), and moves the remainder via Drive PATCH `addParents/removeParents` (not copy) into `05_archive/{prev_basename}_{YYYY-MM-DD_HH-MM}/{01_input,02_output,03_full,04_vtt}/`.
+**Checkpoint 1 — this lesson's own run start (W_Master, before W1):**
 
-2. **Sheet snapshot**: also copies the live Google Sheet (all 5 tabs: `config`, `segments`, `voices`, `localizations`, `prompts`) into the archive root as `sheet_snapshot_{archive_name}` via Drive's file-copy API. Result is an independent Sheet — future edits to the original don't change it. If this copy fails → the workflow halts BEFORE any destructive operation (no data loss possible).
+1. **Create the lesson's archive folder** `05_archive/{lesson_id}_{YYYY-MM-DD_HH-MM}/` + a `01_input/` subfolder, and **copy** the input mp3 into it (`Copy Input to Archive`, `onError=stopWorkflow` — if the copy fails the run stops before the source is touched). Its folder ID is stored in config `last_archive_folder_id` for the next run.
+2. **Delete the input from `01_input/`** right after W1 finishes (`Delete Input File`, by exact `file_id` — W1 has already downloaded the audio). The folder stays empty through synthesis, and only the known `file_id` is removed, so a batch feeder dropping the next file is never disturbed.
 
-3. **Tab clear**: after moves complete, `segments!A2:ZZ` and `localizations!A2:ZZ` of the LIVE sheet are batch-cleared via Sheets `values:batchClear` so W1/W2/W3 start fresh. `voices`, `prompts`, `config` tabs are NOT touched (persistent setup data).
+**Checkpoint 2 — the NEXT run's start, for the lesson that just finished (the "previous" lesson):**
 
-4. **W1/W2/W3 fan-out**: continue as normal. After completion, working folders contain only the new run's artifacts.
+3. **Identify the previous lesson** from `last_archive_folder_id` (its folder) + the `localizations` rows still in the sheet (its `segment_id` prefix → `lesson_id`; its `audio_drive_file_id` values → the exact `02_output` segment file IDs — no Drive list).
+4. **Snapshot the live Google Sheet** into the previous lesson's archive folder as `sheet_snapshot_{lesson}_{ts}` (`onError=stopWorkflow`, BEFORE any move — no data loss possible). Name is suffixed `_INCOMPLETE` if not every active language produced a full WAV (crashed / partial run).
+5. **Move the previous lesson's files** into its folder: segments by exact `file_id`; full/vtt by targeted name query (`name contains '{lesson}_full_'`, ≤7 each). Moves use Drive PATCH `addParents/removeParents` (no duplication), `retryOnFail=3`.
+6. **Clear** `segments!A2:ZZ` + `localizations!A2:ZZ` of the live sheet so W1/W2/W3 start fresh. `voices`, `prompts`, `config` are NOT touched.
 
-After archive rotation, the operator can drop another file at any time. The current run becomes the "previous run" for the next archive cycle.
+Because the previous lesson's full WAVs stay in `03_full/` until this point, the operator UI keeps showing that lesson as **COMPLETE** (and W_Regen can still rewrite it in place) right up until the next run starts — and the archive captures whatever the final state was.
 
-**Restoration**: if a run goes wrong, the operator can open `05_archive/{archive_name}/` in Drive, copy files from the subfolders back into the working folders, and re-open `sheet_snapshot_{archive_name}` to restore sheet rows.
+**Restoration**: open `05_archive/{lesson_id}_{ts}/` in Drive, copy files from the subfolders back into the working folders, and re-open `sheet_snapshot_{lesson}_{ts}` to restore sheet rows. A failed run leaves the input (already copied to its archive folder), the partial outputs, and the sheet rows all intact — nothing is archived or cleared until a subsequent run succeeds in starting.
 
 ## W_Regen in-place overwrite
 

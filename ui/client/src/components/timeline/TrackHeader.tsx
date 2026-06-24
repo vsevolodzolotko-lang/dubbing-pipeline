@@ -31,7 +31,7 @@ export function TrackHeader({ name, sub, muted, solo, audible, volume, height, o
         <input
           type="range" min={0} max={1} step={0.01} value={volume}
           onChange={(e) => onVolume(Number(e.target.value))}
-          title={`гучність ${Math.round(volume * 100)}%`}
+          title={`volume ${Math.round(volume * 100)}%`}
           className="h-1 w-16 flex-1 accent-gray-700 dark:accent-gray-300"
         />
         <button type="button" onClick={onMute} title="Mute" aria-pressed={muted} className={tag(muted, 'bg-red-500 text-white')}>M</button>

@@ -1,9 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RawSegment } from '../../api/types'
 import type { Word } from '../../api/staged'
-import { useRunMedia } from '../../api/runMedia'
 import { TimelineToolbar } from './TimelineToolbar'
-import { VideoReference } from './VideoReference'
 import { TimeTrack } from './TimeTrack'
 import { SegmentLane } from './SegmentLane'
 import { LiveRegion, type LiveRegionHandle } from './LiveRegion'
@@ -24,20 +22,23 @@ const EMPTY_WORDS: Word[] = [] // stable ref so the active-words effect never lo
  * Self-contained: keeps the original 5-prop interface and fetches peaks/video/
  * duration internally. Persistence is server-side (retimeSegment → onRetimed).
  */
-export function SegmentTimeline({ segments, editable, selected, onSelect, onRetimed }: {
+export function SegmentTimeline({ segments, editable, selected, onSelect, onRetimed, focusSeg, onViewSeg, video, videoDuration }: {
   segments: RawSegment[]
   editable: boolean
   selected: string | null
   onSelect: (id: string) => void
   onRetimed: () => void
+  // Bidirectional sync with the segment list (same as the audio gate): scroll the
+  // timeline into view for `focusSeg`, and report the segment at the left edge.
+  focusSeg?: number | null
+  onViewSeg?: (segIndex: number) => void
+  // The reference video (rendered by the parent in the side panel) is the playback clock.
+  video: HTMLVideoElement | null
+  videoDuration: number
 }) {
-  const { videoUrl } = useRunMedia()
   const model = useTimelineModel(segments, onRetimed)
   const { peaks, peaksDurationSec } = usePeaks('/api/peaks/en')
   const words = useWords()
-
-  const [videoEl, setVideoEl] = useState<HTMLVideoElement | null>(null)
-  const [videoDuration, setVideoDuration] = useState(0)
 
   // Duration precedence: real EN audio → max segment end → video metadata → guard.
   const maxSegEnd = useMemo(
@@ -58,6 +59,53 @@ export function SegmentTimeline({ segments, editable, selected, onSelect, onReti
   const liveRef = useRef<LiveRegionHandle>(null)
   const announce = useCallback((msg: string) => liveRef.current?.announce(msg), [])
 
+  // ── sync with the segment list (focusSeg in, onViewSeg out) ──
+  const vpRef = useRef(viewport)
+  vpRef.current = viewport
+  // matrix → timeline: scroll the focused segment into view (no-op when it fits)
+  useEffect(() => {
+    if (focusSeg == null) return
+    const start = Number(segments[focusSeg]?.en_start_sec)
+    const sc = vpRef.current.scrollerRef.current
+    if (!sc || !isFinite(start)) return
+    const target = Math.max(0, vpRef.current.timeToX(start) - sc.clientWidth * 0.3)
+    if (Math.abs(target - sc.scrollLeft) > 2) sc.scrollLeft = target
+  }, [focusSeg, segments])
+
+  // Selecting a segment (a card in the list below) → seek the playhead to its start
+  // and frame it on the timeline (the list reframes via the normal onViewSeg echo).
+  useEffect(() => {
+    if (!selected) return
+    const seg = segments.find((s) => s.segment_id === selected)
+    if (!seg) return
+    const start = model.version[selected]?.start ?? Number(seg.en_start_sec)
+    if (!isFinite(start)) return
+    if (video) { try { video.currentTime = Math.min(start, video.duration || start) } catch { /* seek may throw before metadata */ } }
+    const sc = vpRef.current.scrollerRef.current
+    if (sc) {
+      const x = vpRef.current.timeToX(start)
+      if (x < sc.scrollLeft || x > sc.scrollLeft + sc.clientWidth) sc.scrollLeft = Math.max(0, x - sc.clientWidth * 0.3)
+    }
+  }, [selected, video]) // eslint-disable-line react-hooks/exhaustive-deps
+  // timeline → matrix: report the segment at the left edge as the timeline scrolls
+  const viewRafRef = useRef(0)
+  useEffect(() => {
+    const sc = vpRef.current.scrollerRef.current
+    if (!sc || !onViewSeg) return
+    const onScroll = () => {
+      if (viewRafRef.current) return
+      viewRafRef.current = requestAnimationFrame(() => {
+        viewRafRef.current = 0
+        const t = vpRef.current.xToTime(sc.scrollLeft + 8)
+        let idx = 0
+        for (let i = 0; i < segments.length; i++) { if (Number(segments[i].en_start_sec) <= t) idx = i; else break }
+        onViewSeg(idx)
+      })
+    }
+    sc.addEventListener('scroll', onScroll, { passive: true })
+    return () => sc.removeEventListener('scroll', onScroll)
+  }, [onViewSeg, segments])
+
   // Trackpad pinch-zoom (and Ctrl/Cmd+wheel): macOS fires a wheel event with
   // ctrlKey during a pinch. Non-passive so we can preventDefault the page zoom;
   // anchored at the cursor. Two-finger horizontal swipe scrolls natively
@@ -76,9 +124,6 @@ export function SegmentTimeline({ segments, editable, selected, onSelect, onReti
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
   }, [viewport.scrollerRef])
-
-  const onVideoEl = useCallback((el: HTMLVideoElement | null) => setVideoEl(el), [])
-  const onDuration = useCallback((d: number) => setVideoDuration(d), [])
 
   // Word-tick affordance for the selected segment (refetched after a commit).
   const [activeWords, setActiveWords] = useState<Word[]>(EMPTY_WORDS)
@@ -101,6 +146,20 @@ export function SegmentTimeline({ segments, editable, selected, onSelect, onReti
     return () => window.removeEventListener('keydown', onKey)
   }, [editable, model])
 
+  // Spacebar toggles the reference video (the playback clock) — same as the audio gate.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== ' ' && e.code !== 'Space') return
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      if (!video) return
+      e.preventDefault()
+      if (video.paused) video.play().catch(() => {}); else video.pause()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [video])
+
   // Announce commit errors to assistive tech.
   useEffect(() => { if (model.error) announce(model.error) }, [model.error, announce])
 
@@ -113,7 +172,7 @@ export function SegmentTimeline({ segments, editable, selected, onSelect, onReti
         canRedo={model.canRedo}
         canZoomIn={viewport.canZoomIn}
         canZoomOut={viewport.canZoomOut}
-        video={videoEl}
+        video={video}
         durationSec={durationSec}
         onZoomIn={() => viewport.zoomIn()}
         onZoomOut={() => viewport.zoomOut()}
@@ -122,14 +181,13 @@ export function SegmentTimeline({ segments, editable, selected, onSelect, onReti
         onRedo={model.redo}
         onClearError={model.clearError}
       />
-      <VideoReference videoUrl={videoUrl} onVideoEl={onVideoEl} onDuration={onDuration} />
       <TimeTrack
         scrollerRef={viewport.scrollerRef}
         contentWidth={viewport.contentWidth}
         durationSec={durationSec}
         pxPerSecond={viewport.pxPerSecond}
         peaks={peaks}
-        video={videoEl}
+        video={video}
         clientXToContentX={viewport.clientXToContentX}
         xToTime={viewport.xToTime}
         lane={
@@ -140,7 +198,7 @@ export function SegmentTimeline({ segments, editable, selected, onSelect, onReti
           />
         }
       />
-      {words.snapDisabled && <div className="mt-1 text-[11px] text-gray-400">снап до слів недоступний у цьому режимі</div>}
+      {words.snapDisabled && <div className="mt-1 text-[11px] text-gray-400">snap-to-word is unavailable in this mode</div>}
       <LiveRegion ref={liveRef} />
     </div>
   )

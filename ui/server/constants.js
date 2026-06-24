@@ -95,6 +95,36 @@ export const EDITABLE_CONFIG_KEYS = new Set([
   'w2_translate_workflow_url', 'w3_dispatch_workflow_url', 'drive_staged_input_folder_id',
 ])
 
+// Numeric bounds for editable config keys — the server's own copy of the ranges
+// declared in ui/client/src/configCatalog.ts (a client .ts file the server can't
+// import). Used to clamp/reject LLM-proposed values in the Tuning advisor so a
+// bad suggestion can never be one-click-applied out of range. Keep in sync with
+// the catalog. Keys absent here (text/csv keys) are not numerically validated.
+export const EDITABLE_CONFIG_BOUNDS = {
+  max_adaptation_attempts: { min: 1, max: 5, step: 1 },
+  expansion_threshold: { min: 0, max: 1, step: 0.05 },
+  w2_adapt_concurrency: { min: 1, max: 16, step: 1 },
+  w2_llm_chunk: { min: 1, max: 12, step: 1 },
+  max_segment_duration_sec: { min: 6, max: 20, step: 0.5 },
+  min_intra_sentence_pause_sec: { min: 0, max: 1, step: 0.05 },
+  min_segment_piece_duration_sec: { min: 0.5, max: 5, step: 0.1 },
+  min_inter_segment_gap_sec: { min: 0, max: 2, step: 0.05 },
+  max_borrow_per_segment_sec: { min: 0, max: 4, step: 0.1 },
+  movement_borrow_max_sec: { min: 0, max: 4, step: 0.1 },
+  silence_lead_ratio: { min: 0, max: 1, step: 0.05 },
+  silence_lead_max_sec: { min: 0, max: 0.5, step: 0.01 },
+  max_speed_up_delta: { min: 0, max: 0.4, step: 0.01 },
+  max_slow_down_delta: { min: 0, max: 0.4, step: 0.01 },
+  slowdown_min_gap_sec: { min: 0, max: 2, step: 0.1 },
+  cps_estimate_de: { min: 5, max: 25, step: 0.5 },
+  cps_estimate_es: { min: 5, max: 25, step: 0.5 },
+  cps_estimate_fr: { min: 5, max: 25, step: 0.5 },
+  cps_estimate_it: { min: 5, max: 25, step: 0.5 },
+  cps_estimate_pl: { min: 5, max: 25, step: 0.5 },
+  cps_estimate_pt: { min: 5, max: 25, step: 0.5 },
+  cps_estimate_tr: { min: 5, max: 25, step: 0.5 },
+}
+
 export function maskConfigValue(key, value) {
   if (CONFIG_ALLOWLIST.has(key)) return { value, masked: false }
   if (SECRET_PATTERN.test(key)) return { value: value ? '••••••••' : '', masked: true }
@@ -158,15 +188,26 @@ export const READONLY_STATES = new Set([
   RUN_STATES.REGENERATING,
 ])
 
+// States from which a new staged run / project switch may begin (nothing in
+// flight). Shared by the staged-start route and the projects routes so the two
+// can't drift.
+export const START_STATES = new Set([
+  RUN_STATES.IDLE, RUN_STATES.COMPLETE, RUN_STATES.STOPPED,
+])
+
 // Per-gate write scopes (used by the stage-aware guard + client capability checks).
 export const LOCALIZATION_WRITE_STATES = new Set([
   RUN_STATES.IDLE, RUN_STATES.COMPLETE, RUN_STATES.STOPPED, RUN_STATES.AUDIO_REVIEW,
 ])
 export const TRANSCRIPT_WRITE_STATES = new Set([RUN_STATES.TRANSCRIPT_REVIEW])
-export const TRANSLATION_WRITE_STATES = new Set([RUN_STATES.TRANSLATION_REVIEW])
+// Translation gate + audio review (fixing a flagged translation there feeds regen).
+export const TRANSLATION_WRITE_STATES = new Set([RUN_STATES.TRANSLATION_REVIEW, RUN_STATES.AUDIO_REVIEW])
 // Segment EN-slot retime (drag timeline edges) — allowed on both the transcript
 // gate and the audio gate (where you check the dub against the video per language).
 export const RETIME_WRITE_STATES = new Set([RUN_STATES.TRANSCRIPT_REVIEW, RUN_STATES.AUDIO_REVIEW])
+// Structural segment split (cut) — the transcript gate, plus cutting on the audio
+// timeline (the split halves are flagged for re-synthesis downstream).
+export const SPLIT_WRITE_STATES = new Set([RUN_STATES.TRANSCRIPT_REVIEW, RUN_STATES.AUDIO_REVIEW])
 // The assemble-file gate accepts the "build" action (with a destination).
 export const RENDER_STATES = new Set([RUN_STATES.RENDER_REVIEW])
 

@@ -1,11 +1,11 @@
 import { useEffect, useRef } from 'react'
 import type { RefObject } from 'react'
-import type { SegmentRow } from '../../../api/types'
-import type { Times } from './types'
 
 const DRIFT = 0.25 // s — re-seek an audio element only when it drifts past this
 
 interface DubTrack { lang: string; audible: boolean; volume: number }
+// One audio piece's timeline position + which slice of its source it plays.
+interface ClipPos { id: string; rowKey: string; start: number; end: number; srcStart: number }
 
 interface Opts {
   video: HTMLVideoElement | null
@@ -14,18 +14,20 @@ interface Opts {
   enVolume: number
   dubAudios: RefObject<Map<string, HTMLAudioElement>>
   dubs: DubTrack[]
-  segments: SegmentRow[]
-  getTimes: (id: string) => Times
+  // Per-language clip positions (sorted by start). A clip plays its source audio
+  // (`/api/audio/segment/{rowKey}`) from `srcStart + (videoTime − clip.start)`, so
+  // playback follows cut/moved/trimmed pieces.
+  dubClips: Record<string, ClipPos[]>
 }
 
 /**
  * Continuous multitrack playback synced to the reference video (the clock, kept
- * muted — picture only). The ORIGINAL track plays the full EN audio; each
- * LANGUAGE track is a per-segment scheduler over its dub clips. Every track plays
- * (even when inaudible) to stay in sync; audibility (mute/solo) maps to
- * element.muted and the volume slider to element.volume, applied every frame so
- * changes are live. Sync is best-effort (re-seek past DRIFT); small gaps at
- * segment boundaries are expected.
+ * muted — picture only). The ORIGINAL track plays the full EN audio; each LANGUAGE
+ * track is a per-clip scheduler — at each frame it finds the clip under the
+ * playhead and plays that clip's slice of its source audio. Every track plays (even
+ * when inaudible) to stay in sync; audibility maps to element.muted and the volume
+ * slider to element.volume, applied every frame. Sync is best-effort (re-seek past
+ * DRIFT); small gaps at clip boundaries are expected.
  */
 export function useTrackPlayback(opts: Opts) {
   const ref = useRef(opts)
@@ -35,19 +37,16 @@ export function useTrackPlayback(opts: Opts) {
     const video = opts.video
     if (!video) return
     let raf = 0
-    const dubState = new Map<string, { curRk: string | null; pendingGo: (() => void) | null }>()
+    const dubState = new Map<string, { curId: string | null; curRk: string | null; pendingGo: (() => void) | null }>()
     const stateOf = (lang: string) => {
       let s = dubState.get(lang)
-      if (!s) { s = { curRk: null, pendingGo: null }; dubState.set(lang, s) }
+      if (!s) { s = { curId: null, curRk: null, pendingGo: null }; dubState.set(lang, s) }
       return s
     }
 
-    const findSeg = (t: number) => {
-      const { segments, getTimes } = ref.current
-      for (const s of segments) {
-        const tm = getTimes(s.segmentId)
-        if (t >= tm.start && t < tm.end) return s
-      }
+    const findClip = (lang: string, t: number): ClipPos | null => {
+      const arr = ref.current.dubClips[lang] || []
+      for (const c of arr) if (t >= c.start && t < c.end) return c
       return null
     }
     const syncEn = (allowPlay: boolean) => {
@@ -64,23 +63,23 @@ export function useTrackPlayback(opts: Opts) {
       a.muted = !track.audible
       a.volume = track.volume
       const t = video.currentTime
-      const seg = findSeg(t)
-      const rk = seg?.cells[track.lang]?.rowKey ?? null
+      const c = findClip(track.lang, t)
       const s = stateOf(track.lang)
-      if (rk !== s.curRk) {
-        s.curRk = rk
+      const id = c?.id ?? null
+      if (id !== s.curId) {
+        s.curId = id
         if (s.pendingGo) { a.removeEventListener('loadedmetadata', s.pendingGo); s.pendingGo = null }
-        if (rk && seg) {
-          a.src = `/api/audio/segment/${rk}`
-          const off = Math.max(0, t - ref.current.getTimes(seg.segmentId).start)
+        if (c) {
+          if (s.curRk !== c.rowKey) { a.src = `/api/audio/segment/${c.rowKey}`; s.curRk = c.rowKey }
+          const off = Math.max(0, c.srcStart + (t - c.start))
           const go = () => { s.pendingGo = null; try { a.currentTime = off } catch { /* */ }; if (allowPlay && !video.paused) a.play().catch(() => {}) }
           if (a.readyState >= 1) go()
           else { s.pendingGo = go; a.addEventListener('loadedmetadata', go, { once: true }) }
         } else {
           a.pause()
         }
-      } else if (rk && seg) {
-        const off = Math.max(0, t - ref.current.getTimes(seg.segmentId).start)
+      } else if (c) {
+        const off = Math.max(0, c.srcStart + (t - c.start))
         if (Math.abs(a.currentTime - off) > DRIFT) { try { a.currentTime = off } catch { /* */ } }
         if (allowPlay && a.paused) a.play().catch(() => {})
       }

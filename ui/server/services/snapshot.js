@@ -2,6 +2,7 @@ import { config, writesEnabled } from '../config.js'
 import { TABS, DEFAULT_LANGS, CONFIG_KEYS, RUN_STATES } from '../constants.js'
 import { computeRunState } from './runState.js'
 import { regenTracker } from './regenTracker.js'
+import { parseKeyValue, parseTable } from './sheetParse.js'
 import * as mockStore from './mockStore.js'
 
 const ACTIVE_INTERVAL_MS = 5_000
@@ -166,11 +167,37 @@ export function makeSnapshotService({ auth, sheets, drive, broadcast, getClientC
   }
 
   // Force an immediate re-poll (used after a write so the UI reflects it now,
-  // not on the next 5s tick). Safe: poll() reschedules its own timer.
+  // not on the next 5s tick). Returns the poll promise so callers that need the
+  // refreshed model (e.g. the projects routes' updateSummary) can await it; most
+  // callers fire-and-forget. Safe: poll() reschedules its own timer.
   function pokeNow() {
-    if (stopped) return
+    if (stopped) return Promise.resolve()
     if (timer) clearTimeout(timer)
-    poll()
+    return poll()
+  }
+
+  // Drop all per-run/diff caches so the next poll describes a *different* active
+  // project from scratch (the snapshot reads whichever project mockStore/Sheets
+  // now expose). Without this, the first post-switch poll would diff project B's
+  // data against project A's cached baseline → phantom rows_changed or a swallowed
+  // state event. Does NOT touch `stopped`.
+  function reset() {
+    prev = null
+    tick = 0
+    lastChangeAt = Date.now()
+    lastContentHash = ''
+    lastRegenSig = ''
+    runTimer = { token: null, synthStartedAt: null, baselineRows: 0 }
+    model = emptyModel()
+  }
+
+  // Called by the projects route AFTER the active project changed: reset caches
+  // then re-poll immediately so clients receive a clean full state for the new
+  // project. Returns the poll promise so the route can await it before deriving
+  // the project's summary. (One-way dependency: snapshot never references projects.)
+  function onActiveChange() {
+    reset()
+    return pokeNow()
   }
 
   return {
@@ -184,37 +211,16 @@ export function makeSnapshotService({ auth, sheets, drive, broadcast, getClientC
     },
     get() { return model },
     refresh: pokeNow,
+    reset,
+    onActiveChange,
     statePayload: () => statePayload(model),
     auth, sheets, drive,
   }
 }
 
 // ─── parsing ───────────────────────────────────────────────────────────────
-
-function parseKeyValue(rows) {
-  const map = new Map()
-  for (const r of rows.slice(1)) {
-    if (!r || r[0] == null || r[0] === '') continue
-    map.set(String(r[0]).trim(), r[1] ?? '')
-  }
-  return map
-}
-
-/** Header-driven: row 0 is the header, every data row becomes {header: value}. */
-function parseTable(rows) {
-  if (!rows || rows.length === 0) return { header: [], index: new Map(), objects: [] }
-  const header = rows[0].map((h) => String(h ?? '').trim())
-  const index = new Map(header.map((h, i) => [h, i]))
-  const objects = []
-  for (let i = 1; i < rows.length; i++) {
-    const r = rows[i]
-    if (!r || r.every((c) => c === '' || c == null)) continue
-    const o = {}
-    for (let c = 0; c < header.length; c++) if (header[c]) o[header[c]] = r[c] ?? ''
-    objects.push(o)
-  }
-  return { header, index, objects }
-}
+// parseKeyValue / parseTable now live in ./sheetParse.js (shared with the Tuning
+// run-history backfill).
 
 function parseActiveLangs(configMap) {
   const raw = String(configMap.get(CONFIG_KEYS.activeLangs) || '').trim()

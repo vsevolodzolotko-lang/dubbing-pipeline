@@ -35,6 +35,53 @@ export function Workbench() {
   // clock the AudioTimeline drives.
   const [videoEl, setVideoEl] = useState<HTMLVideoElement | null>(null)
   const [videoDuration, setVideoDuration] = useState(0)
+  // Bidirectional scroll sync (matrix vertical ↔ timeline horizontal). We sync by
+  // SCROLL FRACTION, not by segment, so the two always hit their ends together —
+  // matrix at the bottom ⇔ timeline at its far right. A short time-lock on the
+  // follower swallows the echo scroll, so there's no feedback loop.
+  const matrixScrollRef = useRef<HTMLDivElement>(null)
+  const [tlScroller, setTlScroller] = useState<HTMLDivElement | null>(null)
+  const lockMatrixUntil = useRef(0)
+  const lockTimelineUntil = useRef(0)
+  const LOCK_MS = 140
+  // matrix vertical scroll → drive the timeline to the same scroll fraction
+  function onMatrixScroll() {
+    if (Date.now() < lockMatrixUntil.current) return // echo from a timeline-driven scroll
+    const m = matrixScrollRef.current
+    if (!m || !tlScroller) return
+    const mMax = m.scrollHeight - m.clientHeight
+    const tMax = tlScroller.scrollWidth - tlScroller.clientWidth
+    if (mMax <= 0 || tMax <= 0) return // content fits — nothing to sync
+    lockTimelineUntil.current = Date.now() + LOCK_MS // suppress the timeline's echo
+    tlScroller.scrollLeft = (m.scrollTop / mMax) * tMax
+  }
+  // Scroll the matrix so segment `idx` sits just below the sticky header (the
+  // language-name row) — not hidden behind it.
+  function scrollMatrixToSeg(idx: number) {
+    const c = matrixScrollRef.current
+    if (!c) return
+    const row = c.querySelector<HTMLElement>(`tr[data-segidx="${idx}"]`)
+    if (!row) return
+    const headH = c.querySelector('thead')?.getBoundingClientRect().height ?? 0
+    const delta = row.getBoundingClientRect().top - c.getBoundingClientRect().top - headH - 8
+    if (Math.abs(delta) > 2) c.scrollTop += delta
+  }
+  // timeline horizontal scroll → drive the matrix to the same scroll fraction
+  useEffect(() => {
+    if (!tlScroller) return
+    const onScroll = () => {
+      if (Date.now() < lockTimelineUntil.current) return // echo from a matrix-driven scroll
+      const m = matrixScrollRef.current
+      if (!m) return
+      const tMax = tlScroller.scrollWidth - tlScroller.clientWidth
+      const mMax = m.scrollHeight - m.clientHeight
+      if (tMax <= 0 || mMax <= 0) return
+      lockMatrixUntil.current = Date.now() + LOCK_MS // suppress the matrix's echo
+      m.scrollTop = (tlScroller.scrollLeft / tMax) * mMax
+    }
+    tlScroller.addEventListener('scroll', onScroll, { passive: true })
+    return () => tlScroller.removeEventListener('scroll', onScroll)
+  }, [tlScroller])
   const writable = canWrite(state)
 
   const selCell = selected && data ? data.segments[selected.seg]?.cells[selected.lang] : null
@@ -46,6 +93,18 @@ export function Workbench() {
     setVerdictMsg(null)
   }, [selected, selCell?.textTranslated])
 
+  // Selecting a segment (matrix cell OR timeline block) scrolls the matrix to it.
+  // (Timeline scroll + playhead seek happen in AudioTimeline's `selected` effect.)
+  useEffect(() => {
+    if (!selected) return
+    // Both the matrix (here) and the timeline (AudioTimeline) jump to frame the
+    // selected segment — lock both so neither programmatic scroll drives the other.
+    const until = Date.now() + 300
+    lockMatrixUntil.current = until
+    lockTimelineUntil.current = until
+    scrollMatrixToSeg(selected.seg)
+  }, [selected?.seg]) // eslint-disable-line react-hooks/exhaustive-deps
+
   async function verdict(value: 'TRUE' | 'FALSE') {
     if (!writable || !selCell?.rowKey) return
     setVerdictMsg('…')
@@ -54,7 +113,7 @@ export function Workbench() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rows: [{ rowKey: selCell.rowKey, value }] }),
       })
-      setVerdictMsg(res.ok ? (value === 'FALSE' ? 'Прийнято' : 'Позначено') : `Помилка: ${(await res.json()).error}`)
+      setVerdictMsg(res.ok ? (value === 'FALSE' ? 'Accepted' : 'Flagged') : `Error: ${(await res.json()).error}`)
     } catch (e) { setVerdictMsg(String(e)) }
   }
 
@@ -64,7 +123,7 @@ export function Workbench() {
       rowKey: selCell.rowKey, segmentId: selSegRow.segmentId, lang: selected!.lang,
       oldText: selCell.textTranslated ?? '', newText: editedText,
     })
-    setVerdictMsg('У кошику')
+    setVerdictMsg('In cart')
   }
 
   async function normalize(rowKeys: string[]) {
@@ -72,9 +131,9 @@ export function Workbench() {
     setNormMsg('…')
     try {
       const r = await normalizeSegments(rowKeys)
-      setNormMsg(r.ok ? `Нормалізовано ${r.normalized} до −23 LUFS` : (r.error || 'не вдалося'))
+      setNormMsg(r.ok ? `Normalized ${r.normalized} to -23 LUFS` : (r.error || 'failed'))
       qc.invalidateQueries({ queryKey: ['lesson'] })
-    } catch (e) { setNormMsg(e instanceof Error ? e.message : 'помилка нормалізації') }
+    } catch (e) { setNormMsg(e instanceof Error ? e.message : 'normalization error') }
   }
   const allRowKeys = () => data ? data.segments.flatMap((s) => Object.values(s.cells).map((c) => c.rowKey).filter((k): k is string => Boolean(k))) : []
 
@@ -103,32 +162,33 @@ export function Workbench() {
     return all.filter(({ s }) => Object.values(s.cells).some(isProblem))
   }, [data, filter])
 
-  if (isLoading) return <div className="p-8 text-sm text-gray-400">Завантаження уроку…</div>
-  if (error) return <div className="p-8 text-sm text-red-600">Помилка: {String(error)}</div>
-  if (!data || data.segments.length === 0) return <div className="p-8 text-sm text-gray-400">Немає даних уроку.</div>
+  if (isLoading) return <div className="p-8 text-sm text-gray-400">Loading lesson…</div>
+  if (error) return <div className="p-8 text-sm text-red-600">Error: {String(error)}</div>
+  if (!data || data.segments.length === 0) return <div className="p-8 text-sm text-gray-400">No lesson data.</div>
 
   return (
     <div className="flex h-full flex-col">
       <div className="flex min-h-0 flex-1">
-      <div className="min-w-0 flex-1 overflow-auto p-4">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        {/* pinned: header + timeline stay visible while the matrix scrolls below */}
+        <div className="shrink-0 px-4 pt-4">
         <div className="mb-3 flex items-center gap-2">
-          <h1 className="text-lg font-semibold">Перевірка · {data.lessonId}</h1>
+          <h1 className="text-lg font-semibold">Review · {data.lessonId}</h1>
           <div className="ml-3 flex rounded-md border border-gray-300 dark:border-[#3a3a3d] text-sm">
-            <FilterBtn active={filter === 'all'} onClick={() => setFilter('all')}>Усі</FilterBtn>
-            <FilterBtn active={filter === 'qa'} onClick={() => setFilter('qa')}>Проблемні</FilterBtn>
-            <FilterBtn active={filter === 'review'} onClick={() => setFilter('review')}>Після регену</FilterBtn>
+            <FilterBtn active={filter === 'all'} onClick={() => setFilter('all')}>All</FilterBtn>
+            <FilterBtn active={filter === 'qa'} onClick={() => setFilter('qa')}>Problematic</FilterBtn>
+            <FilterBtn active={filter === 'review'} onClick={() => setFilter('review')}>After regen</FilterBtn>
           </div>
           {writable && (
-            <button onClick={() => normalize(allRowKeys())} title="нормалізувати гучність усіх дублів до −23 LUFS"
+            <button onClick={() => normalize(allRowKeys())} title="normalize loudness of all dubs to -23 LUFS"
               className="rounded-md border border-gray-300 dark:border-[#3a3a3d] px-2 py-1 text-xs hover:bg-gray-100 dark:hover:bg-[#202023]">
-              Нормалізувати всі −23 LUFS
+              Normalize all -23 LUFS
             </button>
           )}
           {normMsg && <span className="text-xs text-gray-500">{normMsg}</span>}
           <Legend />
         </div>
 
-        <div className="mb-4">
           <AudioTimeline
             segments={data.segments}
             langs={data.langs}
@@ -137,27 +197,30 @@ export function Workbench() {
             inFlight={inFlight}
             video={videoEl}
             videoDuration={videoDuration}
+            onScrollerReady={setTlScroller}
             onSelectCell={(seg, lang) => setSelected({ seg, lang })}
             onRetimed={() => qc.invalidateQueries({ queryKey: ['lesson'] })}
           />
         </div>
 
-        <div className="flex flex-wrap items-start gap-6">
+        {/* matrix scrolls on its own; the video reference is pinned beside it (always visible) */}
+        <div className="flex min-h-0 flex-1 gap-6 px-4 pb-4 pt-4">
+        <div ref={matrixScrollRef} onScroll={onMatrixScroll} className="min-h-0 flex-1 overflow-auto">
         <table className="border-separate border-spacing-1 text-sm">
           <thead>
             <tr>
-              <th className="sticky left-0 z-10 bg-[#f6f7f9] dark:bg-[#202023] px-2 py-1 text-left text-xs font-medium text-gray-500">Сегмент</th>
+              <th className="sticky left-0 top-0 z-20 bg-[#f6f7f9] dark:bg-[#202023] px-2 py-1 text-left text-xs font-medium text-gray-500">Segment</th>
               {data.langs.map((l) => (
-                <th key={l} className="px-2 py-1 text-xs font-mono font-medium text-gray-500">{l}</th>
+                <th key={l} className="sticky top-0 z-10 bg-[#f6f7f9] dark:bg-[#202023] px-2 py-1 text-xs font-mono font-medium text-gray-500">{l}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {segments.map(({ s, i }) => (
-              <tr key={s.segmentId}>
-                <td className="sticky left-0 z-10 max-w-[18rem] truncate bg-[#f6f7f9] dark:bg-[#202023] px-2 py-1 text-xs text-gray-600" title={s.enText}>
+              <tr key={s.segmentId} data-segidx={i}>
+                <td className="sticky left-0 z-10 w-[34rem] max-w-[34rem] truncate bg-[#f6f7f9] dark:bg-[#202023] px-2 py-1 text-sm text-gray-600" title={s.enText}>
                   <span className="font-mono text-gray-400">{shortId(s.segmentId)}</span>{' '}
-                  {s.movementLocked && <span title="сегмент із рухом"><Footprints className="inline-block h-3 w-3 align-[-0.15em] text-gray-400" strokeWidth={1.75} /></span>}{' '}
+                  {s.movementLocked && <span title="segment with movement"><Footprints className="inline-block h-3 w-3 align-[-0.15em] text-gray-400" strokeWidth={1.75} /></span>}{' '}
                   {s.enText}
                 </td>
                 {data.langs.map((l) => {
@@ -169,7 +232,7 @@ export function Workbench() {
                       <button
                         onClick={() => setSelected({ seg: i, lang: l })}
                         className={`grid h-7 w-9 place-items-center rounded border text-[11px] ${cellClass(c.status, c.needsRetts)} ${isSel ? 'ring-2 ring-gray-900' : ''} ${regening ? 'animate-pulse ring-1 ring-blue-400' : ''}`}
-                        title={regening ? 'перегенерується…' : c.diagnosis?.primary}
+                        title={regening ? 'regenerating…' : c.diagnosis?.primary}
                       >
                         {regening ? <RefreshCw className="h-3 w-3 animate-spin" strokeWidth={1.75} /> : cellGlyph(c)}
                       </button>
@@ -180,10 +243,13 @@ export function Workbench() {
             ))}
           </tbody>
         </table>
+        </div>
 
-        <div className="min-w-[18rem] flex-1">
-          <div className="mb-1 text-xs font-medium text-gray-500 dark:text-gray-400">Відео-референс</div>
-          <VideoReference videoUrl={videoUrl} onVideoEl={setVideoEl} onDuration={setVideoDuration} />
+        <div className="flex w-72 shrink-0 flex-col self-stretch min-h-0 lg:w-2/5 lg:min-w-[22rem] lg:max-w-[42rem]">
+          <div className="mb-1 shrink-0 text-xs font-medium text-gray-500 dark:text-gray-400">Reference video</div>
+          <div className="min-h-0 flex-1">
+            <VideoReference videoUrl={videoUrl} onVideoEl={setVideoEl} onDuration={setVideoDuration} fill />
+          </div>
         </div>
         </div>
       </div>
@@ -212,9 +278,9 @@ export function Workbench() {
       {state?.staged && state.state === 'AUDIO_REVIEW' && (
         <GateBar
           gate="audio"
-          title="Етап 3/4 · Аудіо (сегменти)"
-          summary={`${data.segments.length} сегментів · ${state.needsAttention.count} потребують уваги · далі — склейка повного файлу`}
-          primaryLabel="Затвердити аудіо"
+          title="Stage 3/4 · Audio (segments)"
+          summary={`${data.segments.length} segments · ${state.needsAttention.count} need attention · next — assemble the full file`}
+          primaryLabel="Approve audio"
         />
       )}
     </div>
@@ -238,11 +304,11 @@ function DetailPanel({ cell, seg, lang, editedText, setEditedText, writable, blo
       </div>
 
       <div className="mb-3 rounded-md bg-gray-50 p-3 dark:bg-[#202023] text-sm">
-        <div className="text-xs font-medium text-gray-400">EN-оригінал</div>
+        <div className="text-xs font-medium text-gray-400">EN original</div>
         <div className="text-gray-700 dark:text-gray-300">{seg.enText}</div>
         <div className="mt-2 flex items-center justify-between">
-          <span className="text-xs font-medium text-gray-400">Переклад ({lang})</span>
-          {edited && <span className="text-[10px] text-amber-600">змінено — додай у кошик</span>}
+          <span className="text-xs font-medium text-gray-400">Translation ({lang})</span>
+          {edited && <span className="text-[10px] text-amber-600">edited — add to cart</span>}
         </div>
         <textarea
           value={editedText}
@@ -254,12 +320,12 @@ function DetailPanel({ cell, seg, lang, editedText, setEditedText, writable, blo
       </div>
 
       {inFlight && (
-        <div className="mb-3 animate-pulse rounded-md bg-blue-50 dark:bg-blue-950/40 dark:text-blue-200 px-2 py-1.5 text-sm text-blue-800"><RefreshCw className="inline-block h-3.5 w-3.5 align-[-0.2em] animate-spin" strokeWidth={1.75} /> Перегенерується… зачекай завершення.</div>
+        <div className="mb-3 animate-pulse rounded-md bg-blue-50 dark:bg-blue-950/40 dark:text-blue-200 px-2 py-1.5 text-sm text-blue-800"><RefreshCw className="inline-block h-3.5 w-3.5 align-[-0.2em] animate-spin" strokeWidth={1.75} /> Regenerating… wait for it to finish.</div>
       )}
 
       {regenOld && (
         <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs">
-          <div className="font-medium text-amber-800">Після перегенерації — порівняй:</div>
+          <div className="font-medium text-amber-800">After regeneration — compare:</div>
           <div className="mt-1 text-gray-500 line-through">{regenOld.old}</div>
           <div className="text-green-800">{regenOld.neu}</div>
         </div>
@@ -269,19 +335,19 @@ function DetailPanel({ cell, seg, lang, editedText, setEditedText, writable, blo
       <div className="mb-3">
         <div className="flex flex-wrap gap-2">
           <button onClick={() => onVerdict('FALSE')} disabled={!writable}
-            title={writable ? 'клавіша F' : blockReason}
-            className="rounded-md border border-green-300 bg-green-50 px-3 py-1.5 text-sm text-green-800 hover:bg-green-100 disabled:opacity-40">Ок</button>
+            title={writable ? 'F key' : blockReason}
+            className="rounded-md border border-green-300 bg-green-50 px-3 py-1.5 text-sm text-green-800 hover:bg-green-100 disabled:opacity-40">OK</button>
           <button onClick={() => onVerdict('TRUE')} disabled={!writable}
-            title={writable ? 'клавіша T' : blockReason}
-            className="rounded-md border border-red-300 bg-red-50 px-3 py-1.5 text-sm text-red-800 hover:bg-red-100 disabled:opacity-40">Погано</button>
+            title={writable ? 'T key' : blockReason}
+            className="rounded-md border border-red-300 bg-red-50 px-3 py-1.5 text-sm text-red-800 hover:bg-red-100 disabled:opacity-40">Bad</button>
           <button onClick={onAddCart} disabled={!writable}
-            title={writable ? 'клавіша R' : blockReason}
-            className="rounded-md border border-gray-300 dark:border-[#3a3a3d] px-3 py-1.5 text-sm hover:bg-gray-100 disabled:opacity-40"><ShoppingBasket className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> {inCart ? 'Оновити в кошику' : 'У кошик'}</button>
+            title={writable ? 'R key' : blockReason}
+            className="rounded-md border border-gray-300 dark:border-[#3a3a3d] px-3 py-1.5 text-sm hover:bg-gray-100 disabled:opacity-40"><ShoppingBasket className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> {inCart ? 'Update in cart' : 'To cart'}</button>
           <button onClick={onNormalize} disabled={!writable}
-            title={writable ? 'нормалізувати гучність до −23 LUFS' : blockReason}
-            className="rounded-md border border-gray-300 dark:border-[#3a3a3d] px-3 py-1.5 text-sm hover:bg-gray-100 disabled:opacity-40">Норм. −23 LUFS</button>
+            title={writable ? 'normalize loudness to -23 LUFS' : blockReason}
+            className="rounded-md border border-gray-300 dark:border-[#3a3a3d] px-3 py-1.5 text-sm hover:bg-gray-100 disabled:opacity-40">Norm. -23 LUFS</button>
         </div>
-        {cell.normalizedLufs != null && <div className="mt-1 text-[11px] text-emerald-600 dark:text-emerald-400">нормалізовано до {cell.normalizedLufs} LUFS</div>}
+        {cell.normalizedLufs != null && <div className="mt-1 text-[11px] text-emerald-600 dark:text-emerald-400">normalized to {cell.normalizedLufs} LUFS</div>}
         {!writable && <div className="mt-1 text-[11px] text-amber-600">{blockReason}</div>}
         {verdictMsg && <div className="mt-1 text-xs text-gray-500">{verdictMsg}</div>}
       </div>
@@ -292,7 +358,7 @@ function DetailPanel({ cell, seg, lang, editedText, setEditedText, writable, blo
           <div className="mt-2 text-sm font-medium text-gray-900 dark:text-gray-100">{d.primary}</div>
           {d.causes.length > 0 && (
             <div className="mt-3">
-              <div className="mb-1 text-xs font-medium text-gray-500">Можливі причини</div>
+              <div className="mb-1 text-xs font-medium text-gray-500">Possible causes</div>
               <ul className="space-y-1.5">
                 {d.causes.map((c, i) => <CauseRow key={i} cause={c} />)}
               </ul>
@@ -303,27 +369,26 @@ function DetailPanel({ cell, seg, lang, editedText, setEditedText, writable, blo
           )}
           {d.fill && (
             <div className="mt-3">
-              <div className="text-xs text-gray-500">Дубляж {d.fill.real?.toFixed(1)}с / слот {d.fill.slot?.toFixed(1)}с</div>
+              <div className="text-xs text-gray-500">Localized {d.fill.real?.toFixed(1)}s / slot {d.fill.slot?.toFixed(1)}s</div>
               <div className="mt-1 h-1.5 w-full rounded bg-gray-100">
                 <div className="h-1.5 rounded bg-gray-500" style={{ width: `${Math.min(100, (d.fill.real / d.fill.slot) * 100)}%` }} />
               </div>
             </div>
           )}
-          {d.facts.length > 0 && (
-            <div className="mt-3">
-              <div className="mb-1 text-xs font-medium text-gray-500">Що зробила автоматика</div>
-              <ul className="space-y-1 text-xs text-gray-500">
-                {d.facts.map((t, i) => <li key={i}>• {t}</li>)}
-              </ul>
-            </div>
-          )}
         </div>
       )}
 
-      <div className="mt-1 text-[11px] text-gray-400">Пробіл — таймлайн грати/пауза · F — ок · T — погано · R — у кошик · слухай на таймлайні зліва</div>
-
       <details className="mt-3 text-xs text-gray-500">
-        <summary className="cursor-pointer">Технічні деталі</summary>
+        <summary className="cursor-pointer">Technical details</summary>
+        <div className="mt-2 text-[11px] text-gray-400">Hotkeys: Space — play/pause · F — ok · T — bad · R — to cart · listen on the timeline at left</div>
+        {d && d.facts.length > 0 && (
+          <div className="mt-2">
+            <div className="mb-1 font-medium text-gray-500">What automation did</div>
+            <ul className="space-y-1">
+              {d.facts.map((t, i) => <li key={i}>• {t}</li>)}
+            </ul>
+          </div>
+        )}
         <dl className="mt-2 grid grid-cols-2 gap-1">
           <Tech k="phase2_outcome" v={cell.phase2Outcome} />
           <Tech k="final_speed" v={cell.finalSpeed} />
@@ -363,9 +428,9 @@ function CauseRow({ cause }: { cause: Cause }) {
       <span
         className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${
           certain ? 'bg-gray-200 text-gray-600' : 'bg-amber-100 text-amber-700'}`}
-        title={certain ? 'факт із даних пайплайна' : 'припущення на основі сигналів'}
+        title={certain ? 'fact from pipeline data' : 'inference based on signals'}
       >
-        {certain ? 'точно' : 'ймовірно'}
+        {certain ? 'certain' : 'likely'}
       </span>
     </li>
   )
@@ -376,7 +441,7 @@ function SeverityChip({ severity }: { severity: string }) {
     ok: 'bg-green-100 text-green-800', bad: 'bg-red-100 text-red-800',
     review: 'bg-amber-100 text-amber-800', queued: 'bg-blue-100 text-blue-800', warn: 'bg-amber-100 text-amber-800',
   }
-  const label: Record<string, string> = { ok: 'Без зауважень', bad: 'Потребує уваги', review: 'На перегляд', queued: 'У кошику', warn: 'Увага' }
+  const label: Record<string, string> = { ok: 'No issues', bad: 'Needs attention', review: 'For review', queued: 'In cart', warn: 'Attention' }
   return <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${map[severity] ?? map.warn}`}>{label[severity] ?? severity}</span>
 }
 
@@ -391,10 +456,10 @@ function FilterBtn({ active, onClick, children }: { active: boolean; onClick: ()
 function Legend() {
   return (
     <div className="ml-auto flex gap-3 text-[11px] text-gray-500">
-      <Lg cls="bg-green-50 border-green-200" t="ок" />
-      <Lg cls="bg-red-100 border-red-200" t="увага" />
-      <Lg cls="bg-amber-100 border-amber-200" t="перегляд" />
-      <Lg cls="bg-blue-100 border-blue-200" t="у кошику" />
+      <Lg cls="bg-green-50 border-green-200" t="ok" />
+      <Lg cls="bg-red-100 border-red-200" t="attention" />
+      <Lg cls="bg-amber-100 border-amber-200" t="review" />
+      <Lg cls="bg-blue-100 border-blue-200" t="in cart" />
     </div>
   )
 }

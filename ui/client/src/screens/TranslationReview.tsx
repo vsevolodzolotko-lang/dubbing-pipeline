@@ -21,7 +21,8 @@ export function TranslationReview() {
   const qc = useQueryClient()
   const editable = canWriteTranslations(state)
   const segs = data?.rows ?? []
-  const langs = useMemo(() => langsOf(segs[0]), [segs])
+  // EN is shown as the constant left column in every card — not a selectable language.
+  const langs = useMemo(() => langsOf(segs[0]).filter((l) => l !== 'en'), [segs])
   const hasText = segs.some((s) => langs.some((l) => String(s[`${l}_text`] ?? '').trim()))
   const translating = state?.state === 'TRANSLATING'
 
@@ -49,12 +50,12 @@ export function TranslationReview() {
   const langResults = results[lang] || {}
 
   async function check() {
-    if (!selectedIds.length) { setMsg('Не вибрано жодного сегмента'); return }
+    if (!selectedIds.length) { setMsg('No segments selected'); return }
     setChecking(true); setMsg(null)
     try {
       const r = await checkTranslations(lang, selectedIds)
       setResults((prev) => ({ ...prev, [lang]: Object.fromEntries(r.results.map((x) => [x.segment_id, x])) }))
-    } catch (e) { setMsg(e instanceof Error ? e.message : 'помилка перевірки') }
+    } catch (e) { setMsg(e instanceof Error ? e.message : 'check error') }
     finally { setChecking(false) }
   }
 
@@ -63,7 +64,7 @@ export function TranslationReview() {
     const draft = drafts[key]
     if (draft == null || draft === String(seg[`${lang}_text`] ?? '')) return
     try { await saveTranslations([{ segmentId: seg.segment_id, lang, text: draft }]); qc.invalidateQueries({ queryKey: ['segments'] }) }
-    catch (e) { setMsg(e instanceof Error ? e.message : 'помилка збереження') }
+    catch (e) { setMsg(e instanceof Error ? e.message : 'save error') }
   }
 
   async function applyOne(segId: string, text: string) {
@@ -72,7 +73,7 @@ export function TranslationReview() {
       qc.invalidateQueries({ queryKey: ['segments'] })
       setDrafts((d) => { const n = { ...d }; delete n[`${segId}:${lang}`]; return n })
       setResults((r) => { const lr = { ...(r[lang] || {}) }; delete lr[segId]; return { ...r, [lang]: lr } })
-    } catch (e) { setMsg(e instanceof Error ? e.message : 'помилка') }
+    } catch (e) { setMsg(e instanceof Error ? e.message : 'error') }
   }
 
   async function applyAllSuggested() {
@@ -85,7 +86,7 @@ export function TranslationReview() {
       qc.invalidateQueries({ queryKey: ['segments'] })
       setDrafts({})
       setResults((r) => ({ ...r, [lang]: {} }))
-    } catch (e) { setMsg(e instanceof Error ? e.message : 'помилка застосування') }
+    } catch (e) { setMsg(e instanceof Error ? e.message : 'apply error') }
   }
 
   // soft-gate warnings: any checked-and-not-ok-and-still-suggested cell, all langs
@@ -98,19 +99,19 @@ export function TranslationReview() {
   return (
     <div className="flex h-full flex-col">
       <div className="flex-1 overflow-auto">
-        <div className="mx-auto max-w-3xl p-6">
+        <div className="mx-auto max-w-5xl p-6">
           <div className="mb-3 flex items-center gap-3">
-            <h1 className="text-lg font-semibold">Перевірка перекладу</h1>
-            <span className="text-sm text-gray-500">{segs.length} сегментів · {langs.length} мов</span>
-            {!editable && <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-500">тільки читання</span>}
+            <h1 className="text-lg font-semibold">Translation Review</h1>
+            <span className="text-sm text-gray-500">{segs.length} segments · {langs.length} languages</span>
+            {!editable && <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-500">read-only</span>}
           </div>
 
           {translating || (!hasText && !isLoading) ? (
             <div className="rounded-lg border border-blue-200 bg-blue-50 p-6 text-center text-sm text-blue-800 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300">
-              Виконується переклад (W2) на {langs.length} мов… Сторінка оновиться сама, коли буде готово.
+              Translation (W2) in progress for {langs.length} languages… This page will refresh automatically when it is ready.
             </div>
           ) : isLoading ? (
-            <div className="text-sm text-gray-400">Завантаження…</div>
+            <div className="text-sm text-gray-400">Loading…</div>
           ) : (
             <>
               {/* language selector */}
@@ -138,18 +139,18 @@ export function TranslationReview() {
               <div className="mb-3 flex items-center gap-3 rounded-md border border-gray-200 dark:border-[#29292c] bg-gray-50 px-3 py-2 dark:bg-[#202023]/60">
                 <label className="flex items-center gap-1.5 text-sm text-gray-700 dark:text-gray-300">
                   <input type="checkbox" checked={allChecked} onChange={toggleAll} />
-                  Вибрати все
+                  Select all
                 </label>
-                <span className="text-xs text-gray-400">{selectedIds.length} з {segs.length} вибрано</span>
+                <span className="text-xs text-gray-400">{selectedIds.length} of {segs.length} selected</span>
                 <button onClick={check} disabled={checking || !selectedIds.length}
                   className="ml-auto rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-700 disabled:bg-gray-300 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white dark:disabled:bg-[#3a3a3d] dark:disabled:text-gray-400"
-                  title="Відправити вибрані сегменти цієї мови на AI-перевірку одним батчем">
-                  {checking ? 'Перевіряю…' : `Перевірити AI (${lang.toUpperCase()}, ${selectedIds.length})`}
+                  title="Send the selected segments for this language to AI review as one batch">
+                  {checking ? 'Checking…' : `Check with AI (${lang.toUpperCase()}, ${selectedIds.length})`}
                 </button>
                 {suggestedCount > 0 && editable && (
                   <button onClick={applyAllSuggested}
                     className="rounded-md bg-green-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-green-800">
-                    Застосувати всі ({suggestedCount})
+                    Accept all AI edits ({suggestedCount})
                   </button>
                 )}
               </div>
@@ -172,37 +173,48 @@ export function TranslationReview() {
                         <span className="font-mono">{shortId(seg.segment_id)}</span>
                         {res && (
                           <span className={`ml-auto inline-flex items-center gap-1 ${res.ok ? 'text-green-700' : 'text-amber-700'}`}>
-                            {res.ok ? (<><Check className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} />ОК</>) : (<><AlertTriangle className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} />є зауваги</>)}
+                            {res.ok ? (<><Check className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} />OK</>) : (<><AlertTriangle className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} />issues</>)}
                           </span>
                         )}
                       </div>
-                      <div className="mb-1.5 text-xs text-gray-400">{seg.en_text}</div>
-                      <textarea
-                        value={draft} disabled={!editable} rows={2}
-                        onChange={(e) => setDrafts((d) => ({ ...d, [key]: e.target.value }))}
-                        onBlur={() => commit(seg)}
-                        className="w-full resize-none rounded border border-gray-200 dark:border-[#29292c] bg-white dark:bg-[#161617] px-2 py-1 text-sm disabled:bg-gray-50 dark:bg-[#161617] dark:disabled:bg-[#202023]"
-                      />
-                      {res && !res.ok && (
-                        <div className="mt-1.5 rounded-md border border-amber-200 bg-white dark:border-amber-900 dark:bg-[#161617] p-2 text-xs">
-                          <div className="text-amber-800 dark:text-amber-300"><b>Коментар AI:</b> {res.comment}</div>
-                          {res.suggestion && (
-                            <>
-                              <div className="mt-1 text-gray-700 dark:text-gray-300"><b>Пропозиція:</b> {res.suggestion}</div>
-                              {editable && (
-                                <button onClick={() => applyOne(seg.segment_id, res.suggestion as string)}
-                                  className="mt-1 rounded border border-green-300 bg-green-50 px-2 py-0.5 text-green-800 hover:bg-green-100">застосувати</button>
+                      {/* Two columns: EN original (read-only constant) + the selected language */}
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="flex flex-col">
+                          <div className="mb-1 font-mono text-[11px] uppercase tracking-wide text-gray-400">EN · original</div>
+                          <div className="flex-1 rounded border border-gray-200 bg-gray-50 px-2 py-1 text-sm text-gray-600 dark:border-[#29292c] dark:bg-[#202023] dark:text-gray-400" title="EN is a constant and is not editable">
+                            {seg.en_text}
+                          </div>
+                        </div>
+                        <div className="flex flex-col">
+                          <div className="mb-1 font-mono text-[11px] uppercase tracking-wide text-gray-400">{lang}</div>
+                          <textarea
+                            value={draft} disabled={!editable} rows={2}
+                            onChange={(e) => setDrafts((d) => ({ ...d, [key]: e.target.value }))}
+                            onBlur={() => commit(seg)}
+                            className="w-full flex-1 resize-none rounded border border-gray-200 bg-white px-2 py-1 text-sm disabled:bg-gray-50 dark:border-[#29292c] dark:bg-[#161617] dark:disabled:bg-[#202023]"
+                          />
+                          {res && !res.ok && (
+                            <div className="mt-1.5 rounded-md border border-amber-200 bg-white dark:border-amber-900 dark:bg-[#161617] p-2 text-xs">
+                              <div className="text-amber-800 dark:text-amber-300"><b>AI comment:</b> {res.comment}</div>
+                              {res.suggestion && (
+                                <>
+                                  <div className="mt-1 text-gray-700 dark:text-gray-300"><b>Suggestion:</b> {res.suggestion}</div>
+                                  {editable && (
+                                    <button onClick={() => applyOne(seg.segment_id, res.suggestion as string)}
+                                      className="mt-1 rounded-md bg-green-700 px-2.5 py-1 text-xs font-medium text-white hover:bg-green-800">Accept AI edit</button>
+                                  )}
+                                </>
                               )}
-                            </>
+                            </div>
+                          )}
+                          {res && res.ok && (
+                            <div className="mt-1 inline-flex items-center gap-1 text-xs text-green-700">
+                              <Check className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} />
+                              {res.comment}
+                            </div>
                           )}
                         </div>
-                      )}
-                      {res && res.ok && (
-                        <div className="mt-1 inline-flex items-center gap-1 text-xs text-green-700">
-                          <Check className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} />
-                          {res.comment}
-                        </div>
-                      )}
+                      </div>
                     </li>
                   )
                 })}
@@ -214,10 +226,10 @@ export function TranslationReview() {
 
       <GateBar
         gate="translations"
-        title="Етап 2/3 · Переклад"
-        summary={Object.keys(results).length ? `AI перевірено · ${warnings.length} невирішених зауваг` : `${segs.length} сегментів · ${langs.length} мов`}
+        title="Stage 2/3 · Translation"
+        summary={Object.keys(results).length ? `AI reviewed · ${warnings.length} unresolved issues` : `${segs.length} segments · ${langs.length} languages`}
         warnings={warnings}
-        primaryLabel="Затвердити та почати синтез"
+        primaryLabel="Approve and start synthesis"
       />
     </div>
   )

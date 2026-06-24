@@ -3,6 +3,7 @@ import { AudioSegmentBlock } from './AudioSegmentBlock'
 import { DubWaveforms } from './DubWaveforms'
 import type { VP } from './SegmentBlock'
 import type { TimelineModel } from './model/useTimelineModel'
+import type { Fades } from './model/useFadeDrag'
 import type { SegmentRow } from '../../api/types'
 import type { Word } from '../../api/staged'
 
@@ -18,28 +19,35 @@ const STATUS_TINT: Record<string, string> = {
 const statusTint = (status: string, queued?: boolean) =>
   queued ? STATUS_TINT.QUEUED : STATUS_TINT[status] ?? STATUS_TINT.MISSING
 
+// Clips position freely (independent audio pieces) — clamp only to the lesson span,
+// and disable word-snap so cuts/trims land on exact audio positions.
+const NO_WORDS = (): Promise<Word[]> => Promise.resolve([])
+
 /**
- * Audio-stage blocks for ONE language: each segment placed at its (retimable) EN
- * slot, coloured by the dub's review status, with an overrun marker when the dub
- * is longer than the slot. Selecting a block drives the shared Workbench panel.
+ * Audio-stage blocks for ONE language: each localization's dub is a list of
+ * independent CLIPS (cut/move/trim/fade/delete pieces), coloured by the dub's
+ * review status. Selecting a clip drives the shared Workbench panel + the delete
+ * affordance.
  */
 export function AudioSegmentLane({
-  segments, lang, model, vp, durationSec, selectedSeg, editable,
-  inFlight, getWords, evictWords, setDragging, announce, onSelectIndex,
+  segments, lang, model, vp, durationSec, selectedClipId, editable, cutMode,
+  inFlight, setDragging, announce, onSelectClip, onCut, onFade, onDelete,
 }: {
   segments: SegmentRow[]
   lang: string
   model: TimelineModel
   vp: VP
   durationSec: number
-  selectedSeg: number | null
+  selectedClipId: string | null
   editable: boolean
+  cutMode: boolean
   inFlight: Set<string>
-  getWords: (id: string) => Promise<Word[]>
-  evictWords: (id: string) => void
   setDragging: (b: boolean) => void
   announce: (msg: string) => void
-  onSelectIndex: (index: number) => void
+  onSelectClip: (clipId: string, segIndex: number) => void
+  onCut: (clipId: string, clientX: number) => void
+  onFade: (clipId: string, fades: Fades) => void
+  onDelete: (clipId: string) => void
 }) {
   const readoutRef = useRef<HTMLDivElement>(null)
 
@@ -55,44 +63,42 @@ export function AudioSegmentLane({
       />
       {segments.map((row, i) => {
         const cell = row.cells[lang]
-        const times = model.version[row.segmentId] ?? { start: row.enStart ?? 0, end: row.enEnd ?? 0 }
-        const slot = Math.max(0, times.end - times.start)
-        const dubDur = cell?.finalDuration ?? cell?.realDuration ?? slot
-        const overrunSec = Math.max(0, dubDur - slot)
-        const pending = cell?.rowKey ? inFlight.has(cell.rowKey) : false
-        const bounds = () => {
-          const prev = segments[i - 1]
-          const next = segments[i + 1]
-          return {
-            prevEnd: prev ? model.getTimes(prev.segmentId).end : 0,
-            nextStart: next ? model.getTimes(next.segmentId).start : durationSec,
-          }
-        }
-        return (
-          <AudioSegmentBlock
-            key={row.segmentId}
-            seg={{ id: row.segmentId, startSec: times.start, endSec: times.end, text: cell?.textTranslated || row.enText }}
-            index={i}
-            times={times}
-            statusClass={statusTint(cell?.status ?? 'MISSING', cell?.needsRetts)}
-            selected={selectedSeg === i}
-            editable={editable}
-            pending={pending}
-            overrunSec={overrunSec}
-            normalized={cell?.normalizedLufs != null}
-            text={cell?.textTranslated || row.enText}
-            vp={vp}
-            durationSec={durationSec}
-            readoutRef={readoutRef}
-            current={() => model.getTimes(row.segmentId)}
-            bounds={bounds}
-            getWords={getWords}
-            commit={(t) => { model.commit(row.segmentId, t); evictWords(row.segmentId) }}
-            setDragging={setDragging}
-            announce={announce}
-            onSelect={() => onSelectIndex(i)}
-          />
-        )
+        if (!cell) return null
+        const pending = cell.rowKey ? inFlight.has(cell.rowKey) : false
+        return (cell.clips ?? []).map((clip) => {
+          const times = model.version[clip.id] ?? { start: clip.start, end: clip.end }
+          return (
+            <AudioSegmentBlock
+              key={clip.id}
+              seg={{ id: clip.id, startSec: times.start, endSec: times.end, text: cell.textTranslated || row.enText }}
+              index={i}
+              times={times}
+              statusClass={statusTint(cell.status ?? 'MISSING', cell.needsRetts)}
+              selected={selectedClipId === clip.id}
+              editable={editable}
+              cutMode={cutMode}
+              pending={pending}
+              normalized={cell.normalizedLufs != null}
+              fadeIn={clip.fadeIn}
+              fadeOut={clip.fadeOut}
+              text={cell.textTranslated || row.enText}
+              vp={vp}
+              durationSec={durationSec}
+              readoutRef={readoutRef}
+              current={() => model.getTimes(clip.id)}
+              // Clips move freely (overlap allowed) — clamp only to the lesson span.
+              bounds={() => ({ prevEnd: 0, nextStart: durationSec })}
+              getWords={NO_WORDS}
+              commit={(t) => model.commit(clip.id, t)}
+              commitFades={(f) => onFade(clip.id, f)}
+              setDragging={setDragging}
+              announce={announce}
+              onSelect={() => onSelectClip(clip.id, i)}
+              onCut={(clientX) => onCut(clip.id, clientX)}
+              onDelete={() => onDelete(clip.id)}
+            />
+          )
+        })
       })}
       <div
         ref={readoutRef}

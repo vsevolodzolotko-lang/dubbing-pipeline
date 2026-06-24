@@ -20,4 +20,4 @@ export const HANDLE_VISUAL_PX = 2.5 // visible handle width
 export const RULER_H = 26 // px — ruler height
 export const LANE_H = 64 // px — segment lane height (transcript timeline)
 export const TRACK_H = 50 // px — one audio track lane (audio timeline multitrack)
-export const RAIL_W = 172 // px — left track-header rail width (name + volume + M/S)
+export const RAIL_W = 132 // px — left track-header rail width (name + volume + M/S)

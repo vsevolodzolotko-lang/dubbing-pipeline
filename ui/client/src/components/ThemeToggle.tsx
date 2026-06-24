@@ -25,10 +25,10 @@ export function ThemeToggle() {
 
   const cycle = () => setTheme((t) => (t === 'light' ? 'dark' : t === 'dark' ? 'system' : 'light'))
   const Icon = theme === 'light' ? Sun : theme === 'dark' ? Moon : Monitor
-  const label = theme === 'light' ? 'Світла' : theme === 'dark' ? 'Темна' : 'Системна'
+  const label = theme === 'light' ? 'Light' : theme === 'dark' ? 'Dark' : 'System'
 
   return (
-    <button onClick={cycle} title={`Тема: ${label} — клік щоб змінити`}
+    <button onClick={cycle} title={`Theme: ${label} — click to change`}
       className="rounded px-1.5 py-1 text-sm hover:bg-gray-100 dark:hover:bg-[#202023]">
       <Icon className="h-4 w-4" strokeWidth={1.75} />
     </button>

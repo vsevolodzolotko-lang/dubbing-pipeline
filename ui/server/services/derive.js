@@ -44,8 +44,40 @@ export function buildLessonMatrix(model) {
   return { lessonId, langs, segments: rows }
 }
 
+// Audio-timeline clips for one localization: parse the projected JSON (mock), else
+// synthesize a single default clip from the slot + fades (live, or no edits yet).
+function parseClips(raw, fallback) {
+  if (typeof raw === 'string' && raw.trim()) {
+    try {
+      const arr = JSON.parse(raw)
+      if (Array.isArray(arr)) {
+        return arr.map((c, i) => {
+          const start = num(c.start) ?? 0
+          const end = num(c.end) ?? 0
+          return {
+            id: String(c.id ?? `${fallback.rowKey}~c${i}`),
+            start, end,
+            srcStart: num(c.srcStart) ?? 0,
+            srcEnd: num(c.srcEnd) ?? Math.max(0.001, end - start),
+            sourceDur: num(c.sourceDur) ?? Math.max(0.001, end - start),
+            fadeIn: num(c.fadeIn) ?? 0,
+            fadeOut: num(c.fadeOut) ?? 0,
+          }
+        })
+      }
+    } catch { /* fall through to default */ }
+  }
+  const len = Math.max(0.001, fallback.end - fallback.start)
+  return [{
+    id: `${fallback.rowKey}~c0`, start: fallback.start, end: fallback.end,
+    srcStart: 0, srcEnd: len, sourceDur: len, fadeIn: fallback.fadeIn, fadeOut: fallback.fadeOut,
+  }]
+}
+
 function buildCell(seg, loc, vSpeed, cfg) {
   const diagnosis = diagnose(seg, loc, vSpeed ?? 1, cfg)
+  const slotStart = num(loc.slot_start_sec) ?? num(seg.en_start_sec) ?? 0
+  const slotEnd = num(loc.slot_end_sec) ?? num(seg.en_end_sec) ?? 0
   return {
     present: true,
     rowKey: loc.row_key,
@@ -53,6 +85,9 @@ function buildCell(seg, loc, vSpeed, cfg) {
     status: up(loc.needs_attention) || 'FALSE',
     needsRetts: isTrue(loc.needs_retts),
     textTranslated: loc.text_translated ?? '',
+    // Per-language dub slot (falls back to the segment's EN slot when unset).
+    slotStart,
+    slotEnd,
     realDuration: num(loc.real_duration_sec),
     finalDuration: num(loc.final_duration_sec),
     finalSpeed: num(loc.final_speed),
@@ -64,6 +99,14 @@ function buildCell(seg, loc, vSpeed, cfg) {
     regenComment: loc.regen_comment ?? '',
     audioFileId: loc.audio_drive_file_id ?? '',
     normalizedLufs: loc.normalized_lufs === '' || loc.normalized_lufs == null ? null : Number(loc.normalized_lufs),
+    // Per-language dub fade envelope (seconds at the clip start/end).
+    fadeIn: num(loc.fade_in_sec) ?? 0,
+    fadeOut: num(loc.fade_out_sec) ?? 0,
+    // Independent audio clips on the timeline (cut/move/trim/fade/delete pieces).
+    clips: parseClips(loc.clips, {
+      rowKey: loc.row_key, start: slotStart, end: slotEnd,
+      fadeIn: num(loc.fade_in_sec) ?? 0, fadeOut: num(loc.fade_out_sec) ?? 0,
+    }),
     diagnosis,
   }
 }

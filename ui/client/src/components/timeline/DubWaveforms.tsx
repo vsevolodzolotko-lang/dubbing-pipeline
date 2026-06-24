@@ -5,10 +5,11 @@ import type { Times } from './model/types'
 import type { SegmentRow } from '../../api/types'
 
 /**
- * Per-segment dub waveform layer for the audio timeline: fetches each segment's
- * generated audio peaks for the current language (cached by rowKey) and draws
- * them into each slot region on one canvas behind the (translucent) blocks — so
- * you see the actual generated audio shape per segment.
+ * Per-clip dub waveform layer for the audio timeline: fetches each localization's
+ * generated audio peaks for the current language (cached by rowKey) and draws each
+ * CLIP's source slice (`srcStart…srcEnd` of the peaks) at the clip's position, with
+ * the clip's fade envelope baked into the amplitude — so the shape follows
+ * cut/moved/trimmed/faded pieces.
  */
 export function DubWaveforms({ segments, lang, getTimes, version, timeToX, contentWidth }: {
   segments: SegmentRow[]
@@ -41,15 +42,30 @@ export function DubWaveforms({ segments, lang, getTimes, version, timeToX, conte
     ctx.strokeStyle = dark ? '#94a3b8' : '#64748b'
     const mid = h / 2
     for (const s of segments) {
-      const detail = s.cells[lang]?.rowKey ? cache.current.get(s.cells[lang]!.rowKey!) : null
-      if (!detail || !detail.length) continue
-      const t = getTimes(s.segmentId)
-      const x0 = timeToX(t.start)
-      const bw = Math.max(1, timeToX(t.end) - x0)
-      for (let x = 0; x < bw; x++) {
-        const amp = (detail[Math.floor((x / bw) * detail.length)] ?? 0) * (h / 2) * 0.8
-        const px = x0 + x + 0.5
-        ctx.beginPath(); ctx.moveTo(px, mid - amp); ctx.lineTo(px, mid + amp); ctx.stroke()
+      const cell = s.cells[lang]
+      const detail = cell?.rowKey ? cache.current.get(cell.rowKey) : null
+      if (!detail || !detail.length || !cell?.clips) continue
+      for (const clip of cell.clips) {
+        const t = getTimes(clip.id)
+        const x0 = timeToX(t.start)
+        const bw = Math.max(1, timeToX(t.end) - x0)
+        // Map the clip's source window onto the source peaks (detail array).
+        const sourceDur = Math.max(0.001, clip.sourceDur)
+        const i0 = (clip.srcStart / sourceDur) * detail.length
+        const i1 = (clip.srcEnd / sourceDur) * detail.length
+        // Fade envelope in clip-local px.
+        const clipLen = Math.max(0.001, t.end - t.start)
+        const fadeInPx = Math.min(bw, (clip.fadeIn / clipLen) * bw)
+        const fadeOutPx = Math.min(bw, (clip.fadeOut / clipLen) * bw)
+        for (let x = 0; x < bw; x++) {
+          const di = Math.floor(i0 + (x / bw) * (i1 - i0))
+          let gain = 1
+          if (fadeInPx > 0 && x < fadeInPx) gain = x / fadeInPx
+          if (fadeOutPx > 0 && x > bw - fadeOutPx) gain = Math.min(gain, (bw - x) / fadeOutPx)
+          const amp = (detail[di] ?? 0) * (h / 2) * 0.8 * gain
+          const px = x0 + x + 0.5
+          ctx.beginPath(); ctx.moveTo(px, mid - amp); ctx.lineTo(px, mid + amp); ctx.stroke()
+        }
       }
     }
   }, [segments, lang, loaded, contentWidth, dark, version])

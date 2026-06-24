@@ -23,8 +23,8 @@ export function CartBar() {
       if (retrigger) {
         const res = await fetch('/api/regen/retrigger', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
         const data = await res.json().catch(() => ({}))
-        if (res.ok) { setMsg({ kind: 'ok', text: 'Запуск повторено' }); setOpen(false) }
-        else setMsg({ kind: 'err', text: data.error || 'не вдалося', canRetrigger: true })
+        if (res.ok) { setMsg({ kind: 'ok', text: 'Run re-triggered' }); setOpen(false) }
+        else setMsg({ kind: 'err', text: data.error || 'failed', canRetrigger: true })
         return
       }
       const rows = items.map((i) => ({
@@ -36,13 +36,13 @@ export function CartBar() {
       const data = await res.json().catch(() => ({}))
       if (res.ok && data.ok) {
         recordRegen(items.map((i) => ({ rowKey: i.rowKey, oldText: i.oldText, newText: i.newText })))
-        setMsg({ kind: 'ok', text: `Перегенерацію запущено (${data.count}). Рядки стануть REVIEW — послухай у Перевірці.` })
+        setMsg({ kind: 'ok', text: `Regen started (${data.count}). Rows will become REVIEW — listen in Review.` })
         clear(); setOpen(false)
       } else if (data.flagsWritten) {
-        setMsg({ kind: 'err', text: data.error || 'Прапорці виставлені, але вебхук не спрацював.', canRetrigger: true })
+        setMsg({ kind: 'err', text: data.error || 'Flags set, but the webhook did not fire.', canRetrigger: true })
         clear(); setOpen(false)
       } else {
-        setMsg({ kind: 'err', text: data.error || `Помилка ${res.status}` })
+        setMsg({ kind: 'err', text: data.error || `Error ${res.status}` })
       }
     } catch (e) {
       setMsg({ kind: 'err', text: String(e) })
@@ -56,16 +56,16 @@ export function CartBar() {
       <div className="flex items-center gap-3 border-t border-gray-200 bg-white px-5 py-2 shadow-[0_-1px_3px_rgba(0,0,0,0.04)] dark:border-[#29292c] dark:bg-[#161617]">
         {items.length > 0 ? (
           <>
-            <span className="text-sm dark:text-gray-200"><ShoppingBasket className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> Кошик перегенерації: <b>{items.length}</b></span>
+            <span className="text-sm dark:text-gray-200"><ShoppingBasket className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> Regen cart: <b>{items.length}</b></span>
             <button
               onClick={() => setOpen(true)}
               disabled={!writable}
               title={writable ? '' : reason}
               className="rounded-md bg-gray-900 px-3 py-1.5 text-sm text-white hover:bg-gray-700 disabled:opacity-40 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
             >
-              Перегенерувати
+              Regenerate
             </button>
-            <button onClick={clear} className="text-sm text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200">Очистити</button>
+            <button onClick={clear} className="text-sm text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200">Clear</button>
             {!writable && <span className="text-xs text-amber-600 dark:text-amber-400">{reason}</span>}
           </>
         ) : null}
@@ -73,7 +73,7 @@ export function CartBar() {
           <span className={`ml-auto flex items-center gap-2 text-sm ${msg.kind === 'ok' ? 'text-green-700' : 'text-red-700'}`}>
             {msg.text}
             {msg.canRetrigger && (
-              <button onClick={() => fire(true)} disabled={busy} className="rounded border border-red-300 px-2 py-0.5 text-xs">Повторити запуск</button>
+              <button onClick={() => fire(true)} disabled={busy} className="rounded border border-red-300 px-2 py-0.5 text-xs">Re-trigger run</button>
             )}
             <button onClick={() => setMsg(null)} className="text-gray-400"><X className="h-4 w-4" strokeWidth={1.75} /></button>
           </span>
@@ -83,10 +83,10 @@ export function CartBar() {
       {open && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 dark:bg-black/60" onClick={() => !busy && setOpen(false)}>
           <div className="max-h-[80vh] w-[40rem] overflow-auto rounded-xl bg-white p-5 dark:bg-[#161617] dark:text-gray-100" onClick={(e) => e.stopPropagation()}>
-            <h2 className="text-lg font-semibold">Перегенерувати {items.length} сегментів?</h2>
+            <h2 className="text-lg font-semibold">Regenerate {items.length} segments?</h2>
             <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-              Будуть виставлені <code>needs_retts=TRUE</code> і записані правки тексту, потім запуститься W_Regen.
-              Рядки стануть <b>REVIEW</b> для прослуху.
+              <code>needs_retts=TRUE</code> will be set and text edits saved, then W_Regen will run.
+              Rows will become <b>REVIEW</b> for listening.
             </p>
             <ul className="mt-3 space-y-2">
               {items.map((i) => (
@@ -98,17 +98,17 @@ export function CartBar() {
                       <div className="text-green-800">{i.newText}</div>
                     </>
                   ) : (
-                    <div className="text-gray-600">{i.newText} <span className="text-xs text-gray-400">(без змін тексту — лише пересинтез)</span></div>
+                    <div className="text-gray-600">{i.newText} <span className="text-xs text-gray-400">(no text change — re-synthesis only)</span></div>
                   )}
-                  <button onClick={() => remove(i.rowKey)} className="mt-1 text-xs text-gray-400 hover:text-red-600">прибрати</button>
+                  <button onClick={() => remove(i.rowKey)} className="mt-1 text-xs text-gray-400 hover:text-red-600">remove</button>
                 </li>
               ))}
             </ul>
             <div className="mt-4 flex gap-2">
               <button onClick={() => fire(false)} disabled={busy} className="rounded-md bg-gray-900 px-4 py-2 text-sm text-white hover:bg-gray-700 disabled:opacity-50">
-                {busy ? 'Запускаю…' : 'Так, перегенерувати'}
+                {busy ? 'Starting...' : 'Yes, regenerate'}
               </button>
-              <button onClick={() => setOpen(false)} disabled={busy} className="rounded-md border border-gray-300 px-4 py-2 text-sm">Скасувати</button>
+              <button onClick={() => setOpen(false)} disabled={busy} className="rounded-md border border-gray-300 px-4 py-2 text-sm">Cancel</button>
             </div>
           </div>
         </div>

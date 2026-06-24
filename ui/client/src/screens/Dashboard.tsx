@@ -1,246 +1,243 @@
-import { useEffect, useState } from 'react'
-import { Check, Hand, Play, ArrowRight } from 'lucide-react'
-import { useRunState } from '../api/useRunState'
-import { STATE_COPY, TONE_CLASSES } from '../ui'
+import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { Hand, Play, Check, Circle, ArrowDownUp } from 'lucide-react'
+import { useProjects } from '../api/queries'
+import { openProject, startAsProject, type Project, type ProjectStatus } from '../api/projects'
 import { StagedDropzone, type DroppedMedia } from '../components/StagedDropzone'
 import { PreflightSetup } from '../components/PreflightSetup'
 import { useRunMedia } from '../api/runMedia'
-import type { RunState } from '../api/types'
+import { useRunState } from '../api/useRunState'
+import { STATE_COPY, TONE_CLASSES, type Tone } from '../ui'
 
-const RUNNING = new Set(['STARTING', 'ARCHIVING', 'STT', 'TRANSLATING', 'SYNTHESIZING', 'STOPPING', 'REGENERATING'])
+// Buckets by the project's live run state (or a coarse fallback from stored status).
+const RUNNING = new Set(['STARTING', 'ARCHIVING', 'STT', 'TRANSLATING', 'SYNTHESIZING', 'RENDERING', 'REGENERATING'])
+const REVIEW = new Set(['TRANSCRIPT_REVIEW', 'TRANSLATION_REVIEW', 'AUDIO_REVIEW', 'RENDER_REVIEW'])
+const DONE = new Set(['COMPLETE', 'STOPPED'])
+
+const FALLBACK: Record<ProjectStatus, string> = {
+  new: 'IDLE', in_progress: 'SYNTHESIZING', review: 'AUDIO_REVIEW', done: 'COMPLETE', stopped: 'STOPPED',
+}
+
+const effState = (p: Project) => p.liveState || FALLBACK[p.status] || 'IDLE'
+const stateLabel = (s: string) => (s === 'IDLE' ? 'New' : STATE_COPY[s as keyof typeof STATE_COPY]?.label ?? s)
+const stateTone = (s: string): Tone => (s === 'IDLE' ? 'gray' : STATE_COPY[s as keyof typeof STATE_COPY]?.tone ?? 'gray')
+
+function bucket(s: string): 'queue' | 'review' | 'done' | 'new' {
+  if (RUNNING.has(s)) return 'queue'
+  if (REVIEW.has(s)) return 'review'
+  if (DONE.has(s)) return 'done'
+  return 'new'
+}
+
+// Which screen to land on when opening a project, by its state.
+function routeFor(s: string): string {
+  if (s === 'STT' || s === 'TRANSCRIPT_REVIEW') return '/transcript'
+  if (s === 'TRANSLATING' || s === 'TRANSLATION_REVIEW') return '/translation'
+  if (s === 'RENDERING' || s === 'RENDER_REVIEW') return '/render'
+  return '/review' // synth/audio/complete/stopped/idle
+}
+
+const SECTIONS: { key: 'queue' | 'review' | 'done' | 'new'; title: string }[] = [
+  { key: 'queue', title: 'In progress' },
+  { key: 'review', title: 'Awaiting review' },
+  { key: 'done', title: 'Ready' },
+  { key: 'new', title: 'New' },
+]
+
+// ── sorting ──────────────────────────────────────────────────────────────────
+type SortKey = 'updated' | 'name' | 'size' | 'langs' | 'attention'
+const SORTS: { key: SortKey; label: string }[] = [
+  { key: 'updated', label: 'Last updated' },
+  { key: 'name', label: 'Name' },
+  { key: 'size', label: 'Size (segments)' },
+  { key: 'langs', label: 'Languages' },
+  { key: 'attention', label: 'Needs attention' },
+]
+function compare(a: Project, b: Project, key: SortKey): number {
+  switch (key) {
+    case 'name': return a.name.localeCompare(b.name)
+    case 'size': return a.summary.segCount - b.summary.segCount
+    case 'langs': return a.summary.langCount - b.summary.langCount
+    case 'attention': return a.summary.needsAttention.count - b.summary.needsAttention.count
+    case 'updated': return (Date.parse(a.updatedAt) || 0) - (Date.parse(b.updatedAt) || 0)
+  }
+}
+function shortDate(iso: string): string {
+  const t = Date.parse(iso)
+  if (!t) return ''
+  return new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
 
 export function Dashboard() {
-  const { state } = useRunState()
+  const { data, isLoading } = useProjects()
+  const projects = data?.rows ?? []
+  const activeId = data?.activeId ?? null
+  const nav = useNavigate()
+  const { refresh } = useRunState()
   const { videoName, setVideo } = useRunMedia()
+
   const [pendingFile, setPendingFile] = useState<string | null>(null)
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [q, setQ] = useState('')
+  const [statusFilter, setStatusFilter] = useState<'all' | 'queue' | 'review' | 'done' | 'new'>('all')
+  const [sortBy, setSortBy] = useState<SortKey>('updated')
+  // Most sorts read best high→low; name reads best A→Z. asc=false means descending.
+  const [asc, setAsc] = useState(false)
 
   function onMedia({ audioName, videoFile }: DroppedMedia) {
-    if (videoFile) setVideo(videoFile)      // attach reference video (object URL in context)
-    if (audioName) setPendingFile(audioName) // opens Pre-flight; null = video-only drop, keep waiting
+    if (videoFile) setVideo(videoFile)
+    if (audioName) setPendingFile(audioName)
   }
 
-  if (!state) return <Loading />
+  async function open(p: Project) {
+    setBusyId(p.id); setErr(null)
+    try {
+      const res = await openProject(p.id)
+      if (!res.ok) { setErr(res.error || 'could not open'); return }
+      refresh()
+      nav(routeFor(res.project?.liveState || effState(p)))
+    } catch (e) { setErr(e instanceof Error ? e.message : 'error') }
+    finally { setBusyId(null) }
+  }
 
-  const copy = STATE_COPY[state.state]
-
-  // Pre-flight takes over the tab (full width) once a file is dropped.
+  // Drop-to-create takes over the tab (same flow as the Projects screen).
   if (pendingFile) {
     return (
       <div className="p-6">
         <div className="mx-auto max-w-2xl rounded-xl border border-gray-200 bg-white p-5 dark:border-[#29292c] dark:bg-[#161617]">
           <PreflightSetup fileName={pendingFile} videoName={videoName}
-            onCancel={() => { setPendingFile(null); setVideo(null) }} />
+            onCancel={() => { setPendingFile(null); setVideo(null) }}
+            onStart={(lessonId, langs) => startAsProject(lessonId, pendingFile, langs)} />
         </div>
       </div>
     )
   }
 
+  const counts = {
+    all: projects.length,
+    queue: projects.filter((p) => bucket(effState(p)) === 'queue').length,
+    review: projects.filter((p) => bucket(effState(p)) === 'review').length,
+    done: projects.filter((p) => bucket(effState(p)) === 'done').length,
+    new: projects.filter((p) => bucket(effState(p)) === 'new').length,
+  }
+  const ql = q.trim().toLowerCase()
+  const visible = projects
+    .filter((p) =>
+      (!ql || p.name.toLowerCase().includes(ql)) &&
+      (statusFilter === 'all' || bucket(effState(p)) === statusFilter))
+    .sort((a, b) => (asc ? 1 : -1) * compare(a, b, sortBy))
+  const FILTERS = [
+    ['all', 'All', counts.all], ['queue', 'In progress', counts.queue], ['review', 'Review', counts.review],
+    ['done', 'Ready', counts.done], ['new', 'New', counts.new],
+  ] as const
+
   return (
-    <div className="grid grid-cols-1 gap-6 p-6 lg:grid-cols-[1fr_18rem]">
-      <section className="rounded-xl border border-gray-200 bg-white p-5 dark:border-[#29292c] dark:bg-[#161617]">
-        <div className="mb-4 flex items-center gap-3">
-          <h1 className="text-lg font-semibold">Прогрес рану</h1>
-          <span className={`rounded-full border px-3 py-1 text-xs font-medium ${TONE_CLASSES[copy.tone]}`}>
-            {copy.label}
-          </span>
+    <div className="p-6">
+      {/* full-width controls — keeps the list and the dropzone column top-aligned */}
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Projects</h1>
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search projects…"
+          className="ml-1 w-48 rounded-md border border-gray-300 bg-white px-2 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 dark:border-[#3a3a3d] dark:bg-[#161617] dark:text-gray-200" />
+        <div className="flex items-center gap-1">
+          <select value={sortBy} onChange={(e) => setSortBy(e.target.value as SortKey)}
+            className="rounded-md border border-gray-300 bg-white px-2 py-1 text-sm text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 dark:border-[#3a3a3d] dark:bg-[#161617] dark:text-gray-200">
+            {SORTS.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
+          </select>
+          <button onClick={() => setAsc((v) => !v)} title={asc ? 'Ascending' : 'Descending'}
+            className="flex h-[30px] w-[30px] items-center justify-center rounded-md border border-gray-300 text-gray-500 hover:bg-gray-100 dark:border-[#3a3a3d] dark:text-gray-300 dark:hover:bg-[#202023]">
+            <ArrowDownUp className={`h-3.5 w-3.5 ${asc ? 'rotate-180' : ''}`} strokeWidth={1.75} />
+          </button>
         </div>
-        <Timers state={state} />
-        <Stepper state={state} />
-        {(state.state === 'COMPLETE' || state.state === 'STOPPED') && (
-          <CompletionCard state={state} />
-        )}
-      </section>
+        <div className="ml-auto flex flex-wrap gap-1">
+          {FILTERS.map(([key, label, c]) => (
+            <button key={key} onClick={() => setStatusFilter(key)}
+              className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${statusFilter === key
+                ? 'border-gray-900 bg-gray-900 text-white dark:border-gray-100 dark:bg-gray-100 dark:text-gray-900'
+                : 'border-gray-300 text-gray-600 hover:bg-gray-100 dark:border-[#3a3a3d] dark:text-gray-300 dark:hover:bg-[#202023]'}`}>
+              {label} <span className="opacity-60">{c}</span>
+            </button>
+          ))}
+        </div>
+      </div>
 
-      <section className="rounded-xl border border-gray-200 bg-white p-5 dark:border-[#29292c] dark:bg-[#161617]">
-        <h2 className="mb-3 text-sm font-semibold text-gray-700 dark:text-gray-300">Новий урок (поетапний)</h2>
-        <StagedDropzone onMedia={onMedia} />
-        {videoName && <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">відео-референс: {videoName}</p>}
-      </section>
-    </div>
-  )
-}
+      {err && <div className="mb-3 rounded bg-red-50 p-2 text-xs text-red-700 dark:bg-red-950/50 dark:text-red-300">{err}</div>}
 
-const STAGES_AUTO = [
-  { key: 'archive', label: 'Архівація попереднього уроку', gate: false },
-  { key: 'stt', label: 'Розпізнавання мовлення', gate: false },
-  { key: 'translate', label: 'Переклад', gate: false },
-  { key: 'synth', label: 'Синтез аудіо (мова за мовою)', gate: false },
-  { key: 'done', label: 'Готово', gate: false },
-] as const
-
-// Staged flow inserts the three review gates between the work stages.
-const STAGES_STAGED = [
-  { key: 'stt', label: 'Розпізнавання мовлення', gate: false },
-  { key: 'transcript_gate', label: 'Перевірка транскрипту', gate: true },
-  { key: 'translate', label: 'Переклад', gate: false },
-  { key: 'translation_gate', label: 'Перевірка перекладу', gate: true },
-  { key: 'synth', label: 'Синтез аудіо (мова за мовою)', gate: false },
-  { key: 'audio_gate', label: 'Перевірка аудіо (сегменти)', gate: true },
-  { key: 'render', label: 'Склейка повного файлу', gate: true },
-  { key: 'done', label: 'Готово', gate: false },
-] as const
-
-function Stepper({ state }: { state: RunState }) {
-  const staged = Boolean(state.staged)
-  const stages = staged ? STAGES_STAGED : STAGES_AUTO
-  const reached = staged ? stagedProgress(state.state) : stageProgress(state)
-  return (
-    <ol className="space-y-2">
-      {stages.map((s, i) => {
-        const status = reached > i ? 'done' : reached === i ? 'active' : 'todo'
-        return (
-          <li key={s.key} className="flex items-start gap-3">
-            <span className={`mt-0.5 flex h-5 w-5 items-center justify-center rounded-full text-[11px] ${
-              status === 'done' ? 'bg-gray-300 text-gray-600 dark:bg-[#3a3a3d] dark:text-gray-300'
-              : status === 'active' ? (s.gate ? 'bg-amber-500 text-white' : 'bg-blue-500 text-white')
-              : 'bg-gray-200 text-gray-400 dark:bg-[#202023]'}`}>
-              {status === 'done' ? <Check className="h-3 w-3" strokeWidth={1.75} /> : status === 'active' ? (s.gate ? <Hand className="h-3 w-3" strokeWidth={1.75} /> : <Play className="h-3 w-3" strokeWidth={1.75} />) : '·'}
-            </span>
-            <div className="flex-1">
-              <div className={`text-sm ${status === 'done' ? 'text-gray-400 dark:text-gray-500' : status === 'todo' ? 'text-gray-400' : 'text-gray-800 dark:text-gray-200'}`}>{s.label}</div>
-              {s.key === 'synth' && status !== 'todo' && <LangProgress state={state} />}
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[4fr_1fr]">
+        <section className="min-w-0">
+          {isLoading ? (
+            <div className="text-sm text-gray-400">Loading…</div>
+          ) : projects.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-gray-300 p-8 text-center text-sm text-gray-400 dark:border-[#3a3a3d] dark:text-gray-500">
+              No projects yet. Drop EN audio on the right to create the first one.
             </div>
-          </li>
-        )
-      })}
-    </ol>
-  )
-}
+          ) : visible.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-gray-300 p-8 text-center text-sm text-gray-400 dark:border-[#3a3a3d] dark:text-gray-500">
+              Nothing matches the filter.
+            </div>
+          ) : (
+            <div className="space-y-5">
+              {SECTIONS.map((sec) => {
+                const items = visible.filter((p) => bucket(effState(p)) === sec.key)
+                if (!items.length) return null
+                return (
+                  <div key={sec.key}>
+                    <div className="mb-1.5 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                      <SectionIcon k={sec.key} /> {sec.title} <span className="font-normal lowercase text-gray-300 dark:text-gray-600">{items.length}</span>
+                    </div>
+                    <ol className="space-y-1.5">
+                      {items.map((p) => (
+                        <ProjectCard key={p.id} p={p} active={p.id === activeId} busy={busyId === p.id} onOpen={() => open(p)} />
+                      ))}
+                    </ol>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </section>
 
-// Index into STAGES_STAGED for the current state.
-function stagedProgress(stateName: string): number {
-  switch (stateName) {
-    case 'STT': return 0
-    case 'TRANSCRIPT_REVIEW': return 1
-    case 'TRANSLATING': return 2
-    case 'TRANSLATION_REVIEW': return 3
-    case 'SYNTHESIZING': return 4
-    case 'AUDIO_REVIEW': return 5
-    case 'RENDER_REVIEW': return 6
-    case 'RENDERING': return 6
-    case 'COMPLETE': return 8
-    default: return 0
-  }
-}
-
-function LangProgress({ state }: { state: RunState }) {
-  const { synthByLang, currentLang, langDone, langTotal } = state.progress
-  const langs = Object.keys(synthByLang)
-  return (
-    <div className="mt-1.5">
-      <div className="flex flex-wrap gap-1.5 text-[11px]">
-        {langs.map((l) => {
-          const done = state.state === 'COMPLETE' || (synthByLang[l] > 0 && l !== currentLang && langDone > langs.indexOf(l))
-          const active = l === currentLang
-          return (
-            <span key={l} className={`rounded px-1.5 py-0.5 font-mono ${
-              done ? 'bg-green-100 text-green-700'
-              : active ? 'bg-blue-100 text-blue-700'
-              : 'bg-gray-100 text-gray-400'}`}>
-              {done ? <Check className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> : active ? <Play className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> : '·'} {l}
-            </span>
-          )
-        })}
+        <section className="lg:sticky lg:top-4 self-start">
+          <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">New project</div>
+          <StagedDropzone onMedia={onMedia} large />
+          {videoName && <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">reference video: {videoName}</p>}
+        </section>
       </div>
-      <div className="mt-1 text-xs text-gray-400">{langDone} з {langTotal} мов готово</div>
     </div>
   )
 }
 
-function CompletionCard({ state }: { state: RunState }) {
+function ProjectCard({ p, active, busy, onOpen }: { p: Project; active: boolean; busy: boolean; onOpen: () => void }) {
+  const s = effState(p)
+  const na = p.summary.needsAttention
+  const date = shortDate(p.updatedAt)
   return (
-    <div className="mt-5 rounded-lg border border-green-200 bg-green-50 p-4 dark:border-green-900 dark:bg-green-950/50">
-      <div className="text-sm font-medium text-green-900 dark:text-green-200">
-        {state.state === 'STOPPED' ? 'Зупинено' : 'Дубляж готовий'}
-        {state.needsAttention.total > 0 && (
-          <> · Потребують уваги: {state.needsAttention.pct}% ({state.needsAttention.count}/{state.needsAttention.total})</>
-        )}
-      </div>
-      <a href="/review" className="mt-2 inline-block rounded-md bg-green-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-green-800">
-        <ArrowRight className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> До перевірки
-      </a>
-    </div>
+    <li>
+      <button onClick={onOpen} disabled={busy}
+        className={`w-full rounded-lg border bg-white p-2.5 text-left disabled:opacity-50 dark:bg-[#161617] ${
+          active ? 'border-gray-900 dark:border-gray-100' : 'border-gray-200 hover:border-gray-300 dark:border-[#29292c] dark:hover:border-gray-600'}`}>
+        <div className="flex items-center gap-2">
+          <span className="truncate font-medium text-gray-900 dark:text-gray-100">{p.name}</span>
+          {active && <span className="rounded bg-gray-900 px-1.5 py-0.5 text-[10px] font-medium text-white dark:bg-gray-100 dark:text-gray-900">active</span>}
+          <span className={`ml-auto shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-medium ${TONE_CLASSES[stateTone(s)]}`}>{busy ? 'Opening…' : stateLabel(s)}</span>
+        </div>
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-gray-400">
+          <span>{p.summary.segCount} seg.</span>
+          <span>· {p.summary.langCount} langs</span>
+          {date && <span>· {date}</span>}
+          {na.total > 0 && na.count > 0 && (
+            <span className="text-amber-600 dark:text-amber-400">· attention {na.count}/{na.total}</span>
+          )}
+        </div>
+      </button>
+    </li>
   )
 }
 
-function stageProgress(state: RunState): number {
-  switch (state.state) {
-    case 'ARCHIVING': case 'STARTING': return 0
-    case 'STT': return 1
-    case 'TRANSLATING': return 2
-    case 'SYNTHESIZING': case 'STOPPING': case 'REGENERATING': return 3
-    case 'COMPLETE': case 'STOPPED': return 5
-    default: return state.runTokenPresent ? 3 : 0
-  }
-}
-
-function Timers({ state }: { state: RunState }) {
-  const now = useNow(RUNNING.has(state.state))
-  const t = state.timing
-  if (!t || (!t.runStartedAt && t.elapsedSec == null)) return null
-
-  const running = RUNNING.has(state.state)
-  const frozen = state.state === 'COMPLETE' || state.state === 'STOPPED'
-
-  // elapsed: live while running, frozen total when done
-  let elapsedMs: number | null = null
-  if (running && t.runStartedAt) elapsedMs = now - Date.parse(t.runStartedAt)
-  else if (t.elapsedSec != null) elapsedMs = t.elapsedSec * 1000
-
-  // eta: only during synthesis, ticking down to etaAt
-  let eta: React.ReactNode = null
-  if (state.state === 'SYNTHESIZING') {
-    if (t.etaAt) {
-      const remMs = Date.parse(t.etaAt) - now
-      eta = remMs > 1000
-        ? <>≈ залишилось <b>{fmtHuman(remMs)}</b> · завершення ~{fmtClock(t.etaAt)}{t.rowsPerMin ? ` · ${t.rowsPerMin}/хв` : ''}</>
-        : <>ось-ось завершиться…</>
-    } else {
-      eta = <span className="text-gray-400">оцінюю час завершення…</span>
-    }
-  }
-
-  return (
-    <div className="mb-4 flex flex-wrap items-center gap-x-6 gap-y-1 rounded-lg bg-gray-50 px-3 py-2 text-sm dark:bg-[#202023]">
-      {elapsedMs != null && (
-        <span>{frozen ? 'Тривало:' : 'Іде:'} <b className="tabular-nums">{fmtHMS(elapsedMs)}</b></span>
-      )}
-      {eta && <span className="text-gray-600">{eta}</span>}
-      {(state.state === 'SYNTHESIZING' || state.state === 'REGENERATING') && t.rowsTotal > 0 && (
-        <span className="text-gray-400">{t.rowsDone}/{t.rowsTotal} рядків</span>
-      )}
-    </div>
-  )
-}
-
-function useNow(active: boolean) {
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    if (!active) return
-    const id = setInterval(() => setNow(Date.now()), 1000)
-    return () => clearInterval(id)
-  }, [active])
-  return now
-}
-
-function pad(n: number) { return String(n).padStart(2, '0') }
-function fmtHMS(ms: number) {
-  const s = Math.max(0, Math.floor(ms / 1000))
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60
-  return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`
-}
-function fmtHuman(ms: number) {
-  const s = Math.round(ms / 1000)
-  if (s < 60) return `${s} с`
-  const m = Math.round(s / 60)
-  if (m < 60) return `${m} хв`
-  const h = Math.floor(m / 60), rm = m % 60
-  return rm ? `${h} год ${rm} хв` : `${h} год`
-}
-function fmtClock(iso: string) {
-  return new Date(iso).toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' })
-}
-
-function Loading() {
-  return <div className="p-8 text-sm text-gray-400">Завантаження стану…</div>
+function SectionIcon({ k }: { k: 'queue' | 'review' | 'done' | 'new' }) {
+  const cls = 'h-3.5 w-3.5'
+  if (k === 'queue') return <Play className={cls} strokeWidth={1.75} />
+  if (k === 'review') return <Hand className={cls} strokeWidth={1.75} />
+  if (k === 'done') return <Check className={cls} strokeWidth={1.75} />
+  return <Circle className={cls} strokeWidth={1.75} />
 }

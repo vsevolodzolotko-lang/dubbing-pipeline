@@ -47,7 +47,7 @@ export function SegmentBlock({
   const w = Math.max(2, vp.timeToX(times.end) - x)
   const small = w < 56
   const { prevEnd, nextStart } = bounds()
-  const label = `Сегмент ${index + 1}: «${seg.text.slice(0, 60)}», ${formatTime(times.start)}–${formatTime(times.end)}`
+  const label = `Segment ${index + 1}: "${seg.text.slice(0, 60)}", ${formatTime(times.start)}–${formatTime(times.end)}`
 
   return (
     <div
@@ -71,7 +71,7 @@ export function SegmentBlock({
       {selected && <span className="pointer-events-none absolute inset-x-0 top-0 h-0.5 rounded-t bg-blue-500" />}
       {editable && (
         <ResizeHandle
-          side="start" label={`Початок ${shortId(seg.id)}`}
+          side="start" label={`Start ${shortId(seg.id)}`}
           valueNow={times.start} valueMin={prevEnd} valueMax={times.end - MIN_DURATION}
           onPointerDown={(e) => startEdge('start', e)} onKeyDown={onHandleKey('start')} onFocus={() => onSelect(seg.id)}
         />
@@ -81,7 +81,7 @@ export function SegmentBlock({
       </span>
       {editable && (
         <ResizeHandle
-          side="end" label={`Кінець ${shortId(seg.id)}`}
+          side="end" label={`End ${shortId(seg.id)}`}
           valueNow={times.end} valueMin={times.start + MIN_DURATION} valueMax={nextStart}
           onPointerDown={(e) => startEdge('end', e)} onKeyDown={onHandleKey('end')} onFocus={() => onSelect(seg.id)}
         />

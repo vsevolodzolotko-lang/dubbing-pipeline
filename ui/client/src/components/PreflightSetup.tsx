@@ -26,9 +26,20 @@ const isPlaceholderVoice = (v?: VoiceRow) =>
  * readiness before the staged run starts. "Confirm, don't configure": fields are
  * pre-filled; the operator mostly glances and presses one button.
  */
-export function PreflightSetup({ fileName, videoName, onCancel }: { fileName: string; videoName?: string | null; onCancel: () => void }) {
+export function PreflightSetup({ fileName, videoName, onCancel, onStart }: {
+  fileName: string
+  videoName?: string | null
+  onCancel: () => void
+  // Override the start action (Projects/Dashboard pass a "create project" closure);
+  // defaults to the legacy staged-start. Same { ok, error } contract.
+  onStart?: (lessonId: string, langs: string[]) => Promise<{ ok: boolean; error?: string }>
+}) {
   const { state } = useRunState()
   const nav = useNavigate()
+  // Project-create mode (onStart provided): a new project is its own sheet/dataset,
+  // so the ACTIVE project's run state is irrelevant — don't gate on it (the legacy
+  // single-lesson flow still does, to avoid stomping the one in-flight run).
+  const projectMode = Boolean(onStart)
 
   const [lessonId, setLessonId] = useState(() => fileName.replace(/\.(wav|mp3|m4a)$/i, ''))
   const [voices, setVoices] = useState<VoiceRow[]>([])
@@ -71,25 +82,27 @@ export function PreflightSetup({ fileName, videoName, onCancel }: { fileName: st
 
   // ── readiness ──
   const idValid = ID_RE.test(lessonId)
-  const dup = archive.find((r) => r.lessonId === lessonId)
+  // The "already voiced → overwrites output" warning only applies to the legacy
+  // single-sheet flow; a new project has its own sheet/folders, so suppress it.
+  const dup = projectMode ? undefined : archive.find((r) => r.lessonId === lessonId)
   const missingVoice = selected.filter((l) => !(voiceOf(l)?.voice_id || '').trim())
   const placeholderVoice = selected.filter((l) => isPlaceholderVoice(voiceOf(l)))
   const cpsIssues = selected.filter((l) => {
     const v = Number(cpsOf(l)); return !cpsOf(l) || isNaN(v) || v < 5 || v > 25
   })
-  const canStart = Boolean(state?.enableWrites) && CAN_START.has(state?.state ?? '')
-  const busyRun = state?.staged && !canStart
+  const canStart = Boolean(state?.enableWrites) && (projectMode || CAN_START.has(state?.state ?? ''))
+  const busyRun = !projectMode && state?.staged && !canStart
 
   const blocks: string[] = []
-  if (!idValid) blocks.push('некоректна назва уроку')
-  if (!selected.length) blocks.push('не вибрано жодної мови')
-  if (missingVoice.length) blocks.push(`нема voice_id: ${missingVoice.join(', ')}`)
-  if (!state?.enableWrites) blocks.push('записи вимкнені')
-  if (busyRun) blocks.push('triває інший staged-ран')
+  if (!idValid) blocks.push('invalid lesson name')
+  if (!selected.length) blocks.push('no language selected')
+  if (missingVoice.length) blocks.push(`missing voice_id: ${missingVoice.join(', ')}`)
+  if (!state?.enableWrites) blocks.push('writes disabled')
+  if (busyRun) blocks.push('another staged run is in progress')
   const warns: string[] = []
-  if (dup) warns.push(`урок «${lessonId}» вже в архіві`)
-  if (placeholderVoice.length) warns.push(`голос-плейсхолдер: ${placeholderVoice.join(', ')}`)
-  if (cpsIssues.length) warns.push(`CPS не задано/поза межами: ${cpsIssues.join(', ')}`)
+  if (dup) warns.push(`lesson "${lessonId}" is already in the archive`)
+  if (placeholderVoice.length) warns.push(`placeholder voice: ${placeholderVoice.join(', ')}`)
+  if (cpsIssues.length) warns.push(`CPS unset/out of range: ${cpsIssues.join(', ')}`)
 
   function toggle(l: string) {
     const base = new Set(sel ?? allLangs)
@@ -102,11 +115,11 @@ export function PreflightSetup({ fileName, videoName, onCancel }: { fileName: st
     setBusy(true); setErr(null)
     try {
       const res = await applyArchiveSettings(arcId)
-      if (!res.ok) { setErr(res.error || 'не вдалося застосувати'); return }
+      if (!res.ok) { setErr(res.error || 'failed to apply'); return }
       if (res.activeLangs?.length) setSel(new Set(res.activeLangs))
       loadSettings()
       setApplied(arcDetail?.lessonId || arcId)
-    } catch (e) { setErr(e instanceof Error ? e.message : 'помилка') }
+    } catch (e) { setErr(e instanceof Error ? e.message : 'error') }
     finally { setBusy(false) }
   }
 
@@ -122,10 +135,10 @@ export function PreflightSetup({ fileName, videoName, onCancel }: { fileName: st
     setBusy(true); setErr(null)
     try {
       const res = await applyVoiceSet(tplSet.voices)
-      if (!res.ok) { setErr(res.error || 'не вдалося застосувати шаблон'); return }
+      if (!res.ok) { setErr(res.error || 'failed to apply template'); return }
       loadSettings() // refresh readiness chips with the new voices
       setTplApplied(tplSet.name)
-    } catch (e) { setErr(e instanceof Error ? e.message : 'помилка') }
+    } catch (e) { setErr(e instanceof Error ? e.message : 'error') }
     finally { setBusy(false) }
   }
 
@@ -133,10 +146,10 @@ export function PreflightSetup({ fileName, videoName, onCancel }: { fileName: st
     if (blocks.length || busy) return
     setBusy(true); setErr(null)
     try {
-      const res = await startStagedRun(lessonId, selected)
-      if (!res.ok) { setErr(res.error || 'не вдалося стартувати'); return }
+      const res = onStart ? await onStart(lessonId, selected) : await startStagedRun(lessonId, selected)
+      if (!res.ok) { setErr(res.error || 'failed to start'); return }
       nav('/transcript')
-    } catch (e) { setErr(e instanceof Error ? e.message : 'помилка') }
+    } catch (e) { setErr(e instanceof Error ? e.message : 'error') }
     finally { setBusy(false) }
   }
 
@@ -145,36 +158,36 @@ export function PreflightSetup({ fileName, videoName, onCancel }: { fileName: st
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
-        <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300">Підготовка уроку</h2>
-        <button onClick={onCancel} className="ml-auto text-xs text-gray-400 hover:text-gray-700 dark:hover:text-gray-200">скасувати</button>
+        <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300">Lesson setup</h2>
+        <button onClick={onCancel} className="ml-auto text-xs text-gray-400 hover:text-gray-700 dark:hover:text-gray-200">cancel</button>
       </div>
       <div className="flex flex-col gap-0.5 text-xs text-gray-400">
-        <span>аудіо: {fileName}</span>
-        <span>{videoName ? `відео: ${videoName} · референс (необов'язково)` : 'відео: не додано · референс необов’язковий'}</span>
+        <span>audio: {fileName}</span>
+        <span>{videoName ? `video: ${videoName} · reference (optional)` : 'video: not added · reference is optional'}</span>
       </div>
 
       {/* lesson name */}
       <div>
-        <label className="text-xs font-medium text-gray-500">Назва уроку (lesson_id)</label>
+        <label className="text-xs font-medium text-gray-500">Lesson name (lesson_id)</label>
         <div className="mt-1 flex items-center gap-2">
           <input value={lessonId} onChange={(e) => setLessonId(e.target.value)}
             className={`w-56 rounded border px-2 py-1 font-mono text-sm dark:bg-[#161617] ${idValid ? 'border-gray-300 dark:border-[#3a3a3d]' : 'border-red-400 dark:border-red-700'}`} />
           {!idValid && (
             <button onClick={() => setLessonId(slugify(lessonId))} className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-50 dark:border-[#3a3a3d] dark:hover:bg-[#202023]">
-              авто-фікс <ArrowRight className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> {slugify(lessonId)}
+              auto-fix <ArrowRight className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> {slugify(lessonId)}
             </button>
           )}
         </div>
-        {!idValid && <div className="mt-1 text-xs text-red-600 dark:text-red-400">тільки малі латинські літери, цифри, «_»; починати з літери</div>}
+        {!idValid && <div className="mt-1 text-xs text-red-600 dark:text-red-400">lowercase Latin letters, digits, "_" only; must start with a letter</div>}
         <div className="mt-1 font-mono text-[11px] text-gray-400">
           <ArrowRight className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> {lessonId}_seg_001 · {lessonId}_full_{firstLang}.wav
         </div>
-        {dup && <div className="mt-1 rounded bg-amber-50 px-2 py-1 text-xs text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"><AlertTriangle className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> урок «{lessonId}» уже озвучено — старт перепише його output</div>}
+        {dup && <div className="mt-1 rounded bg-amber-50 px-2 py-1 text-xs text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"><AlertTriangle className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> lesson "{lessonId}" is already localized — starting will overwrite its output</div>}
       </div>
 
       {/* languages */}
       <div>
-        <label className="text-xs font-medium text-gray-500">Мови ({selected.length})</label>
+        <label className="text-xs font-medium text-gray-500">Languages ({selected.length})</label>
         <div className="mt-1 flex flex-wrap gap-1.5">
           {allLangs.map((l) => {
             const on = sel?.has(l)
@@ -191,42 +204,42 @@ export function PreflightSetup({ fileName, videoName, onCancel }: { fileName: st
               </button>
             )
           })}
-          <button onClick={() => setSel(new Set(allLangs))} className="rounded-full px-2 py-1 text-xs text-gray-400 underline">усі</button>
+          <button onClick={() => setSel(new Set(allLangs))} className="rounded-full px-2 py-1 text-xs text-gray-400 underline">all</button>
         </div>
       </div>
 
       {/* readiness */}
       <div className="space-y-1 text-xs">
-        <ReadyRow label="Голоси" ok={!missingVoice.length && !placeholderVoice.length}
+        <ReadyRow label="Voices" ok={!missingVoice.length && !placeholderVoice.length}
           bad={missingVoice.length > 0}
-          text={missingVoice.length ? `нема voice_id: ${missingVoice.join(', ')} (блокує)`
-            : placeholderVoice.length ? `плейсхолдер: ${placeholderVoice.join(', ')}` : 'усі вибрані мови мають голос'}
+          text={missingVoice.length ? `missing voice_id: ${missingVoice.join(', ')} (blocking)`
+            : placeholderVoice.length ? `placeholder: ${placeholderVoice.join(', ')}` : 'all selected languages have a voice'}
           link="/voices" />
         <ReadyRow label="CPS" ok={!cpsIssues.length} bad={false}
-          text={cpsIssues.length ? `перевір cps_estimate: ${cpsIssues.join(', ')}` : 'CPS у нормі для вибраних мов'}
+          text={cpsIssues.length ? `check cps_estimate: ${cpsIssues.join(', ')}` : 'CPS is within range for the selected languages'}
           link="/config" />
-        <ReadyRow label="Стан" ok={canStart} bad={!canStart}
-          text={busyRun ? 'triває інший staged-ран' : !state?.enableWrites ? 'записи вимкнені (ENABLE_WRITES)' : 'вільно — можна стартувати'} />
+        <ReadyRow label="State" ok={canStart} bad={!canStart}
+          text={busyRun ? 'another staged run is in progress' : !state?.enableWrites ? 'writes disabled (ENABLE_WRITES)' : 'free — ready to start'} />
       </div>
 
       {/* start from saved settings: archive snapshot OR voice template (always shown) */}
       <div className="space-y-2 rounded-lg border border-gray-200 p-2 dark:border-[#29292c]">
-        <div className="text-xs font-medium text-gray-500">Старт із збереженого</div>
+        <div className="text-xs font-medium text-gray-500">Start from saved</div>
 
         {/* archive — full settings snapshot of a past run */}
         <div className="flex flex-wrap items-center gap-2">
-          <span className="w-28 shrink-0 text-[11px] text-gray-400">Архів</span>
+          <span className="w-28 shrink-0 text-[11px] text-gray-400">Archive</span>
           {archive.length === 0 ? (
-            <span className="text-[11px] text-gray-400">архів порожній</span>
+            <span className="text-[11px] text-gray-400">archive is empty</span>
           ) : (
             <>
               <select value={arcId} onChange={(e) => pickArchive(e.target.value)}
                 className="rounded border border-gray-300 px-1.5 py-0.5 text-xs dark:border-[#3a3a3d] dark:bg-[#161617]">
-                <option value="">— чистий старт —</option>
-                {archive.map((r) => <option key={r.id} value={r.id}>{r.lessonId} ({r.langCount} мов)</option>)}
+                <option value="">— clean start —</option>
+                {archive.map((r) => <option key={r.id} value={r.id}>{r.lessonId} ({r.langCount} langs)</option>)}
               </select>
-              {arcId && <button onClick={applyArchive} disabled={busy} className="rounded bg-gray-900 px-2 py-0.5 text-xs text-white hover:bg-gray-700 disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900">Застосувати</button>}
-              {applied && <span className="text-xs text-green-700 dark:text-green-400"><Check className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> з «{applied}»</span>}
+              {arcId && <button onClick={applyArchive} disabled={busy} className="rounded bg-gray-900 px-2 py-0.5 text-xs text-white hover:bg-gray-700 disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900">Apply</button>}
+              {applied && <span className="text-xs text-green-700 dark:text-green-400"><Check className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> from "{applied}"</span>}
             </>
           )}
         </div>
@@ -234,18 +247,18 @@ export function PreflightSetup({ fileName, videoName, onCancel }: { fileName: st
 
         {/* voice template — just a saved set of voices */}
         <div className="flex flex-wrap items-center gap-2">
-          <span className="w-28 shrink-0 text-[11px] text-gray-400">Шаблон голосів</span>
+          <span className="w-28 shrink-0 text-[11px] text-gray-400">Voice template</span>
           {sets.length === 0 ? (
-            <span className="text-[11px] text-gray-400">шаблонів нема — збережи набір на <a href="/voices" className="text-blue-600 underline dark:text-blue-400">/voices</a></span>
+            <span className="text-[11px] text-gray-400">no templates — save a set at <a href="/voices" className="text-blue-600 underline dark:text-blue-400">/voices</a></span>
           ) : (
             <>
               <select value={tplId} onChange={(e) => pickTemplate(e.target.value)}
                 className="rounded border border-gray-300 px-1.5 py-0.5 text-xs dark:border-[#3a3a3d] dark:bg-[#161617]">
-                <option value="">— не застосовувати —</option>
-                {sets.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.voices.length} мов)</option>)}
+                <option value="">— do not apply —</option>
+                {sets.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.voices.length} langs)</option>)}
               </select>
-              {tplSet && <button onClick={applyTemplate} disabled={busy} className="rounded bg-gray-900 px-2 py-0.5 text-xs text-white hover:bg-gray-700 disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900">Застосувати</button>}
-              {tplApplied && <span className="text-xs text-green-700 dark:text-green-400"><Check className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> голоси з «{tplApplied}»</span>}
+              {tplSet && <button onClick={applyTemplate} disabled={busy} className="rounded bg-gray-900 px-2 py-0.5 text-xs text-white hover:bg-gray-700 disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900">Apply</button>}
+              {tplApplied && <span className="text-xs text-green-700 dark:text-green-400"><Check className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /> voices from "{tplApplied}"</span>}
             </>
           )}
         </div>
@@ -261,9 +274,9 @@ export function PreflightSetup({ fileName, videoName, onCancel }: { fileName: st
             blocks.length ? 'bg-gray-300 dark:bg-[#3a3a3d] dark:text-gray-500'
             : warns.length ? 'bg-amber-600 hover:bg-amber-700'
             : 'bg-green-700 hover:bg-green-800'}`}>
-          {busy ? 'Стартую…' : blocks.length ? `Недоступно: ${blocks[0]}` : warns.length ? `Почати попри попередження (${warns.length})` : 'Почати урок'}
+          {busy ? (projectMode ? 'Creating…' : 'Starting…') : blocks.length ? `Unavailable: ${blocks[0]}` : warns.length ? `Start despite warnings (${warns.length})` : projectMode ? 'Create project' : 'Start lesson'}
         </button>
-        <p className="mt-2 text-[11px] text-gray-400">Окремий шлях від авто-потоку: файл у Drive <code>01_input</code> досі стартує повну автоматику без воріт.</p>
+        <p className="mt-2 text-[11px] text-gray-400">Separate path from the auto flow: a file in Drive <code>01_input</code> still starts full automation without gates.</p>
       </div>
     </div>
   )
@@ -280,7 +293,7 @@ function ReadyRow({ label, ok, bad, text, link }: { label: string; ok: boolean; 
       <Circle className={dotClass} />
       <span className="w-14 shrink-0 font-medium text-gray-600 dark:text-gray-400">{label}</span>
       <span className="text-gray-600 dark:text-gray-400">{text}</span>
-      {link && !ok && <a href={link} className="ml-auto inline-flex items-center gap-1 text-blue-600 underline dark:text-blue-400">налаштувати <ArrowRight className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /></a>}
+      {link && !ok && <a href={link} className="ml-auto inline-flex items-center gap-1 text-blue-600 underline dark:text-blue-400">configure <ArrowRight className="inline-block h-3.5 w-3.5 align-[-0.2em]" strokeWidth={1.75} /></a>}
     </div>
   )
 }
@@ -290,15 +303,15 @@ function ArchiveDiff({ detail, voices, config }: { detail: ArchiveRun; voices: V
   for (const l of detail.settings.activeLangs) {
     const snapV = detail.settings.voices.find((v) => v.lang === l)?.voice_id
     const liveV = voices.find((v) => v.lang === l)?.voice_id
-    if (snapV && liveV && snapV !== liveV) changes.push(`${l}: голос зміниться`)
+    if (snapV && liveV && snapV !== liveV) changes.push(`${l}: voice will change`)
     const snapC = detail.settings.config[`cps_estimate_${l}`]
     const liveC = config.find((r) => r.key === `cps_estimate_${l}`)?.value
     if (snapC && liveC && snapC !== liveC) changes.push(`cps ${l}: ${liveC}–${snapC}`)
   }
   return (
     <div className="mt-1.5 text-[11px] text-gray-500 dark:text-gray-400">
-      Мови: {detail.settings.activeLangs.join(', ')}.{' '}
-      {changes.length ? `Зміни: ${changes.slice(0, 5).join('; ')}${changes.length > 5 ? '…' : ''}` : 'налаштування збігаються з поточними'}
+      Languages: {detail.settings.activeLangs.join(', ')}.{' '}
+      {changes.length ? `Changes: ${changes.slice(0, 5).join('; ')}${changes.length > 5 ? '…' : ''}` : 'settings match the current ones'}
     </div>
   )
 }
@@ -316,9 +329,9 @@ function TemplateDiff({ set, voices, selected }: { set: VoiceSet; voices: VoiceR
   const missing = selected.filter((l) => !set.voices.some((v) => v.lang === l))
   return (
     <div className="text-[11px] text-gray-500 dark:text-gray-400">
-      Покриває {covered}/{selected.length} вибраних мов.{' '}
-      {willChange.length ? `Голос зміниться: ${willChange.join(', ')}.` : 'голоси збігаються.'}
-      {missing.length ? ` Немає в шаблоні: ${missing.join(', ')}.` : ''}
+      Covers {covered}/{selected.length} selected languages.{' '}
+      {willChange.length ? `Voice will change: ${willChange.join(', ')}.` : 'voices match.'}
+      {missing.length ? ` Not in template: ${missing.join(', ')}.` : ''}
     </div>
   )
 }

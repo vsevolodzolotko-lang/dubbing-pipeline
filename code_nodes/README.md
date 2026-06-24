@@ -2,7 +2,7 @@
 
 Reference copies of JavaScript bodies that live inside n8n **Code** nodes. The authoritative source is the `jsCode` field inside each workflow JSON — these `.js` files mirror that code so it's diff-friendly in PRs and readable in editors with JS support.
 
-After editing any `code_nodes/*.js`, run `npm run sync` (= `node scripts/sync_jscode.js`) to push the change into the workflow JSON. The script is idempotent — re-running on an already-synced state is a no-op. Covers all 28 nodes listed below across W_Master/W1/W2/W3/W3_Dispatch/W_Regen/W_Abort/W_Error.
+After editing any `code_nodes/*.js`, run `npm run sync` (= `node scripts/sync_jscode.js`) to push the change into the workflow JSON. The script is idempotent — re-running on an already-synced state is a no-op. Covers all 29 nodes listed below across W_Master/W1/W2/W3/W3_Dispatch/W_Regen/W_Abort/W_Error.
 
 | File | Lives in workflow | Node name | Purpose |
 |---|---|---|---|
@@ -24,6 +24,7 @@ After editing any `code_nodes/*.js`, run `npm run sync` (= `node scripts/sync_js
 | `gemini_editor.js` | W2_Translate_v2 | Gemini Editor | Cross-model editorial review (Gemini 3.5 Flash via OpenAI-compatible endpoint). Default active editor. Returns text unchanged when clean. |
 | `openai_editor.js` | W2_Translate_v2 | OpenAI Editor (orphaned) | GPT-5 alternative editor. Sits on canvas but disconnected by default. Swap in via n8n UI if Gemini quality drops on a specific lesson. |
 | `formality_lint.js` | W2_Translate_v2 + W3 Phase 2 expand | Formality Lint | Deterministic post-processor that enforces informal address (du/tu/ty/sen) per lang. |
+| `lexical_lint.js` | W2_Translate_v2 | Lexical Lint | Runs last in W2 (after Formality Lint, before Update Sheet). Full-pass Sonnet proofreader for genuinely broken tokens — non-words, truncations, broken morphology, typos, encoding artifacts (e.g. PL "zwi"→"nazywa") that slip past Verify/Editor. Strict minimal-edit prompt + length-similarity guard rejects rewrites. Toggle `w2_lexical_lint=false`. |
 | `adapt_translations.js` | W2_Translate_v2 | Adapt Translations | CPS-based estimation per language. If estimated duration > en_duration_sec × 1.05, runs up to 3 progressive Claude shorten attempts (light → medium → max). Length floor 60% prevents over-shortening. |
 | `expand_tts_jobs.js` | W3_Synthesize_v2 | Expand TTS Jobs | Builds one TTS job per (segment × active lang). Computes slot info: `tts_budget_sec`, `effective_slot_sec`, `max_borrowable_sec`, `trailing_steal_sec`, `tail_audio_silence_sec` (last seg only). Reads `audio_duration_sec` from segments row to expose trailing silence. |
 | `check_timing_and_pad.js` | W3_Synthesize_v2 | Check Timing + Pad | Largest node. Measures real PCM duration of initial TTS, runs Gemini 3.5 Flash shorten loop (3 attempts), then dynamic per-voice speed-up (`voice.speed + max_speed_up_delta` ceiling), then hard-truncate. Permissive silence-borrow: any non-movement segment may extend past `en_duration` into trailing silence (bounded by `effective_slot_sec`); movement-locked stays strict. Prepends lead silence, appends tail silence, builds final WAV. Appends `tail_audio_silence_sec − borrowed_sec` to last seg's WAV so sum(per-seg) equals EN total. |

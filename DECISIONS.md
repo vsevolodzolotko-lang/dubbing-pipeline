@@ -4,6 +4,103 @@
 
 ---
 
+### 2026-06-23 — TUNING_TAB_TEXT_QUALITY_INTELLIGENCE
+
+**Контекст**: вкладка `/cps` («CPS calibration», іконка Gauge, секція SETTINGS) була порожньою заглушкою (`Placeholder`, фаза v3). CPS-калібрування існувало лише як офлайн CLI `scripts/analyze_cps.js` (ручний цикл: експорт CSV → дивись рекомендації → ручна правка config-аркуша). Водночас пайплайн уже пише багатий шар метрик якості з кожного прогону (`*_adaptation_attempts`, `shorten_retries_in_synthesize`, `final_speed`, `borrowed_sec`, `needs_attention`, `phase2_outcome`, `regen_comment`, QA-findings) і вже вміє редагувати config/voices/prompts через UI — але ці дві речі ніде не були зведені. Оператор попросив «дуже круту складну» систему: збирати метрики з прогонів і разом з LLM визначати кращі налаштування + давати поради для промптів, окремою вкладкою, не обмеженою лише CPS.
+
+**Рішення**: вкладка **Tuning** (назва обрана оператором; маршрут лишається `/cps` без редіректу — sidebar gate-dot логіка недоторкана; лейбл «CPS calibration»→«Tuning», іконка `Gauge`→`SlidersHorizontal`). Чотири шари, усе mock-first:
+
+- **Метрики** — `services/qualityReport.js`: чиста синхронна `buildRunQualityReport(model, {qaReport})` над in-memory snapshot (без Google/LLM, як `derive.js`/`qaCheck.js`). По кожній мові: CPS-fit, adaptation pressure (avg/max/saturation), speed-розподіл (+speed-up/slow-down rate), borrow (+cap-hit), phase2-outcomes, needs_attention (TRUE/REVIEW), regen rate + класифікація коментарів (shortened/pacing/rewrite/other), QA-rate; плюс perType, perLangType і 0-100 score. Детермінований `recommendationsHint.cpsDeltas` (|delta|>1 і не LOW) «заземлює» LLM. CPS-математику винесено в спільний ESM `services/cps.js` (база-швидкість з voices.speed → fallback mode; tol 0.005; conf HIGH≥20/MED≥10/LOW; recommend=round(obs*2)/2) — дзеркало `scripts/analyze_cps.js` (крос-референс-коментарі в обох; CLI лишається CommonJS зі своїм CSV-I/O). Парсери `parseTable`/`parseKeyValue` винесено зі `snapshot.js` у `services/sheetParse.js` (для майбутнього Drive-бекфілу).
+- **Історія/тренди** — `services/qualityStore.js` (дзеркало `archive.js`): `ui/cache/quality/index.json` (headline-скаляри) + `run_<id>.json` (повний звіт) + `advice-last.json`. Capture з dedup за `runToken`+`lessonId` (overwrite): піггібек на `/api/render`, при генерації порад, і на COMPLETE-поллі GET-репорту. Drive-бекфіл з `05_archive` — пізніша фаза (формат снапшота не верифіковано; `/api/tuning/backfill` → 409 mock / 501).
+- **LLM-радник** — `services/qualityAdvisor.js` (дзеркало `qaGemini.runAnalysis`): **mock** = детерміновані поради з `cpsDeltas` + правило informal-address у `translate_system` (без мережі, бо ключ замаскований); **live** = Anthropic Opus 4.8 (override на Sonnet) через спільний `services/anthropic.js` (raw-fetch + `cache_control:ephemeral`, без `temperature` — Opus 4.8 його відкидає; патерн з phase2-ноди). System-prompt — опційний prompts-таб ключ `tuning_advisor_system` з built-in fallback (як `concept_gate_system`; навмисно НЕ сідимо в `sheets/prompts.tsv`, щоб не псувати multiline-TSV). Повертає поради по **config / voices / prompts** з confidence+evidence. Сервер не довіряє LLM: drop ключів поза `EDITABLE_CONFIG_KEYS`, клемп проти нової мапи `EDITABLE_CONFIG_BOUNDS` у `constants.js`, drop невідомих promptKey/voice.field, force `confidence:low` при sampleSize<10.
+- **Замкнений цикл (apply)** — без нових write-ендпоінтів: config→`PUT /api/config/:key` (`{expected,value}`, optimistic concurrency + allowlist), voices→`PUT /api/voices/:lang`, prompts→`POST /api/prompts/:key` (mock зберігає; live→409, UI деградує до Copy + лінк на `/prompts`). На 409 config-картка рефетчить live-значення й просить переглянути.
+
+**Чому так**: переюз усього наявного (LLM-патерн, write-ендпоінти з гардами, стор-патерн archive.js, mock/live-гілка qaGemini, save-флоу Config/Voices/Prompts, severity-кольори/NDJSON-стрім Qa.tsx) — нова поверхня тонка. Графіки без нової залежності (у `ui/package.json` chart-ліби нема): inline SVG/CSS у `screens/tuning/charts.tsx`. Без емодзі (`feedback_no_emojis_in_ui`) — lucide-іконки. Малі вибірки чесно позначаються LOW і не подаються як actionable; стор/тренди ростять впевненість між прогонами.
+
+**Зміни**:
+- Нові (сервер): `services/{cps,sheetParse,qualityReport,qualityStore,anthropic,qualityAdvisor}.js`, `routes/tuning.js`.
+- Правки (сервер): `index.js` (+`registerTuningRoutes`), `routes/actions.js` (+`qualityStore.capture` у `/api/render`), `services/snapshot.js` (імпорт парсерів з `sheetParse.js`), `constants.js` (+`EDITABLE_CONFIG_BOUNDS`), `scripts/analyze_cps.js` (крос-референс-нотатка).
+- Нові (клієнт): `screens/TuningLab.tsx`, `screens/tuning/{charts.tsx,tuningCatalog.ts,HealthOverview.tsx,Recommendations.tsx,Diagnostics.tsx,Trends.tsx,Help.tsx}`, `api/tuning.ts`. `Help.tsx` — вбудовані пояснення: розгортуваний «How to use this tab» (3-крокова петля Generate→Apply→Track) зверху + `HelpNote` під кожною секцією і actionable-нотатка в CPS-панелі (вкладка самодокументована).
+- Правки (клієнт): `App.tsx` (`/cps`→`TuningLab`), `components/Sidebar.tsx` (лейбл/іконка), `api/{queries,types}.ts` (хуки+типи), `api/useRunState.tsx` (інвалідація `['tuning']` на зміну стану). `screens/Placeholder.tsx` лишився, але вже не використовується.
+
+**Перевірено**: vite build + `tsc --noEmit` зелені (лише наперед відомі `vite.config.ts` node-types). HTTP-смоук mock (`MODE=mock`): `/api/tuning/report` (на `large_demo`: 105 сег × 7 = 735 cells, CPS HIGH-confidence), `/api/tuning/advise` (NDJSON → 6 config-порад HIGH + prompt-порада translate_system), capture у `runs`/`trend`, apply `cps_estimate_de 14→10.5` (після чого `de` випав з `cpsDeltas` — замкнений цикл підтверджено), `PUT /api/voices/de`, `POST /api/prompts/translate_system`. Compare-and-set (409) — live-only гард, у mock не спрацьовує (як і для решти config-правок).
+
+**Пізніша фаза**: Drive-бекфіл історії з `05_archive`; live-збереження промптів (Етап P); тонший voice-rec тюнінг класифікації regen-коментарів.
+
+---
+
+### 2026-06-23 — W_MASTER_ARCHIVE_LESSON_SCOPED_BY_FILEID
+
+**Контекст**: стара архівація (`W_MASTER_ARCHIVE_PREVIOUS_RUN_ROTATION`, `W_MASTER_ARCHIVE_REFACTOR_TO_HTTP_NODES`) робила багато помилок. На старті кожного рану 11-нодовий чейн робив `List Files` по всіх 4 робочих папках і виключав щойно-кинутий файл за `file_id`. Проблеми: (1) `02_output` одного уроку перевищує `pageSize=1000` (напр. 150 сегментів × 7 мов) → частина файлів тихо не архівувалась; (2) часткові збої `Move File` → split-архіви; (3) exclude-by-file_id крихкий під multi-file/batch drop; (4) rollback при падінні (open item) — якщо ран впав після archive+clear, таби витерті, відновлення вручну. Оператор хотів надійні архіви, де файли **актуальні** (з урахуванням W_Regen, який робиться вже після завершення уроку).
+
+**Рішення**: модель «self-archive на старті наступного рану, lesson-scoped, по file_id». Кожен урок має **одну** папку `05_archive/{lesson_id}_{ts}/`, що наповнюється у два чекпойнти:
+
+- **Чекпойнт 1 — власний старт уроку** (W_Master, перед W1): `Plan Lesson N` → `Create Lesson N Root` → `Create Lesson N Input Subfolder` → `Copy Input to Archive` (input mp3 копіюється в архів; `onError=stopWorkflow` — впала копія → ран стоп, джерело ціле) → `Store Archive Folder Id` (config `last_archive_folder_id` = id папки). Після W1 — гілка `Plan Input Delete` → `Delete Input File` видаляє input з `01_input` по точному `file_id` (W1 вже завантажив; batch-safe).
+- **Чекпойнт 2 — старт наступного рану, для уроку що завершився**: `Read Localizations (Archive)` → `Plan Prev Archive` (prev lesson з `segment_id` prefix; точні `02_output` file_id з `audio_drive_file_id` — без list-папки) → `Has Prev To Archive?` → `Plan Output Lists`/`List Output Files` (full/vtt по name-запиту `name contains '{lesson}_full_'`, ≤7 кожен) → `Plan Archive` (route по розширенню; completeness: усі active_langs мають full WAV? інакше snapshot суфікс `_INCOMPLETE`) → `Snapshot Sheet (Prev)` (`onError=stopWorkflow`, ПЕРЕД будь-яким move) → `Plan Subfolders`/`Create Subfolder` (02/03/04 під існуючим root; 01_input уже там) → `Plan Moves`/`Move File` (PATCH addParents/removeParents, retry 3) → `Clear Sheet Tabs` → `Plan Lesson N` (конвергенція з IF-false). Cross-run handoff через `last_archive_folder_id`.
+
+**Чому на старті наступного рану, а не при завершенні W3**: `Execute W3` у W_Master — `waitForSubWorkflow:false` (декаплінг, `W3_DECOUPLED_FROM_W_MASTER...`), тож «кінця рану» в W_Master нема. Головне — full WAVs лишаються в `03_full` до наступного старту, тож (а) UI деривить `COMPLETE` без змін коду (`runState.js` читає `03_full`), (б) W_Regen після завершення перезаписує full/seg in-place, і архів (зроблений на наступному старті) бере **фінальний post-regen стан**.
+
+**Чому помилки зникають**: pagination — жодного list робочих папок (segs з `localizations`, full/vtt крихітним name-запитом); multi-file/batch race — архівуємо конкретний prev lesson по його file_id, ніколи «все крім нового», input видаляємо по точному file_id; split-архів — snapshot=stopWorkflow перед move гарантує no-data-loss; rollback — нічого не архівується/чиститься поки наступний ран не стартував успішно, тож впалий ран лишає input (вже в архіві) + часткові виходи + рядки таблиці цілими; неповний урок → snapshot `_INCOMPLETE`.
+
+**Зміни**:
+- `workflows/W_Master.json` — видалено старий 13-нодовий rotate-чейн (`Read Config (Archive)`, `Plan Sources`, `List Files`, `Plan Archive`, `Has Files To Archive?`, `Create Archive Root`, `Copy Sheet Snapshot`, `Plan Subfolders`, `Create Subfolder`, `Plan Moves`, `Move File`, `Clear Sheet Tabs`, `Pass Lessons (after Archive)`); додано 22 ноди (чекпойнт-1/2 чейн на ряду y=4768/4880, secure-input-delete на y=5360). Позиції решти нод збережено (`feedback_workflow_node_layout`). 35 → 44 ноди. Лише HTTP Request ноди для Drive/Sheets (helpers заблоковані в Code Node).
+- `config` — новий runtime-ключ `last_archive_folder_id` (managed, не редагується оператором).
+- UI (`runState.js`) — **без змін** (тайминг clear не змінено; full-файли лишаються до наступного рану).
+- Docs: `docs/drive_structure.md`, `docs/config_keys.md`, `workflows/README.md`.
+
+**Закриває open items**: rollback при падінні + pagination >1000. **Supersedes**: `W_MASTER_ARCHIVE_PREVIOUS_RUN_ROTATION`, `W_MASTER_ARCHIVE_REFACTOR_TO_HTTP_NODES`.
+
+**Edge cases**: перший ран / порожня таблиця → `Plan Prev Archive` emit `{skip:true}` → одразу до `Plan Lesson N`. Stale `last_archive_folder_id` (папки нема) → впаде на `Create Subfolder`/`Move` з `onError=continue`; snapshot перед тим. Multi-file manual drop (debug) → папка за першим lesson_id, видаляються/архівуються всі file_id з Parse Filename. `drive_archive_folder_id` missing → `Plan Lesson N` throw до будь-якої Drive-мутації.
+
+**Не зроблено (defer)**: verify-pass (повторний name-запит на straggler-ів після move) — move по точному file_id з retry 3 уже сильно надійніший за старий list-based; додати якщо реальні часткові збої залишаться. Retention-policy на `05_archive` (старі папки accumulate forever) — окремий cleanup, якщо quota стане проблемою.
+
+---
+
+### 2026-06-23 — PHASE2_CONCEPT_PRESERVATION_GATE
+
+**Контекст**: аналіз результатів локалізації (day1, 7 мов) показав, що **базові переклади якісні, а псує текст шар підгонки під тайминг — насамперед W3 Phase 2 expansion**. Опус, розтягуючи закороткий дубль під слот, інколи **переписує** вірний переклад і **губить концепт**. Підтверджений приклад: FR seg_008 — база «…vers une vie **à haute vibration**» → після Phase 2 «…pas à pas, à ton rythme… vers une vie **plus épanouie**» (ключовий бренд-концепт «висока вібрація» зник). Це попри те, що `w3_expand_batch_system` уже містить diff-first / no-invention / restoration-first правила — на тісній length-band модель усе одно дрейфує. Prompt-гард недостатній; потрібен детермінований гейт ПІСЛЯ expansion.
+
+**Рішення**: додано **concept-preservation gate** у Phase 2. Перед re-TTS LLM-суддя (Sonnet 4.6) звіряє кандидата expansion проти **оригінального** (Phase 1 / W2) перекладу + EN: expansion може ДОДАВАТИ м'яке формулювання, але не має дропати/заміняти/послаблювати концепт, який оригінал уже ніс, і не суперечити EN. Клітинки, що не пройшли гейт, **не ре-синтезуються** — лишається вірне Phase 1 аудіо — і емітяться як `phase2_outcome='concept_dropped'` з **`needs_attention=true`** (людина рев'ю). Так регресія seg_008 ловиться автоматично: дроп концепту → відкат на вірний коротший дубль + флаг, замість шипнути перекручений довший.
+
+**Інженерія**: `code_nodes/phase2_batch_llm_tts.js`:
+- `runConceptGate(tasks)` — судить лише клітинки, де текст реально змінився (candidate ≠ original); батчиться по `EXPAND_BATCH_SIZE` сегментів, `CHUNK` паралельно; **fail-open** (порожня відповідь судді → НЕ реджектимо, щоб не блокувати добру expansion на флапі). Повертає `Set` ключів `${sid}_${lang}`.
+- Вбудовано в `runReTtsTasks` (спільний шлях attempt 1 + retry — одне місце покриває обидва проходи): gate → відсів rejected (`concept_dropped`) → решта йде у false-friend/formality fix → re-TTS. `concept_dropped` тече назад через `outcomes` → `pickFinal` тримає Phase 1 (або attempt 1, якщо то retry зреджектив).
+- Промпт `concept_gate_system` — externalizable (опційний ключ у `prompts` табі) з **inline-default** (як `formality_fix_system`), тож деплой лише через код, без правок Google-таба.
+- Тумблер: `phase2_concept_gate=false` у config вимикає гейт (default ON). Діагностика: `conceptDroppedTotal` + семпли в `phase2_diag`.
+- Емісія: на rejected-гілці `needs_attention` тепер = `outcome === 'concept_dropped'` (решта реджектів — overshoot/no_change — лишаються benign `false`).
+
+**Чому безпечно**: gate працює лише на expansion-кандидатах (підмножина коротких клітинок), не на всіх 329 рядках. Reject = відкат на вже наявне Phase 1 аудіо (вірне, лише коротше) — нічого не ламає в білді (`audio_drive_file_id` лишається). `needs_attention=true` на rejected-гілці персиститься: перевірено маршрут `Phase 2: Has Binary?[false] → Phase 2: Merge Branches → Phase 2: Update Localizations` (defineBelow мапить `needs_attention` + `phase2_outcome`). Наступний прогін Phase 2 такі клітинки пропускає (candidate-фільтр скіпає `needs_attention=true`) — тобто чекає рев'ю перед повторною expansion. Латентність: +1 Sonnet батч-сет на attempt по кандидатах — на критичному шляху W3, але модест.
+
+**Verification**: `node --check` (обгортка async) — OK; `scripts/sync_jscode.js` залив у `W3_Synthesize_v2.json` (50583 → 56856 chars), re-run ідемпотентний (28/28 in sync); W3 JSON парситься. Очікування на ре-прогоні: `phase2_diag.conceptDroppedTotal > 0` на уроках з агресивною expansion; FR seg_008-клас більше не шипить підмінений концепт. **Не верифіковано наживо** (потребує прогону W3).
+
+**Rollback**: `phase2_concept_gate=false` у config (миттєво, без деплою). Повний відкат — прибрати `runConceptGate` + виклик у `runReTtsTasks` + emit-зміну, re-sync.
+
+**Файли**: `code_nodes/phase2_batch_llm_tts.js`, `workflows/W3_Synthesize_v2.json` (sync), `DECISIONS.md`, `PLAN.md`.
+
+**Пов'язане**: broken-token / non-word lint у W2 — див. `W2_LEXICAL_LINT_NONWORD_PASS` (нижче, та сама сесія).
+
+---
+
+### 2026-06-23 — W2_LEXICAL_LINT_NONWORD_PASS
+
+**Контекст**: pl seg_004 «Nauka **zwi** to fizyką kwantową» — «zwi» несправжнє слово (мало б «nazywa»/«zwie»), і воно пройшло повз обидва W2 QA-проходи: Verify (`qa_verify_system` делегує typos на Editor) і Gemini Editor (CLASS D — typos, але слабка модель пропустила ізольований кейс). Детермінованого детектора з високою точністю для правдоподібних non-word'ів («zwi» — 3 літери, має голосну) без per-language словника нема (n8n code-нода не вантажить hunspell). Тож ловити цей клас має LLM; рішення — **де він живе** (обговорено з оператором: обрано окремий пас).
+
+**Рішення**: новий W2-вузол **`Lexical Lint`** — повний прохід **Sonnet 4.6** по всіх клітинках, **останнім** у W2 (`Read Segments Fresh → Formality Lint → Lexical Lint → Update Sheet`), щоб перевіряти фінальний post-adapt/post-formality текст. STRICT minimal-edit промпт: правити ЛИШЕ реально биті токени (non-words, truncations, broken morphology/agreement, очевидні typos, encoding-артефакти), решту лишати byte-for-byte; не рефразити/не ретранслювати/не чіпати formality/gender; proper/brand-імена (Spireo, Kundalini, Hugh, chi, prana) не чіпати. Drop-in за формою як Verify/Editor (autoMap passthrough + apply-if-changed).
+
+**Чому не prompt-only в Verify**: альтернатива (дописати «non-word» клас у `qa_verify_system`) безкоштовна (Verify-Sonnet уже біжить по всіх клітинках), але (1) ймовірнісна — на тісних батчах модель пропускає ізольований кейс (та сама причина, чому R6c має explicit-scan для formality), (2) вимагає правки живого промпта в Google-табі. Окремий пас — детермінований прохід саме під цей клас на сильній моделі + деплой лише через код. Ціна: +1 Sonnet батч-сет на прогін W2 (≈ як Verify); прийнятно за рішенням оператора (пріоритет — якість).
+
+**Інженерія**: `code_nodes/lexical_lint.js` (новий). Батчі 8 сегментів, `w2_llm_chunk` паралельно, `cache_control: ephemeral`. **Length-similarity guard**: корекція приймається лише якщо `|Δlen| ≤ max(12, 25%×len)` — більша дельта = рефраз/rewrite → відкидаємо, лишаємо оригінал (lint ніколи тихо не переписує валідний текст). Промпт `lexical_lint_system` externalizable з inline-default (як `formality_fix_system`). Тумблер `w2_lexical_lint=false` → passthrough. Логи: кількість фіксів + rejected-by-guard + до 8 before/after семплів. Структурна зміна графа: нова code-нода `w2-lexical-lint` (pos [17008,4832], нижче лінії Formality→Update, layout збережено) + rewire `Formality Lint.main[0]` з `Update Sheet` на `Lexical Lint`, новий `Lexical Lint → Update Sheet`. Зареєстровано в `scripts/sync_jscode.js` (W2-мапа).
+
+**Verification**: `node --check` (async-обгортка) — OK; нода вставлена, `sync_jscode.js` → «29 node(s) already in sync»; W2 JSON парситься; граф звірено — `Formality Lint → Lexical Lint → Update Sheet`, єдиний feeder Update Sheet = Lexical Lint. **Не верифіковано наживо** (потребує прогону W2 + ре-імпорту W2 у n8n). Очікування: pl «zwi»-клас фікситься; валідний текст недоторканий (guard + strict-промпт).
+
+**Rollback**: `w2_lexical_lint=false` (миттєво). Повний відкат — прибрати ноду + rewire `Formality Lint → Update Sheet` назад + забрати з sync-мапи + видалити `lexical_lint.js`, re-sync.
+
+**Файли**: `code_nodes/lexical_lint.js` (новий), `workflows/W2_Translate_v2.json` (нова нода + rewire), `scripts/sync_jscode.js` (мапа), `code_nodes/README.md`, `docs/config_keys.md`, `DECISIONS.md`, `PLAN.md`.
+
+**Деплой (оператор, разове)**: ре-імпортувати `W2_Translate_v2` у n8n (нова нода `Lexical Lint` + rewire). Config/`prompts`-таб чіпати не треба (inline-default промпт, default-on тумблер). Так само ре-імпорт `W3_Synthesize_v2` для concept-gate (див. вище).
+
+---
+
 ### 2026-06-19 — GO_PROCESSES_NEWEST_SINGLE_FILE
 
 **Контекст**: у первинному дизайні (`SLACK_SLASH_COMMANDS_BATCH_AND_GO`, нижче) `/go` йшов гілкою `From Feeder?(false) → List Input Files` і обробляв **усе**, що лежить у `01_input/`. Проблема (виявлена оператором): після прогону файл лишається в `01_input/` (архівується лише наступним прогоном, який розпізнає його як старий — а list-all цього не робить, бо всі файли потрапляють у `new_file_ids` і виключаються з архівації). Тож залишки **накопичувались**: кожен наступний `/go` переганяв і старий, і новий файл разом, ще й паралельним W3.
@@ -3988,3 +4085,121 @@ User-action:
 Future work:
 - If pipeline changes significantly later, briefing must be regenerated manually (snapshot of current state)
 - Could add a `scripts/regenerate_briefing.js` that pulls latest stats from DECISIONS.md + workflow node counts, but that's overengineering for now
+
+### 2026-06-20 — PROJECTS_SHEET_PER_PROJECT_MOCK
+
+Context: Операторський UI працював з ОДНИМ фіксованим листом + теками — кожен новий урок затирав попередній; не було як повернутися до готового проєкту, послухати аудіо, побачити attention і поправити/перезапустити. Потрібна модель «кожен файл = окремий проєкт».
+
+Decision (зафіксовано): **лист-на-проєкт**. Вміст проєкту живе у його власному листі (live) / mock-датасеті (зараз); перемикання проєкту = підміна того, які ID активні — нічого деструктивного між проєктами. Реєстр проєктів — **локальний JSON** `cache/projects.json` (за зразком `archive.json`), НЕ база даних. Та сама логіка (`projects.js`/роути/клієнт) працює і в mock, і в live — різниться лише бекенд за наявними швами `writes.js` (записи) та `snapshot.fetchTabs/fetchDrive` (читання). Стратегія викочування: **спершу повністю в mock**, live-cutover (Фаза 6) пізніше у вікно низького навантаження.
+
+Реалізовано (mock, Фази 2–4 плану):
+- `server/services/projects.js` — JSON-реєстр (`proj_N`, статуси `new|in_progress|review|done|stopped`, `schemaVersion`+код-сайд дефолти, mock-плейсхолдери `mock_*` для spreadsheetId/folders).
+- `server/services/mockStore.js` — рефактор single-`S` → `Map<id, ProjectState>` + активний вказівник; усі експорти резолвлять активний проєкт; 3 демо `DATASETS` (sleep_002/morning_light/body_scan); `seedAtStage` (наперед-задані стадії без таймера), `rearmAudioReview` (`DONE`→`SYNTH/REVIEW`, токени збережено → `AUDIO_REVIEW`).
+- `server/services/snapshot.js` — `reset()`/`onActiveChange()` (скид diff-кешів + перепул; повертають poll-проміс, роут чекає свіжу модель).
+- `server/routes/projects.js` — list/get/create/open. `START_STATES` винесено в `constants.js`.
+- `index.js` — `bootstrapProjects` (mock-only): сіє демо, реконсилює реєстр з JSON після рестарту (mock run-state не переживає рестарт, JSON — так).
+- Клієнт: `Projects.tsx` (домашній екран, `/`→`/projects`), `api/projects.ts`, `useProjects`, перемикач у Sidebar, `PreflightSetup` `onStart`-проп; дроп на Projects і Dashboard обидва створюють проєкт. Екрани ревʼю переюзано без змін.
+
+Rationale / нюанси:
+- **Створення/перемикання НЕ блокується станом рану** (відхил від першого драфту, який пропонував `START_STATES`-гейт). START_STATES={IDLE,COMPLETE,STOPPED} замикав би оператора на будь-яких воротах ревʼю (AUDIO_REVIEW∉START_STATES) і назавжди після mock-регену (needs_retts не очищається без n8n → вічний REGENERATING). Стан кожного проєкту ізольований і збережений у власному ProjectState, тож перемикання/створення нічого не втрачає; у live n8n працює незалежно від того, що показує UI. Тому open/create дозволені завжди (лише `writesEnabled` + live-sheets перевірки) — і на сервері (`canMutate`), і на клієнті (`PreflightSetup` у project-режимі через проп `onStart` ігнорує стан активного проєкту й хибне «перепише output»).
+- **Mock рухає УСІ проєкти в роботі, а не лише активний** (`tick()` ітерує `projects.values()`). Тож створення нового проєкту не зупиняє той, що вже біжить — він прогресує у фоні й сам паркується на своїх воротах ревʼю (стоп лише на RUNNING-стадіях). Це дзеркалить live (кожен проєкт = незалежний n8n-ран), тож черга не потрібна — проєкти йдуть конкурентно.
+- Кошик регену працює і в COMPLETE (`LOCALIZATION_WRITE_STATES`), тож перезбройка `done`→`AUDIO_REVIEW` відновлює **gate-UI ревʼю**, а не вмикає кошик.
+
+Files changed: `ui/server/services/{projects.js*,mockStore.js,snapshot.js}`, `ui/server/routes/{projects.js*,actions.js}`, `ui/server/{constants.js,index.js}`, `ui/client/src/{App.tsx,api/projects.ts*,api/queries.ts,api/useRunState.tsx,components/{PreflightSetup,Sidebar}.tsx,screens/{Projects.tsx*,Dashboard.tsx}}` (* = новий).
+
+Future work (Фаза 6 — live): реальні `files.copy`/`createFolder`/`uploadFile` у `driveClient.js`; параметризація `spreadsheetId` у `sheetsClient.js`; динамічні ID у 11 n8n-воркфлоу з webhook-payload (поіменно; `W_Master` GoogleDriveTrigger не чіпати); bootstrap `proj_1` з реального листа; env `TEMPLATE_SHEET_ID`+`PROJECTS_ROOT_FOLDER_ID`. У live `/projects` поки порожній (bootstrap mock-gated) — тестувати в `MODE=mock`.
+
+### 2026-06-21 — AUDIO_GATE_PER_LANGUAGE_SLOT_RETIME
+
+Context: На воротах аудіо таймлайн ретаймив **EN-слот сегмента** (`segments.en_start/en_end`), спільний для всіх 7 мов — тож перетягування блоку в одній доріжці рухало сегмент у всіх мовах. Оператор хотів рухати кожну мову незалежно (EN — фіксований якір, дуби можна трохи зсувати).
+
+Decision: на воротах аудіо ретайм став **пер-мовним**. Кожна мова має власний слот у рядку `localizations` (`slot_start_sec`/`slot_end_sec`); EN-слот (`segments` tab) ніколи не змінюється. Таймлайн-модель на цих воротах тепер кіюється по `rowKey` (один запис на `сегмент×мову`, сід — із пер-мовного слота), а не по `segment_id`. VTT/повний файл із новими пер-мовними таймштампами перегенеровуються на етапі **Склейка** (render), не тут.
+
+Реалізація:
+- `useTimelineModel` отримав опційний `persist` (дефолт — `retimeSegment` для воріт транскрипту). Аудіо-ворота передають `retimeLocalization`.
+- `AudioTimeline` сідить модель розгорткою `segments × langs` з id=`rowKey` (`lib/keys.ts` `cellKey`); `AudioSegmentLane`/`DubWaveforms` кіюються по `cellKey`; клампи сусідів — у межах однієї мови.
+- Дані: `localizations.slot_start_sec/slot_end_sec` (mock-проєкція + `derive.buildCell` → `Cell.slotStart/slotEnd`); `mockStore.retimeLocalization` (live → LIVE_TODO); `POST /api/localizations/retime` (guard `RETIME_WRITE_STATES`, що включає `AUDIO_REVIEW`).
+
+Перевірено (mock): ретайм `fr seg_001` змінює лише `fr`-слот; `de` і EN-слот незмінні; round-trip через `/api/lesson`.
+
+Нюанс / future work (live): **рухові сегменти** (`movementLocked`) у живому пайплайні мають лишатися ідентичними по тривалості на всіх мовах (синхро з відео) — пер-мовний зсув для них слід заборонити або попереджати; у mock наразі рухомі всі. Live-ретайм (реальний запис у `localizations` + регенерація VTT/повного файлу з нових слотів на Склейці) — Фаза 6/P.
+
+### 2026-06-23 — OPERATOR_UI_ENGLISH_AND_DASHBOARD_CONSOLIDATION
+
+Context: серія UX-ітерацій операторського UI під час mock-стадії projects-фічі.
+
+Decisions:
+- **UI повністю англійською.** Усі user-facing рядки клієнта (`ui/client/src`) перекладено з української на англійську (35 файлів) багатоагентним workflow; код-коментарі лишено українською. Доменний словник (Lesson/Project/Segment/Transcript/Translation/Audio/Assemble/Dub/Confidence/Approve/regen cart…) — для консистентності. Build+tsc зелені.
+- **Дашборд = єдиний хаб проєктів.** Вкладки «Дашборд» і «Проєкти» обʼєднано в одну (`/projects` → дошка, згрупована за станами: In progress / Needs review / Done / New) з пошуком за назвою + фільтрами-чіпами за статусом. `/lesson` → редірект на `/projects`.
+- **Вкладку «Архів» прибрано** — завершені проєкти видно в групі Done на дашборді. Бекенд archive.json лишився (start-from-archive у preflight).
+- **Транскрипт:** пер-слівна підсвітка низької впевненості STT (мок `stt_word_conf`; слова <0.8 жовті; редагування знімає підсвітку), картки на ~20% коротші, клік-to-edit.
+- **Чітка лінійка** (`WindowedRuler`): рендер лише видимого вікна при повному DPR замість full-width канваса (який на довгому уроці перевищував ліміт бекінг-стора → блюр). Аудіо + транскрипт.
+- **Синхронізація таймлайн↔матриця:** скрол-синхрон (time-lock проти петлі) + клік-синхрон (клік сегмента ↔ скрол матриці + плейхед на старт).
+- **Демо-надійність:** `reconcileMockProjects` авторитетно тримає вбудовані демо на їхній стадії (re-seed якщо mock-стан IDLE), викликається на кожен `GET /api/projects` і на `open` (self-heal без рестарту). Фікс «Large Demo застряг IDLE / 0 сегментів» при дрейфі статусу на 'new'.
+
+### 2026-06-23 — LOCALIZATION_RENAME_EXPORT_HUB_AND_TIMELINE_FRACTION_SYNC
+
+Context: продовження UX-ітерацій (mock). Продукт — **локалізація**, не даббінг.
+
+Decisions:
+- **«dub/dubbing» → «localize/localization»** в усіх user-facing рядках (код-ідентифікатори `dubAudios`/`DubWaveforms`/`dubs` і localStorage-ключ лишено). STAGE-копі та STATE_COPY оновлено.
+- **Навігація:** `AI analysis` перенесено **перед** `Audio` (порядок: Projects · Transcript · Translation · AI analysis · Audio · Export). Вкладку **`Assemble` перейменовано на `Export`** (роут `/render` без змін; `STAGES` label + іконка `Download`).
+- **Export-хаб** (`RenderStep.tsx`): дві частини — (1) staged-ворота **«Assemble full files»** (стара логіка RENDER_REVIEW→RENDERING→COMPLETE, вибір Drive-теки); (2) **каталог експорту**, що тягне deliverables із моделі. Текстові артефакти генеруються **на клієнті** (`lib/exporters.ts`: VTT/SRT із пер-мовних слотів, translation CSV з BOM, timing-manifest JSON) — однаково працюють у mock і live (одна модель). Аудіо — наявні `/api/audio/{full/:lang,segment/:rowKey,en}` (повний — після assemble; посегментно — `downloadSequence`). **Відео (mux/soft-subs) і ZIP-бандл — server render, Фаза P** (потрібен ffmpeg/zip), показані як disabled з тегом. Селектор мов скоупить пер-мовні та «All» дії.
+- **Таймлайн↔матриця: синхрон за SCROLL-FRACTION, не за сегментом.** Раніше matrix-top-row якорився до timeline-left-edge → при матриці в самому низу таймлайн НЕ доходив до кінця (показував ~seg_085, бо top-visible-row ≠ останній сегмент). Тепер `scrollTop/scrollMax` матриці = `scrollLeft/scrollMax` таймлайну → обидва доходять до своїх країв разом (низ ⇔ кінець). `AudioTimeline` віддає свій скролер нагору (`onScrollerReady`); `focusSeg`/`onViewSeg` (сегментний синхрон) лишилися як no-op props. Клік-вибір сегмента лишається **точним стрибком** (плейхед на старт + фрейм), із time-lock на обидва скролери (300мс), щоб програмні скроли не ганяли один одного.
+- **Розмір референс-відео:** `VideoReference` отримав `fill` — `object-contain` у батьківському боксі. Колонка стала `lg:w-1/5` (≈20% горизонталі) з `min-w-[18rem]`/`max-w-[34rem]`, `self-stretch min-h-0`; горизонтальне відео заповнює ширину, вертикальне обмежене висотою (вужче) і **ніколи не переповнює/не скролить**. Застосовано в Audio (Workbench) і Transcript.
+- **Сортування проєктів** на дашборді: `<select>` (Last updated / Name / Size(segments) / Languages / Needs attention) + кнопка напрямку; сорт застосовується перед групуванням за станами (порядок зберігається у `.filter`). На картку додано коротку дату `updatedAt`.
+- **Dropzone «New project»:** контролі (пошук/сорт/фільтри) винесено в **повноширинний хедер** над сіткою `[список | dropzone]`, тож «New project» вирівняний із першою секцією/карткою списку. Колонка `lg:w-1/5` (≈20%), dropzone збільшено (`large` проп: більший падінг/іконка).
+
+Files: `ui/client/src/{ui.ts,components/Sidebar.tsx,screens/RenderStep.tsx,lib/exporters.ts*,screens/Dashboard.tsx,components/StagedDropzone.tsx,screens/Workbench.tsx,components/timeline/{AudioTimeline,VideoReference}.tsx,screens/TranscriptReview.tsx}` (* = новий). Build+tsc зелені.
+
+Future (Фаза P): server-side експорт відео (ffmpeg mux + soft-subs) і ZIP-бандл; реальний save-to-Drive у каталозі експорту (зараз download-to-disk + mock-destination на assemble).
+
+### 2026-06-23 — PROMPTS_TAB_MOCK_PLUS_TRANSCRIPT_PLAYBACK
+
+Context: ще одна порція UX-ітерацій (mock).
+
+Decisions:
+- **Вкладка Prompts (mock).** `/prompts` (раніше Placeholder) → екран керування промптами LLM-стадій. Дефолти беруться з **реальної таблички** — `sheets/prompts.tsv` (експорт `prompts`-табу) парситься в рантаймі (`loadPromptDefaults`/`parseTSV` у mockStore — TSV із лапкованими багаторядковими полями); 12 реальних промптів, згруповані за стадією з опису (`W2`→Translation (W2), `W3`→Synthesis timing (W3), `DEPRECATED`→Deprecated, інакше Reference). Правки — **пер-проєктні** (`promptOverrides` поверх дефолтів; reset = збіг зі значенням-дефолтом видаляє override). Сервер: `mockStore.{listPrompts,getPrompt,setPrompt}`; `GET /api/prompts(/:key)` стали mock-aware (читають mockStore напряму, не snapshot — миттєва консистентність, як `/api/translation-prompt`); `POST /api/prompts/:key` (writesEnabled + mock-only). Клієнт: `api/prompts.ts`, `screens/Prompts.tsx` (collapsible-картки з lazy-fetch значення, textarea, чіпи `{{змінних}}`, Save/Reset). Гейт редагування — `state.enableWrites`.
+- **AI-review промпт переїхав у Prompts.** Панель «Prompt the AI uses to review translations» прибрано з вкладки AI analysis (Qa) і винесено в Prompts окремою карткою `translation_check` (через наявні `/api/translation-prompt`). Текст на Qa оновлено («review prompt lives in the Prompts tab»).
+- **Картки findings на AI analysis не розтягують сусідів** при expand — `grid items-start` (замість дефолтного `stretch`, що рівняв висоту рядка).
+- **Транскрипт: плейхед на старт обраного сегмента.** Клік по картці сегмента → `SegmentTimeline` сікає відео на `model.version[id]?.start ?? en_start_sec` і фреймить таймлайн (як на воротах аудіо).
+- **Транскрипт: Space = play/pause відео.** Додано той самий хендлер пробілу, що в `AudioTimeline` (ігнорує INPUT/TEXTAREA, no-op без відео).
+
+Files: `ui/server/services/mockStore.js`, `ui/server/routes/{read.js,actions.js}`, `ui/client/src/api/prompts.ts*`, `ui/client/src/screens/{Prompts.tsx*,Qa.tsx}`, `ui/client/src/App.tsx`, `ui/client/src/components/timeline/SegmentTimeline.tsx`. Build+tsc зелені.
+
+### 2026-06-23 — VOICE_SETS_BY_COURSE_WINDOW
+
+Context: оператор хотів окреме вікно зі списком наборів голосів, названих **за курсами** (де голоси використовувались) — напр. High Vibration / Kundalini / Somatic Yoga.
+
+Decisions:
+- **Окреме вікно (modal) «Voice sets by course»** замість тісного інлайн-списку у `LibraryPanel`. Кнопка «Voice sets by course (N)» у Voice library відкриває `components/VoiceSetsModal.tsx` (патерн overlay `fixed inset-0 z-50`, клік-аут + `X`, як `CartBar`/`GateBar`). Кожен набір розгортається в деталь `мова → голос (speed/style/stab)`; дії: **Apply** (gated, `/api/voices/apply-set`), **Delete** (`/api/presets/set/:id`), і **Save current voices as course set…** (`/api/presets/set`, prompt «Course name»). `LibraryPanel` тоншає — лишає лише «Individual voices» + кнопку.
+- **Назва набору = курс** (без окремого поля схеми). Уся інфраструктура наборів уже існувала (`presets.js` + роути + `apply-set`) — переюзано, нічого нового на бекенді крім сіду.
+- **Mock-сід прикладів** (`server/services/presetSeeds.js` + `bootstrapPresets()` в `index.js`): 3 курс-набори × 7 мов, з пер-курсовим профілем озвучення (High Vibration енергійніший: speed 1.06/style 0.35; Somatic Yoga спокійніший: speed 0.9/stab 0.65). Сід **лише коли бібліотека наборів порожня** (`presets.all().sets.length===0`) — не воскрешає видалені; mock-only. `addSet` робить unshift → сідаємо в reverse, щоб порядок у списку читався як оголошено.
+- **Тип-чистка:** `pick()` у Voices/Modal прийняв `src: object` з внутрішнім `as Record<string,unknown>` — прибрало TS2352 на `as Record<...>` каст інтерфейсів (interface не має implicit index signature). Залишились лише наперед відомі `vite.config.ts` node-types помилки.
+
+Files: `ui/server/services/presetSeeds.js*`, `ui/server/index.js`, `ui/client/src/components/VoiceSetsModal.tsx*`, `ui/client/src/screens/Voices.tsx` (* = новий). Build зелений; tsc — лише vite.config.
+
+### 2026-06-23 — AUDIO_TIMELINE_CUT_AND_FADES
+
+Context: на вкладці **Audio** (Dubbing Studio, ворота `AUDIO_REVIEW`) оператор просив можливість редагувати сегменти прямо на таймлайні — **розрізати** їх та робити **фейд-ін/фейд-аут**.
+
+Decisions:
+- **Фейди — пер-мовні** (як retime/normalize на цих воротах): два нові стовпці `localizations.fade_in_sec` / `fade_out_sec` (секунди на початку/кінці кліпу). Зберігаються в `S.locEdits[rowKey]`, проєціюються в `tabs()` і `derive.buildCell` (`cell.fadeIn/fadeOut`). Клемп: `fade_in + fade_out ≤` довжина пер-мовного слота (сервер тримає fade-in, ріже fade-out). Live-шлях кидає `LIVE_TODO` — як `retimeLocalization` (Етап P: render-нода «запікає» рамп у повний файл; стовпці — у live-таб). Роут `POST /api/localizations/fade` (guard `RETIME_WRITE_STATES`); `services/writes.setLocalizationFades` + `mockStore.setLocalizationFades`.
+- **UI фейдів — DAW-стиль:** дві ручки у верхніх кутах блока (`FadeHandle`), тягнеш усередину → росте фейд. Превʼю пишеться прямо в DOM (`useFadeDrag`, як `useEdgeEditing`), коміт секунд на `pointerup`. Візуалізація: трикутник-градієнт (`clip-path`) на блоці + загасання амплітуди в `DubWaveforms` (лінійний рамп множить пік). Ручки видно на hover/виборі; не перехоплюють body-drag (`stopPropagation`).
+- **Розріз («cut») — структурний** (єдина модель, що лягає на «один localization-рядок на (segment, lang)»): ріже **EN-сегмент** → впливає на всі мови (renumber). Перевикористано наявний `splitSegment(segmentId, wordIndex)`; на таймлайні клік у режимі «ножиці» мапить x→EN-час→**найближча межа слова** (`words.get`), далі звичайний split. Дозволено на воротах аудіо: новий `SPLIT_WRITE_STATES = {TRANSCRIPT_REVIEW, AUDIO_REVIEW}` (раніше split був лише `TRANSCRIPT_WRITE_STATES`). Половинки потім потребують ре-синтезу. Тумблер-ножиці в `TimelineToolbar` (lucide `Scissors`); `Esc` виходить; `cutMode` ховає resize/fade-ручки, клік ріже замість select.
+- **Чому не пер-мовний розріз кліпу:** дата-модель має рівно один рядок на (segment, lang) і `row_key = ${segment_id}_${lang}` — два кліпи на одну пару зламали б derive/матрицю. Тому cut лишається структурним (спільна структура), а пер-мовним є лише «поліш» (slot-retime, фейди, normalize). Відоме обмеження mock: split в audio-review зсуває нумерацію → старі `locEdits` (фейди/ретайми) аліасяться на інші сегменти; для демо прийнятно (у реалі половинки й так на ре-синтез).
+
+Files: `ui/server/{constants.js,routes/actions.js,services/{mockStore.js,writes.js,derive.js}}`, `ui/client/src/api/{staged.ts,types.ts}`, `ui/client/src/components/timeline/{AudioTimeline,AudioSegmentLane,AudioSegmentBlock,TimelineToolbar,DubWaveforms,FadeHandle}.tsx` + `model/useFadeDrag.ts` (* = новий: `FadeHandle.tsx`, `useFadeDrag.ts`), `docs/sheets_schema.md`. Build+tsc зелені (лише наперед відомі `vite.config.ts` node-types). HTTP-смоук на воротах AUDIO_REVIEW: fade=200 (зберігається), split 105→106.
+
+### 2026-06-23 — AUDIO_TIMELINE_PER_LANGUAGE_CLIPS (замінює «cut»-частину вище)
+
+Context: оператор уточнив: розріз має різати **саме аудіо-кліп обраної мови** в довільній точці (а не EN-сегмент по словах) і впливати **лише на ту мову, на яку клікнув**. Обрано модель «повноцінний аудіо-трек: незалежні кліпи».
+
+Decisions:
+- **Localization → масив кліпів.** Кожен дубляж (rowKey) на таймлайні — список **незалежних аудіо-кліпів** `{ id, start, end, srcStart, srcEnd, sourceDur, fadeIn, fadeOut }`. `src*` (секунди, 1:1, без time-stretch) трекають, який зріз джерела грає шматок → відтворення+вейвформа точні після cut/move/trim. Mock-стан: `S.clips[rowKey]` (+`S.clipSeq`); відсутній ⇒ один дефолтний кліп на весь слот; порожній масив ⇒ усе видалено. `id = ${rowKey}~cN`. Проєкція: новий JSON-стовпець `localizations.clips` у `tabs()`; `derive.parseClips` будує `cell.clips` (live/без правок → один дефолтний кліп зі слота+фейдів).
+- **Операції (всі пер-мовні, audio-gate, `RETIME_WRITE_STATES`):** `POST /api/clips/{cut,retime,fade,delete}` → `writes.{cutClip,retimeClip,setClipFades,deleteClip}` → `mockStore.*`. **cut** — у точці кліку без снапу до слів, `srcMid = srcStart + (t − start)`. **retime** — чистий рух (обидва краї на однакову Δ) лишає src-вікно; trim краю зсуває відповідний src-край 1:1. **fade** — клемп до довжини кліпу. **delete** — прибирає шматок. Live → `LIVE_TODO`.
+- **Клієнт повністю на кліпах:** `useTimelineModel` тепер keyed by **clip id**; `rawSegs = segments × langs × clips`; persist = `retimeClip`. `AudioSegmentLane` рендерить **один блок на кліп**; bounds вільні (`0..durationSec`, накладання дозволено); снап до слів вимкнено (`NO_WORDS`). `AudioSegmentBlock` дістав кнопку-кошик + `Delete/Backspace`; `selectedClipId` у `AudioTimeline` драйвить ring+delete+matrix-sync. **Відтворення** (`useTrackPlayback`) clip-aware: щокадру шукає кліп під плейхедом і грає `srcStart + (t − start)` джерела (`dubClips` з cell.clips — оминає старий баг `getTimes(segmentId)`).
+- **Відкат попереднього підходу:** структурний `splitSegment` на аудіо прибрано — `/api/segments/split` знову лише `TRANSCRIPT_WRITE_STATES`; ножиці тепер кличуть `/api/clips/cut`. Старі пер-rowKey `retimeLocalization`/`setFades` + стовпці `fade_in_sec/fade_out_sec` лишилися (дефолтний кліп читає фейди як стартові), але аудіо-таймлайн їх не використовує. `SPLIT_WRITE_STATES` лишилась невикористаною.
+- **Обмеження (mock):** кліпи можуть накладатися/мати проміжки (навмисно); при накладанні playback бере перший кліп під плейхедом. Live-кліпи — Етап P (render-нода застосовує edit-list).
+
+Files: `ui/server/{routes/actions.js,services/{mockStore.js,writes.js,derive.js}}`, `ui/client/src/api/{staged.ts,types.ts}`, `ui/client/src/components/timeline/{AudioTimeline,AudioSegmentLane,AudioSegmentBlock,DubWaveforms}.tsx` + `model/useTrackPlayback.ts`, `docs/sheets_schema.md`. Build+tsc зелені. HTTP-смоук (AUDIO_REVIEW): 1 дефолтний кліп → cut@9с → [6.8–9 src0–2.2][9–11.2 src2.2–4.4] → move правого +0.5с (src зберігся) → fade-in 0.3 → delete лівого; інша мова — 1 кліп (недоторкана).

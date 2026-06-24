@@ -9,7 +9,7 @@ export const ms = (s: number): number => Math.round(s * 1000) / 1000
 
 /** Compact readout for the cursor/time display, e.g. "12.34с". */
 export function formatTime(t: number): string {
-  return `${t.toFixed(2)}с`
+  return `${t.toFixed(2)}s`
 }
 
 /** Ruler label: whole seconds when zoomed out, hundredths when zoomed in. */

@@ -1,29 +1,31 @@
+import { useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import {
-  House, PenLine, Languages, AudioLines, Combine, Sparkles,
-  Mic, MessageSquareText, Gauge, Settings, Archive, Activity,
+  PenLine, Languages, AudioLines, Download, Sparkles,
+  Mic, MessageSquareText, SlidersHorizontal, Settings, Activity, FolderOpen,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useRunState } from '../api/useRunState'
+import { useProjects } from '../api/queries'
+import { openProject } from '../api/projects'
 import { currentStage, STAGES } from '../ui'
 
 interface NavItem { to: string; label: string; icon: LucideIcon }
 
 const DAILY: NavItem[] = [
-  { to: '/lesson', label: 'Урок', icon: House },
-  { to: '/transcript', label: 'Транскрипт', icon: PenLine },
-  { to: '/translation', label: 'Переклад', icon: Languages },
-  { to: '/review', label: 'Аудіо', icon: AudioLines },
-  { to: '/render', label: 'Склейка', icon: Combine },
-  { to: '/qa', label: 'AI-аналіз', icon: Sparkles },
+  { to: '/projects', label: 'Projects', icon: FolderOpen },
+  { to: '/transcript', label: 'Transcript', icon: PenLine },
+  { to: '/translation', label: 'Translation', icon: Languages },
+  { to: '/qa', label: 'AI analysis', icon: Sparkles },
+  { to: '/review', label: 'Audio', icon: AudioLines },
+  { to: '/render', label: 'Export', icon: Download },
 ]
 
 const SETTINGS: NavItem[] = [
-  { to: '/voices', label: 'Голоси', icon: Mic },
-  { to: '/prompts', label: 'Промпти', icon: MessageSquareText },
-  { to: '/cps', label: 'Калібрування CPS', icon: Gauge },
-  { to: '/config', label: 'Конфігурація', icon: Settings },
-  { to: '/archive', label: 'Архів', icon: Archive },
+  { to: '/voices', label: 'Voices', icon: Mic },
+  { to: '/prompts', label: 'Prompts', icon: MessageSquareText },
+  { to: '/cps', label: 'Tuning', icon: SlidersHorizontal },
+  { to: '/config', label: 'Configuration', icon: Settings },
 ]
 
 export function Sidebar() {
@@ -35,8 +37,9 @@ export function Sidebar() {
   return (
     <nav className="flex w-56 shrink-0 flex-col border-r border-gray-200 bg-white dark:border-[#29292c] dark:bg-[#161617]">
       <div className="px-4 py-4 font-serif text-lg font-semibold tracking-tight text-gray-900 dark:text-gray-100">Localization Studio</div>
-      <Section title="Щоденна робота" items={DAILY} gateRoute={gateRoute} />
-      <Section title="Налаштування" items={SETTINGS} warn />
+      <ProjectSwitcher />
+      <Section title="Daily" items={DAILY} gateRoute={gateRoute} />
+      <Section title="Settings" items={SETTINGS} warn />
       <div className="mt-auto px-2 py-3">
         <NavLink to="/setup"
           className={({ isActive }) =>
@@ -44,10 +47,40 @@ export function Sidebar() {
               isActive ? 'text-gray-700 dark:text-gray-200' : 'text-gray-400 hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-300'
             }`}>
           <Activity className="h-4 w-4 shrink-0" strokeWidth={1.75} />
-          <span>Доступи / діагностика</span>
+          <span>Access / diagnostics</span>
         </NavLink>
       </div>
     </nav>
+  )
+}
+
+// Quick active-project switch. Changing the selection re-points the active project
+// and refreshes the run state + data so every screen follows it immediately.
+function ProjectSwitcher() {
+  const { data } = useProjects()
+  const { refresh } = useRunState()
+  const [busy, setBusy] = useState(false)
+  const projects = data?.rows ?? []
+  const activeId = data?.activeId ?? ''
+  if (!projects.length) return null
+
+  async function onChange(e: React.ChangeEvent<HTMLSelectElement>) {
+    const id = e.target.value
+    if (!id || id === activeId) return
+    setBusy(true)
+    try { await openProject(id); refresh() }
+    catch { /* ignore — switcher is best-effort */ }
+    finally { setBusy(false) }
+  }
+
+  return (
+    <div className="px-3 pb-1">
+      <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-gray-400">Active project</label>
+      <select value={activeId} disabled={busy} onChange={onChange}
+        className="w-full rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 disabled:opacity-50 dark:border-[#3a3a3d] dark:bg-[#161617] dark:text-gray-200">
+        {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+      </select>
+    </div>
   )
 }
 
@@ -73,7 +106,7 @@ function Section({ title, items, warn, gateRoute }: { title: string; items: NavI
               <Icon className={`h-[18px] w-[18px] shrink-0 ${isActive ? 'text-gray-900 dark:text-white' : 'text-gray-400 dark:text-gray-500'}`} strokeWidth={1.75} />
               <span>{label}</span>
               {gateRoute === to && (
-                <span className="ml-auto h-2 w-2 animate-pulse rounded-full bg-amber-400" title="чекає на твоє підтвердження" />
+                <span className="ml-auto h-2 w-2 animate-pulse rounded-full bg-amber-400" title="awaiting your approval" />
               )}
             </>
           )}
