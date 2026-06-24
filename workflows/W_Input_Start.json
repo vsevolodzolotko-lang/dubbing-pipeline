@@ -1,0 +1,445 @@
+{
+  "name": "W_Input_Start - Slack /go",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "wis-manual-trigger-0001",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "go",
+        "responseMode": "onReceived",
+        "responseCode": 200,
+        "responseData": "Прийнято — перевіряю 01_input і запускаю обробку. Стеж за Slack-сповіщеннями.",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "wis-slash-webhook-0001",
+      "name": "Slash Command Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        200
+      ],
+      "webhookId": "w-go-slash"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "config",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "wis-read-config-0001",
+      "name": "Read Config",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        220,
+        150
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// W_Input_Start — Prep Signature. Identical Slack auth as W_Batch_Start / W_Abort, for the\n// SLASH COMMAND POST (/go). Slack signs every request:\n//   signature = 'v0=' + HMAC_SHA256(signing_secret, `v0:{ts}:{raw_body}`)\n// so we hash the EXACT raw body bytes — the webhook has Raw Body = ON (body arrives binary).\nconst cfg = {};\n$('Read Config').all().forEach(i => { if (i.json && i.json.key) cfg[i.json.key] = i.json.value; });\nconst secret = (cfg.slack_signing_secret || '').toString();\n\nconst wh = $('Slash Command Webhook').first() || {};\nconst headers = (wh.json && wh.json.headers) || {};\nconst given_sig = (headers['x-slack-signature'] || headers['X-Slack-Signature'] || '').toString();\nconst ts = (headers['x-slack-request-timestamp'] || headers['X-Slack-Request-Timestamp'] || '').toString();\n\nlet raw = '';\nconst b = wh.binary;\nif (b && b.data && b.data.data) {\n  raw = Buffer.from(b.data.data, 'base64').toString('utf8');\n} else if (typeof (wh.json && wh.json.body) === 'string') {\n  raw = wh.json.body;\n}\n\nconst field = (name) => {\n  const m = raw.match(new RegExp('(?:^|&)' + name + '=([^&]*)'));\n  if (!m) return '';\n  try { return decodeURIComponent(m[1].replace(/\\+/g, ' ')); } catch (e) { return m[1]; }\n};\n\nreturn [{ json: { base: `v0:${ts}:${raw}`, secret, given_sig, ts, command: field('command'), slack_user: field('user_name') } }];"
+      },
+      "id": "wis-prep-signature-001",
+      "name": "Prep Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "action": "hmac",
+        "type": "SHA256",
+        "value": "={{ $json.base }}",
+        "dataPropertyName": "computed_sig",
+        "secret": "={{ $json.secret }}",
+        "encoding": "hex"
+      },
+      "id": "wis-hmac-0001",
+      "name": "HMAC",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 1,
+      "position": [
+        660,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// W_Input_Start — Verify the Slack slash-command signature. Security gate for the public POST\n// webhook: anything that fails verification returns [] (the run is not fired). Same HMAC compare\n// + 5-min replay guard as W_Abort / W_Batch_Start.\nconst prep = $('Prep Signature').first().json || {};\nconst computed = ($json.computed_sig || '').toString();\nconst given = (prep.given_sig || '').toString();\nconst tsNum = Number(prep.ts);\nconst now = Math.floor(Date.now() / 1000);\n\nif (!prep.secret) { console.warn('W_Input_Start: slack_signing_secret missing from config — rejecting'); return []; }\nif (!given || !computed) { console.warn('W_Input_Start: missing signature/hash — rejecting'); return []; }\nif (!tsNum || Math.abs(now - tsNum) > 300) { console.warn('W_Input_Start: stale or invalid timestamp — rejecting (replay guard)'); return []; }\n\nconst expected = 'v0=' + computed;\nif (expected.length !== given.length || expected !== given) { console.warn('W_Input_Start: Slack signature mismatch — rejecting'); return []; }\n\nconsole.log(`W_Input_Start: verified /go from ${prep.slack_user || 'unknown'}`);\nreturn [{ json: { ok: true, slack_user: prep.slack_user } }];"
+      },
+      "id": "wis-verify-0001",
+      "name": "Verify Slack Slash",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the Drive files.list query for 01_input/ from config.\nconst cfg = {};\n$('Read Config').all().forEach(i => { if (i.json && i.json.key) cfg[i.json.key] = i.json.value; });\nconst input_folder = (cfg.drive_input_folder_id || '').toString().trim();\nif (!input_folder) throw new Error('drive_input_folder_id is not set in config');\nconst q = \"'\" + input_folder + \"' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'\";\nreturn [{ json: { q, input_folder, slack_channel: cfg.slack_channel || '' } }];"
+      },
+      "id": "wis-prep-query-0001",
+      "name": "Prep Input Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.googleapis.com/drive/v3/files",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $json.q }}"
+            },
+            {
+              "name": "fields",
+              "value": "files(id,name,mimeType,modifiedTime)"
+            },
+            {
+              "name": "orderBy",
+              "value": "modifiedTime desc"
+            },
+            {
+              "name": "pageSize",
+              "value": "1000"
+            },
+            {
+              "name": "supportsAllDrives",
+              "value": "true"
+            },
+            {
+              "name": "includeItemsFromAllDrives",
+              "value": "true"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "wis-list-input-0001",
+      "name": "List Input Files",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        150
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "MoWG4XRaoJGU18eu",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pick the SINGLE newest file in 01_input/ (the one the operator just dropped) and hand it to\n// W_Master as a specific file — so only its id goes into new_file_ids and W_Master archives any\n// OLDER leftover automatically (same self-cleaning as /batch).\n// Guard: if two+ files were dropped at nearly the same time, refuse — that's a /batch job;\n// picking one would archive the other unprocessed.\nconst files = ($json.files) || [];\nconst prep = $('Prep Input Query').first().json || {};\nconst emit = (o) => { o.slack_channel = prep.slack_channel; return [{ json: o }]; };\n\nif (files.length === 0) return emit({ status: 'empty' });\n\nconst ts = (f) => Date.parse(f.modifiedTime || '') || 0;\nconst sorted = files.slice().sort((a, b) => ts(b) - ts(a));\nconst newest = sorted[0];\n\nconst AMBIGUOUS_GAP_MS = 120000; // 2 min — files dropped this close together are treated as a batch\nif (sorted.length >= 2 && (ts(newest) - ts(sorted[1])) < AMBIGUOUS_GAP_MS) {\n  return emit({ status: 'ambiguous', count: files.length });\n}\n\nreturn emit({ status: 'process', id: newest.id, name: newest.name, mimeType: newest.mimeType });"
+      },
+      "id": "wis-pick-newest-0001",
+      "name": "Pick Newest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "wis-process-cond",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "process",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wis-has-file-if-0001",
+      "name": "Has File?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1760,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "Y3GWKEi15Lh9njXx",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/Y3GWKEi15Lh9njXx",
+          "cachedResultName": "W_Master - Drive Trigger Orchestrator"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "id": "={{ $('Pick Newest').first().json.id }}",
+            "name": "={{ $('Pick Newest').first().json.name }}",
+            "mimeType": "={{ $('Pick Newest').first().json.mimeType }}"
+          },
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "id": "wis-fire-wmaster-0001",
+      "name": "Fire W_Master (input)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1980,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// No single newest file to run: tell the operator why (empty input, or several fresh files).\nconst j = $json;\nconst channel = j.slack_channel;\nif (!channel) return [];\nlet text;\nif (j.status === 'ambiguous') {\n  text = ':warning: /go: у 01_input кілька свіжих файлів — лиши один і повтори, або клади всі в Batch/ і тисни /batch.';\n} else {\n  text = ':information_source: /go: у 01_input немає файлів — поклади файл і повтори.';\n}\nreturn [{ json: { channel, text } }];"
+      },
+      "id": "wis-build-notify-0001",
+      "name": "Build Notify",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1980,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "slackApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ channel: $json.channel, text: $json.text, unfurl_links: false, unfurl_media: false }) }}",
+        "options": {}
+      },
+      "id": "wis-slack-notify-0001",
+      "name": "Slack Notify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        260
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "slackApi": {
+          "id": "ogtQ2NONkRrXj2kl",
+          "name": "Slack account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slash Command Webhook": {
+      "main": [
+        [
+          {
+            "node": "Read Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Config": {
+      "main": [
+        [
+          {
+            "node": "Prep Signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep Signature": {
+      "main": [
+        [
+          {
+            "node": "HMAC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HMAC": {
+      "main": [
+        [
+          {
+            "node": "Verify Slack Slash",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Slack Slash": {
+      "main": [
+        [
+          {
+            "node": "Prep Input Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep Input Query": {
+      "main": [
+        [
+          {
+            "node": "List Input Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Input Files": {
+      "main": [
+        [
+          {
+            "node": "Pick Newest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick Newest": {
+      "main": [
+        [
+          {
+            "node": "Has File?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has File?": {
+      "main": [
+        [
+          {
+            "node": "Fire W_Master (input)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Notify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Notify": {
+      "main": [
+        [
+          {
+            "node": "Slack Notify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "WErrorNotify01"
+  },
+  "versionId": "wis-version-00000002",
+  "meta": {},
+  "id": "WInputStart000001",
+  "tags": []
+}

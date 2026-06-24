@@ -12,7 +12,7 @@ Automated dubbing for wellness/meditation video courses. English audio in → 7 
 - **Deepgram Nova-3** — STT + sentence-level timestamps (W1)
 - **Claude Sonnet 4.5** — translation, tone analysis (W2)
 - **Gemini 3.5 Flash** — native-rhythm editor (W2) + single-segment shortener (W3)
-- **Claude Opus 4.7** — Phase 2 batch expansion (W3)
+- **Claude Opus 4.8** — Phase 2 batch expansion (W3)
 - **ElevenLabs `eleven_multilingual_v2`** — TTS per language (W3)
 - **Google Drive** — audio input/output, per-segment WAVs, full WAVs, VTT, plus archive snapshots
 - **Google Sheets** — translation tracking, voice config, run-time diagnostics, externalized prompts
@@ -57,7 +57,7 @@ EN audio (Drive)
         silence-borrow for non-movement segments) → Save to Drive (per-segment .wav)
         → Trim Lead For Sequence (concat-time alignment) → Update localizations sheet
     Loop Phase 1 done → Read Localizations Fresh → Phase 2 (slowdown-to-fill)
-        → Batch LLM (Opus 4.7 expand via ToV patterns) + Verify + Editor + Formality Lint
+        → Batch LLM (Opus 4.8 expand via ToV patterns) + Verify + Editor + Formality Lint
         → reTtsOne speed-up retry on overshoot → refusal/false-friend safety nets
         → Update localizations sheet + per-segment WAVs
     Phase 2 done → Read Localizations Fresh 2 → Download Segment WAV
@@ -218,7 +218,7 @@ Read by W2/W3 at runtime. 11 prompts + ToV. Edit a row to re-tune any prompt wit
 │   ├── gemini_editor.js                 # native-rhythm Editor (default)
 │   ├── openai_editor.js                 # cross-model Editor (alt)
 │   ├── check_timing_and_pad.js
-│   ├── phase2_batch_llm_tts.js          # Phase 2: Opus 4.7 expand via ToV patterns + reTTS
+│   ├── phase2_batch_llm_tts.js          # Phase 2: Opus 4.8 expand via ToV patterns + reTTS
 │   ├── build_full_audio_per_lang.js
 │   ├── build_vtt_per_lang.js
 │   ├── regen_synthesize.js              # W_Regen synthesize body
@@ -269,7 +269,7 @@ Read by W2/W3 at runtime. 11 prompts + ToV. Edit a row to re-tune any prompt wit
 
 Baseline (~60-second lesson, 7-9 segments × 7 languages):
 - Deepgram Nova-3 (W1): ~$0.005
-- Claude (W2 + W3): ~$0.05–0.10 (Sonnet 4.5 for translate/verify/editor, Haiku 4.5 for W3 shorten/expand, Opus 4.7 for Phase 2 expand, prompt caching)
+- Claude (W2 + W3): ~$0.05–0.10 (Sonnet 4.5 for translate/verify/editor, Haiku 4.5 for W3 shorten/expand, Opus 4.8 for Phase 2 expand, prompt caching)
 - ElevenLabs TTS: ~$0.05–0.10 (~100 chars per segment × 49 calls + speed retries + Phase 2 re-TTS)
 
 **Total: ~$0.10–0.25 per lesson** for all 7 languages at the 60-sec baseline. Longer lessons scale ~linearly (sleep1_full @ 11 min ≈ 47 segments × 7 langs = 329 cells); per-lesson real-cost telemetry on long-form is in PLAN's Open items (nice-to-have).

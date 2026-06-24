@@ -1,0 +1,40 @@
+{
+  "name": "dubbing-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local web app for the localization manager — a stateless overlay over the dubbing pipeline's Google Sheets + Drive + n8n webhooks.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "concurrently -n server,client -c blue,magenta \"node --watch server/index.js\" \"vite\"",
+    "build": "vite build",
+    "start": "node server/index.js",
+    "check": "node server/check.js",
+    "auth": "node server/auth_oauth.js"
+  },
+  "dependencies": {
+    "@fastify/static": "^8.0.4",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@fontsource/lora": "^5.2.8",
+    "dotenv": "^17.4.2",
+    "fastify": "^5.2.1",
+    "google-auth-library": "^9.15.1",
+    "lucide-react": "^1.20.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
+    "@tanstack/react-query": "^5.66.0",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^7.1.5",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0"
+  }
+}

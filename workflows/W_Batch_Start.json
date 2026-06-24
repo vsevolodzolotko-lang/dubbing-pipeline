@@ -1,0 +1,222 @@
+{
+  "name": "W_Batch_Start - Slack /dub-batch",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "wbs-manual-trigger-0001",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "batch",
+        "responseMode": "onReceived",
+        "responseCode": 200,
+        "responseData": "Приймаю. Запускаю батч — забираю файли з Batch/ по одному. Стеж за Slack-сповіщеннями про завершення кожної лекції.",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "wbs-slash-webhook-0001",
+      "name": "Slash Command Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        200
+      ],
+      "webhookId": "w-batch-start-slash"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1LAxDWyV0pAxM1s5W00PTJ7OvFNQUxoeMSuszuOz3lDU",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "config",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "wbs-read-config-0001",
+      "name": "Read Config",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        240,
+        150
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "VPkRwpwr0BlVtmZ2",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// W_Batch_Start — Prep Signature. Same Slack request authentication as W_Abort, but for a\n// SLASH COMMAND POST (/dub-batch) instead of an interactivity payload. Slack signs every request:\n//   signature = 'v0=' + HMAC_SHA256(signing_secret, `v0:{ts}:{raw_body}`)\n// so we must hash the EXACT raw body bytes — the webhook has Raw Body = ON (body arrives binary).\n// Slash-command bodies are plain form-urlencoded fields (token, command, text, user_name,\n// response_url, ...) — there is no `payload` JSON wrapper as in interactivity.\nconst cfg = {};\n$('Read Config').all().forEach(i => { if (i.json && i.json.key) cfg[i.json.key] = i.json.value; });\nconst secret = (cfg.slack_signing_secret || '').toString();\n\nconst wh = $('Slash Command Webhook').first() || {};\nconst headers = (wh.json && wh.json.headers) || {};\nconst given_sig = (headers['x-slack-signature'] || headers['X-Slack-Signature'] || '').toString();\nconst ts = (headers['x-slack-request-timestamp'] || headers['X-Slack-Request-Timestamp'] || '').toString();\n\nlet raw = '';\nconst b = wh.binary;\nif (b && b.data && b.data.data) {\n  raw = Buffer.from(b.data.data, 'base64').toString('utf8');\n} else if (typeof (wh.json && wh.json.body) === 'string') {\n  raw = wh.json.body;\n}\n\n// Hand-parse a couple form fields for logging (URLSearchParams is unreliable in the sandbox).\nconst field = (name) => {\n  const m = raw.match(new RegExp('(?:^|&)' + name + '=([^&]*)'));\n  if (!m) return '';\n  try { return decodeURIComponent(m[1].replace(/\\+/g, ' ')); } catch (e) { return m[1]; }\n};\n\nreturn [{ json: { base: `v0:${ts}:${raw}`, secret, given_sig, ts, command: field('command'), slack_user: field('user_name') } }];"
+      },
+      "id": "wbs-prep-signature-001",
+      "name": "Prep Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "action": "hmac",
+        "type": "SHA256",
+        "value": "={{ $json.base }}",
+        "dataPropertyName": "computed_sig",
+        "secret": "={{ $json.secret }}",
+        "encoding": "hex"
+      },
+      "id": "wbs-hmac-0001",
+      "name": "HMAC",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 1,
+      "position": [
+        720,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// W_Batch_Start — Verify the Slack slash-command signature, then allow the batch to start.\n// Security gate for the otherwise-public POST webhook: anything that fails verification returns []\n// (the batch is NOT fired). Mirrors W_Abort's Verify & Parse Action — same HMAC compare + 5-min\n// replay guard. Only a genuine, fresh, correctly-signed /dub-batch gets through.\nconst prep = $('Prep Signature').first().json || {};\nconst computed = ($json.computed_sig || '').toString();\nconst given = (prep.given_sig || '').toString();\nconst tsNum = Number(prep.ts);\nconst now = Math.floor(Date.now() / 1000);\n\nif (!prep.secret) { console.warn('W_Batch_Start: slack_signing_secret missing from config — rejecting'); return []; }\nif (!given || !computed) { console.warn('W_Batch_Start: missing signature/hash — rejecting'); return []; }\nif (!tsNum || Math.abs(now - tsNum) > 300) { console.warn('W_Batch_Start: stale or invalid timestamp — rejecting (replay guard)'); return []; }\n\nconst expected = 'v0=' + computed;\nif (expected.length !== given.length || expected !== given) { console.warn('W_Batch_Start: Slack signature mismatch — rejecting'); return []; }\n\nconsole.log(`W_Batch_Start: verified /dub-batch from ${prep.slack_user || 'unknown'}`);\nreturn [{ json: { ok: true, slack_user: prep.slack_user, command: prep.command } }];"
+      },
+      "id": "wbs-verify-0001",
+      "name": "Verify Slack Slash",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "MoQRazOGefZdqk3Y",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/MoQRazOGefZdqk3Y",
+          "cachedResultName": "W_Batch_Feeder - drip input from Batch/"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "id": "wbs-fire-feeder-0001",
+      "name": "Fire W_Batch_Feeder",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1200,
+        100
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fire W_Batch_Feeder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slash Command Webhook": {
+      "main": [
+        [
+          {
+            "node": "Read Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Config": {
+      "main": [
+        [
+          {
+            "node": "Prep Signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep Signature": {
+      "main": [
+        [
+          {
+            "node": "HMAC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HMAC": {
+      "main": [
+        [
+          {
+            "node": "Verify Slack Slash",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Slack Slash": {
+      "main": [
+        [
+          {
+            "node": "Fire W_Batch_Feeder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "WErrorNotify01"
+  },
+  "versionId": "wbs-version-00000001",
+  "meta": {},
+  "id": "WBatchStart00001",
+  "tags": []
+}

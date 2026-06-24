@@ -12,6 +12,15 @@
 // Rejected items have no binary → IF node routes them directly to Update Localizations
 // (writes phase2_outcome and expansion_attempts only; Phase 1 audio stays in Drive).
 // needs_attention=true is set for accepted cells where newRealDur < en_dur × 0.70.
+//
+// CONCEPT-PRESERVATION GATE: before re-TTS, an LLM judge compares each expansion
+// candidate against the ORIGINAL (Phase 1 / W2) translation. Expansion may ADD soft
+// phrasing but must not drop or replace a concept the original conveyed. Cells that
+// fail the gate are NOT re-synthesized — the faithful Phase 1 audio is kept — and are
+// emitted as phase2_outcome='concept_dropped' with needs_attention=true for human review.
+// This catches the regression where expansion rewrites a faithful translation and loses a
+// key concept (e.g. FR "à haute vibration" → "vie plus épanouie"). Toggle: config
+// phase2_concept_gate=false to disable.
 
 const SAMPLE_RATE = 44100;
 const BPS = 2;
@@ -69,6 +78,23 @@ const RETRY_ENABLED = !!(EXPAND_RETRY_HARDER && EXPAND_RETRY_SHORTER);
 if (!RETRY_ENABLED) {
   console.log('Phase 2: retry prompts missing — running single-pass (no attempt 2)');
 }
+
+// Concept-preservation gate. Default ON; set config phase2_concept_gate=false to disable.
+// Prompt is externalizable (prompts sheet key 'concept_gate_system'); falls back to the
+// built-in default below so the gate deploys via code with no required sheet edit.
+const CONCEPT_GATE_ENABLED = String(configMap.phase2_concept_gate ?? 'true').toLowerCase() !== 'false';
+const CONCEPT_GATE_SYSTEM = loadPrompt('concept_gate_system', {}, true) ||
+  `You are a strict meaning-preservation auditor for dubbing translations.
+For each cell you receive the English source ("en"), the ORIGINAL translation ("original"), and an EXPANDED candidate ("candidate") that was lengthened to fill an audio slot.
+Expansion is ALLOWED to ADD soft phrasing, pauses, or gentle invitational language. It is NOT allowed to drop, replace, weaken, or distort any concept the ORIGINAL already conveyed, and it must not contradict the English.
+Judge MEANING, not wording — a faithful rephrase that keeps every concept is fine.
+Priority signals: named/specific nouns, techniques, numbers, negations ("not/never/without") and contrasts ("A not B"). If the ORIGINAL names a specific concept and the CANDIDATE replaces it with something vaguer or different, that is a drop.
+Example of a DROP: original conveys "a high-vibration life" but candidate says only "a fuller life" → the "high vibration" concept was lost → ok=false.
+For each cell output:
+- "ok": true  → every concept in ORIGINAL is still present in CANDIDATE (additions are fine) and CANDIDATE does not contradict EN.
+- "ok": false → a concept from ORIGINAL is missing, replaced, weakened, or contradicted. List the lost/changed concepts (short EN phrases) in "dropped".
+OUTPUT ONLY a JSON object mapping segment_id -> { <lang>: { "ok": true|false, "dropped": ["..."] } }, the SAME segment_ids and langs as the input. No preamble, no markdown, no commentary, no \`\`\`json fences. Start with { and end with }.`;
+if (!CONCEPT_GATE_ENABLED) console.log('Phase 2: concept-preservation gate DISABLED via config (phase2_concept_gate=false)');
 
 const CPS_DEFAULTS = { de: 12, es: 15, fr: 15, pl: 14, pt: 16, it: 14, tr: 14 };
 const LANG_CPS = {};
@@ -376,7 +402,7 @@ function looksLikeRefusal(text) {
 // Diagnostics surfaced on the first emitted item's json.phase2_diag (visible in the
 // node Output panel — n8n Code console.log only reaches server stdout). Captures raw
 // retry-expand samples so we can see exactly what the retry LLM returns without server logs.
-const phase2Diag = { retryRawSamples: [], retryCoverage: [], retryNoTextTotal: 0, refusalsAttempt1: [], refusalsRetry: [] };
+const phase2Diag = { retryRawSamples: [], retryCoverage: [], retryNoTextTotal: 0, refusalsAttempt1: [], refusalsRetry: [], conceptDroppedTotal: 0, conceptDroppedSamples: [] };
 
 // --- batch helpers ---
 const segmentEntries = Object.entries(candidates);
@@ -396,7 +422,7 @@ async function runOneExpandBatch(batch, systemPrompt, charsMultiplier) {
     }
   }
   const body = {
-    model: 'claude-opus-4-7',
+    model: 'claude-opus-4-8',
     max_tokens: 8000,
     system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content: JSON.stringify(userMap, null, 2) }],
@@ -657,16 +683,85 @@ async function fixFormalityInTasks(tasks) {
   console.log(`Phase 2 formality: applied ${applied} informal rewrites`);
 }
 
+// Concept-preservation gate. Returns a Set of `${sid}_${lang}` keys whose expansion
+// candidate dropped/replaced a concept present in the original translation. Only cells
+// whose text actually changed are judged (a candidate identical to the original cannot
+// have lost anything). Batched Sonnet judge, EXPAND_BATCH_SIZE segments per call, CHUNK
+// parallelism. Fail-open: if the judge returns nothing for a cell, it is NOT rejected
+// (we never block a good expansion on a flaky judge call).
+async function runConceptGate(tasks) {
+  if (!CONCEPT_GATE_ENABLED) return new Set();
+  const bySid = {};
+  for (const t of tasks) {
+    const original = asStr(t.info.current);
+    const candidate = asStr(t.newText);
+    if (!candidate || candidate === original) continue;  // no content change → nothing to lose
+    if (!bySid[t.sid]) bySid[t.sid] = { en: candidates[t.sid]?.en || '', langs: {} };
+    bySid[t.sid].langs[t.lang] = { original, candidate };
+  }
+  const entries = Object.entries(bySid);
+  if (entries.length === 0) return new Set();
+
+  const gateBatches = [];
+  for (let i = 0; i < entries.length; i += EXPAND_BATCH_SIZE) gateBatches.push(entries.slice(i, i + EXPAND_BATCH_SIZE));
+
+  async function runOneGateBatch(batch) {
+    const userMap = {};
+    for (const [sid, data] of batch) {
+      userMap[sid] = { en: data.en };
+      for (const [lang, pair] of Object.entries(data.langs)) userMap[sid][lang] = pair;
+    }
+    const body = {
+      model: 'claude-sonnet-4-6',
+      max_tokens: 8000,
+      system: [{ type: 'text', text: CONCEPT_GATE_SYSTEM, cache_control: { type: 'ephemeral' } }],
+      messages: [{ role: 'user', content: JSON.stringify(userMap, null, 2) }],
+    };
+    return parseLLMJson(await callAnthropic.call(this, body));
+  }
+
+  const verdicts = await runAllBatchesParallel.call(this, gateBatches, runOneGateBatch);
+
+  const rejected = new Set();
+  for (const t of tasks) {
+    const v = verdicts[t.sid]?.[t.lang];
+    if (v && (v.ok === false || v.ok === 'false')) {
+      rejected.add(`${t.sid}_${t.lang}`);
+      phase2Diag.conceptDroppedTotal++;
+      if (phase2Diag.conceptDroppedSamples.length < 8) {
+        phase2Diag.conceptDroppedSamples.push({ sid: t.sid, lang: t.lang, dropped: (v.dropped || []).slice(0, 4) });
+      }
+    }
+  }
+  if (rejected.size > 0) {
+    const byLang = {};
+    for (const k of rejected) { const l = k.slice(k.lastIndexOf('_') + 1); byLang[l] = (byLang[l] || 0) + 1; }
+    console.log(`Phase 2 concept gate: rejected ${rejected.size} expansion(s) for concept loss — keeping Phase 1 audio`, JSON.stringify(byLang));
+  }
+  return rejected;
+}
+
 async function runReTtsTasks(tasks) {
-  await fixFalseFriendsInTasks.call(this, tasks);
-  await fixFormalityInTasks.call(this, tasks);
+  // Concept-preservation gate FIRST: drop expansions that lost a concept before spending
+  // false-friend / formality fixes + TTS on them. Rejected cells get a synthetic
+  // 'concept_dropped' result → pickFinal keeps Phase 1 audio and flags needs_attention.
+  const rejected = await runConceptGate.call(this, tasks);
+  const droppedResults = [];
+  const passed = [];
+  for (const t of tasks) {
+    if (rejected.has(`${t.sid}_${t.lang}`)) droppedResults.push({ sid: t.sid, lang: t.lang, outcome: 'concept_dropped' });
+    else passed.push(t);
+  }
+
+  await fixFalseFriendsInTasks.call(this, passed);
+  await fixFormalityInTasks.call(this, passed);
   const results = [];
-  for (let i = 0; i < tasks.length; i += ELEVENLABS_CHUNK) {
-    const slice = tasks.slice(i, i + ELEVENLABS_CHUNK);
+  for (let i = 0; i < passed.length; i += ELEVENLABS_CHUNK) {
+    const slice = passed.slice(i, i + ELEVENLABS_CHUNK);
     const partial = await Promise.all(slice.map(t => reTtsOne.call(this, t)));
     for (const r of partial) results.push(r);
   }
-  return results;
+  return [...results, ...droppedResults];
 }
 
 // =====================================================================
@@ -838,7 +933,7 @@ async function runRetryGroup(tasks, systemPrompt, charsMultiplier) {
       }
     }
     const body = {
-      model: 'claude-opus-4-7',
+      model: 'claude-opus-4-8',
       max_tokens: 8000,
       system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
       messages: [{ role: 'user', content: JSON.stringify(userMap, null, 2) }],
@@ -1012,7 +1107,9 @@ for (const [rk, o] of Object.entries(outcomes)) {
         expansion_attempts:            attempts,
         shorten_retries_in_synthesize: info.phase1_shorten_retries,
         final_speed:                   info.phase1_final_speed,
-        needs_attention:               false,
+        // concept_dropped = expansion lost meaning; Phase 1 audio is faithful but short →
+        // flag for human review. Other rejections (overshoot/no_change/…) are benign.
+        needs_attention:               outcome === 'concept_dropped',
         audio_drive_file_id:           info.audio_drive_file_id,
         phase2_outcome:                outcome,
         needs_retts:                   'FALSE',
@@ -1048,6 +1145,8 @@ if (emitted.length > 0) {
     retryCoverage: phase2Diag.retryCoverage,
     retryNoTextTotal: phase2Diag.retryNoTextTotal,
     retryRawSamples: phase2Diag.retryRawSamples,
+    conceptDroppedTotal: phase2Diag.conceptDroppedTotal,
+    conceptDroppedSamples: phase2Diag.conceptDroppedSamples,
   });
 }
 

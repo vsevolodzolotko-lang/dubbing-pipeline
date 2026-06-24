@@ -1,5 +1,10 @@
 // CPS calibration tool v2.
 //
+// NOTE: the pure CPS math here (base-speed detection, speedsEqual tolerance,
+// confidence thresholds, recommend = round(obs*2)/2) is mirrored in ESM at
+// ui/server/services/cps.js, which powers the operator "Tuning" tab. Keep the two
+// in sync — this file is the offline CSV CLI; that one runs over the live snapshot.
+//
 // Reads one or more `localizations` CSVs exported from the Google Sheet and
 // prints observed chars-per-second (CPS) per language, with optional
 // per-(lang, segment_type) breakdown when a `segments` CSV is provided.

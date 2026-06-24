@@ -44,6 +44,7 @@ const WORKFLOWS = {
     'OpenAI Editor':         'openai_editor.js',
     'Adapt Translations':    'adapt_translations.js',
     'Formality Lint':        'formality_lint.js',
+    'Lexical Lint':          'lexical_lint.js',
   },
   'W3_Synthesize_v2.json': {
     'Expand TTS Jobs':          'expand_tts_jobs.js',
